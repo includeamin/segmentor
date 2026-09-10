@@ -76,6 +76,9 @@ fn parse_codec(track: &Mp4Track) -> Result<CodecConfig> {
             Ok(CodecConfig::Avc {
                 width: avc.width,
                 height: avc.height,
+                profile: avc.avcc.avc_profile_indication,
+                compatibility: avc.avcc.profile_compatibility,
+                level: avc.avcc.avc_level_indication,
                 sequence_parameter_set,
                 picture_parameter_set,
             })

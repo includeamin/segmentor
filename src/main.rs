@@ -8,12 +8,18 @@
 use std::env;
 use std::path::PathBuf;
 
+use config::Config;
 use error::{Error, Result};
 use media::{CodecConfig, TrackKind};
 use source::LocalMediaSource;
 
+mod asset;
+mod config;
 mod error;
 mod fmp4;
+mod hls;
+mod http;
+mod logging;
 mod media;
 mod mp4;
 mod segment;
@@ -21,27 +27,55 @@ mod source;
 
 const APP_NAME: &str = "vod-module-rs";
 
-fn main() {
-    if let Err(error) = run() {
+#[tokio::main]
+async fn main() {
+    if let Err(error) = run().await {
         eprintln!("{APP_NAME}: {error}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<()> {
+async fn run() -> Result<()> {
     let mut arguments = env::args_os().skip(1);
     let Some(command) = arguments.next() else {
         println!("{APP_NAME}");
         return Ok(());
     };
-    if command != "package" {
-        return Err(Error::InvalidMedia(
-            "expected the `package` command".to_owned(),
-        ));
+    match command.to_str() {
+        Some("package") => {
+            let options = PackageOptions::parse(arguments)?;
+            package(&options)
+        }
+        Some("serve") => {
+            let options = ServeOptions::parse(arguments)?;
+            let config = Config::load(options.config)?;
+            let _logging_guard = logging::init(&config.logging)?;
+            http::serve(config).await
+        }
+        _ => Err(Error::InvalidMedia(
+            "expected the `package` or `serve` command".to_owned(),
+        )),
     }
+}
 
-    let options = PackageOptions::parse(arguments)?;
-    package(&options)
+#[derive(Debug)]
+struct ServeOptions {
+    config: PathBuf,
+}
+
+impl ServeOptions {
+    fn parse(mut arguments: impl Iterator<Item = std::ffi::OsString>) -> Result<Self> {
+        let mut config = None;
+        while let Some(argument) = arguments.next() {
+            match argument.to_str() {
+                Some("--config") => config = arguments.next().map(PathBuf::from),
+                _ => return Err(Error::Configuration("unknown serve argument".to_owned())),
+            }
+        }
+        Ok(Self {
+            config: config.ok_or_else(|| Error::Configuration("missing --config".to_owned()))?,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -150,6 +184,7 @@ fn package(options: &PackageOptions) -> Result<()> {
                 height,
                 sequence_parameter_set,
                 picture_parameter_set,
+                ..
             } => format!(
                 "H.264 {width}x{height} (SPS {} bytes, PPS {} bytes)",
                 sequence_parameter_set.len(),

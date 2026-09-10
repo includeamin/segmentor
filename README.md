@@ -24,6 +24,37 @@ cargo run -- package \
 
 Regenerate the synthetic parser fixture and its FFprobe packet manifest with `make fixtures`. FFmpeg is used only for fixture generation and output validation, not by the application.
 
+## HLS service
+
+Start the example service with:
+
+```sh
+make serve
+```
+
+The example asset is available at `http://127.0.0.1:8080/hls/sample/master.m3u8`. Configuration is loaded from `vod.example.toml`; asset IDs map to files beneath one canonical media root, and paths cannot escape that root.
+
+Logging is configured in the same file:
+
+```toml
+[logging]
+level = "info"          # trace, debug, info, warn, or error
+format = "json"         # json or compact
+buffer_capacity = 8192
+```
+
+Logs are written by a dedicated worker thread through a bounded, lossy queue. If the logger cannot keep up, log lines are dropped instead of blocking media requests. Request and segment timing events use `debug`, so the default `info` level records lifecycle and asset-loading events without logging every media request.
+
+Each configured asset exposes:
+
+```text
+/hls/{asset}/master.m3u8
+/hls/{asset}/video/index.m3u8
+/hls/{asset}/audio/index.m3u8
+/hls/{asset}/{track}/init.mp4
+/hls/{asset}/{track}/segments/{index}/media.m4s
+```
+
 ## Documentation
 
 The project handbook uses the same `mdBook` interface as the Rust Book. Install the pinned documentation tool and serve the book with live reload:

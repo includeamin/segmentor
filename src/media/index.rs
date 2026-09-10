@@ -18,7 +18,7 @@ pub(crate) struct Track {
     pub(crate) samples: Vec<Sample>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TrackKind {
     Audio,
     Video,
@@ -33,6 +33,9 @@ pub(crate) enum CodecConfig {
     Avc {
         width: u16,
         height: u16,
+        profile: u8,
+        compatibility: u8,
+        level: u8,
         sequence_parameter_set: Vec<u8>,
         picture_parameter_set: Vec<u8>,
     },
