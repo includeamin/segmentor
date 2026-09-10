@@ -3,7 +3,7 @@
 CARGO ?= cargo
 MDBOOK ?= mdbook
 
-.PHONY: book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check install-doc-tools lint site test
+.PHONY: book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check install-doc-tools lint serve site test
 
 help: ## Show the available targets
 	@printf '%s\n' \
@@ -21,6 +21,7 @@ help: ## Show the available targets
 		'fmt-check  Verify Rust formatting' \
 		'install-doc-tools Install mdBook and Mermaid support' \
 		'lint       Run Clippy with warnings denied' \
+		'serve      Run the example HLS service' \
 		'site       Build mdBook with rustdoc under /api' \
 		'test       Run unit and integration tests'
 
@@ -67,6 +68,9 @@ site: book doc ## Build mdBook with rustdoc under /api
 install-doc-tools: ## Install mdBook and Mermaid support
 	$(CARGO) install mdbook --version 0.5.4 --locked
 	$(CARGO) install mdbook-mermaid --version 0.17.1 --locked
+
+serve: ## Run the example HLS service
+	$(CARGO) run -- serve --config vod.example.toml
 
 ci: fmt-check check lint test doc ## Run every CI check
 

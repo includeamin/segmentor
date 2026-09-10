@@ -1,0 +1,16 @@
+[server]
+listen = "127.0.0.1:3000"
+
+[storage]
+media_root = "tests/fixtures"
+
+[packaging]
+segment_duration_ms = 1000
+
+[logging]
+level = "debug"
+format = "json"
+buffer_capacity = 8192
+
+[assets.sample]
+path = "h264-aac.mp4"

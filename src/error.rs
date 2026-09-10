@@ -20,6 +20,15 @@ pub(crate) enum Error {
     #[error("MP4 error: {0}")]
     Mp4(#[from] ::mp4::Error),
 
+    #[error("configuration error: {0}")]
+    Configuration(String),
+
+    #[error("TOML error: {0}")]
+    Toml(#[from] toml::de::Error),
+
+    #[error("logging initialization error: {0}")]
+    Logging(String),
+
     #[error("unsupported media: {0}")]
     Unsupported(&'static str),
 }

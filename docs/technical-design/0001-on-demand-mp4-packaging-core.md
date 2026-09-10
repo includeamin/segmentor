@@ -5,6 +5,10 @@
 - Updated: 2026-09-10
 - Related ADRs: [ADR 0001](../adr/0001-use-fragmented-mp4-for-media-segments.md)
 
+## Implementation status
+
+The first packaging core and the initial HLS HTTP vertical slice are implemented. The service loads a validated TOML asset catalog at startup, parses and plans each local MP4 once, caches initialization segments, and serves HLS playlists and fragmented MP4 media through Axum. Media fragments are currently assembled in bounded in-memory buffers; streaming source ranges directly into HTTP response bodies remains a performance follow-up before production use.
+
 ## Summary
 
 Build an HTTP origin that reads existing MP4 files and packages their encoded samples on demand as MPEG-DASH and HLS. The first version will transmux compatible audio and video into fragmented MP4 segments; it will not decode or re-encode media.
@@ -208,6 +212,22 @@ Initial performance metrics:
 - source bytes read versus response bytes written;
 - active streams, backpressure time, and aborted responses;
 - errors by parsing, planning, source I/O, and protocol category.
+
+### Structured logging
+
+Service logs use `tracing` fields rather than interpolated prose. The configured output format is either newline-delimited JSON for production collectors or compact text for local development. The configured level is one of `trace`, `debug`, `info`, `warn`, or `error`.
+
+Logging must not apply stdout backpressure to media requests. A dedicated `tracing-appender` worker writes log records from a bounded, lossy queue. When the queue is full, records are dropped instead of blocking request tasks. The worker guard remains alive for the service lifetime so queued records are flushed during orderly shutdown.
+
+The level policy limits hot-path cost:
+
+- `info`: process lifecycle and one event per asset loaded at startup;
+- `debug`: HTTP request completion and one event per generated media segment;
+- `warn`: rejected client requests such as unknown assets or segments;
+- `error`: internal request failures and shutdown-listener failures;
+- `trace`: reserved for temporary diagnostics and never used per media sample.
+
+No event logs media payloads, sample arrays, authentication values, or filesystem paths at `info`. Disabled `debug` events are filtered before formatting, and there is no event per MP4 sample.
 
 ## LL-HLS boundary
 
