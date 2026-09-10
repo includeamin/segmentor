@@ -1,0 +1,57 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build documentation site
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install documentation tools
+        run: |
+          curl --fail --location --output mdbook.tar.gz https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz
+          echo "3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7  mdbook.tar.gz" | sha256sum --check
+          tar --extract --gzip --file mdbook.tar.gz
+          install -m 0755 mdbook "$HOME/.cargo/bin/mdbook"
+          curl --fail --location --output mdbook-mermaid.tar.gz https://github.com/badboy/mdbook-mermaid/releases/download/v0.17.1/mdbook-mermaid-v0.17.1-x86_64-unknown-linux-gnu.tar.gz
+          echo "9afcfa5b8463afe606d48595a7ae338564302903e626ea5b6edb8007d29393a5  mdbook-mermaid.tar.gz" | sha256sum --check
+          tar --extract --gzip --file mdbook-mermaid.tar.gz
+          install -m 0755 mdbook-mermaid "$HOME/.cargo/bin/mdbook-mermaid"
+
+      - name: Build documentation
+        run: make site
+
+      - name: Upload documentation
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/book
+
+  deploy:
+    name: Deploy to GitHub Pages
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy documentation
+        id: deployment
+        uses: actions/deploy-pages@v4
