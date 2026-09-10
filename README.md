@@ -32,7 +32,7 @@ Start the example service with:
 make serve
 ```
 
-The example asset is available at `http://127.0.0.1:8080/hls/sample/master.m3u8`. Configuration is loaded from `vod.example.toml`; asset IDs map to files beneath one canonical media root, and paths cannot escape that root.
+The example asset is available at `http://127.0.0.1:3000/hls/sample/master.m3u8`. Configuration is loaded from `vod.example.toml`; asset IDs map to files beneath one canonical media root, and paths cannot escape that root.
 
 Logging is configured in the same file:
 
@@ -53,7 +53,13 @@ Each configured asset exposes:
 /hls/{asset}/audio/index.m3u8
 /hls/{asset}/{track}/init.mp4
 /hls/{asset}/{track}/segments/{index}/media.m4s
+/dash/{asset}/manifest.mpd
+/dash/{asset}/{track}/init.mp4
+/dash/{asset}/{track}/segments/{index}/media.m4s
+/metrics
 ```
+
+Initialization and media responses support single byte ranges, strong ETags, and immutable content-versioned URLs. Media payloads are read through a bounded backpressured stream instead of buffering the complete segment in each HTTP request.
 
 ## Documentation
 

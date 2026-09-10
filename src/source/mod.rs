@@ -32,6 +32,7 @@ pub(crate) struct SourceIdentity {
     pub(crate) length: u64,
     pub(crate) modified_seconds: i64,
     pub(crate) modified_nanoseconds: i64,
+    pub(crate) moov_sha256: Option<[u8; 32]>,
 }
 
 pub(crate) trait MediaSource {

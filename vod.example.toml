@@ -12,5 +12,20 @@ level = "debug"
 format = "json"
 buffer_capacity = 8192
 
+[limits]
+max_assets = 1000
+max_source_bytes = 1099511627776
+max_metadata_bytes = 67108864
+max_tracks = 8
+max_samples_per_track = 2000000
+max_samples_per_segment = 100000
+max_segment_bytes = 67108864
+max_segment_jobs = 8
+segment_queue_timeout_ms = 2000
+stream_chunk_bytes = 262144
+max_request_header_bytes = 16384
+request_timeout_ms = 30000
+max_startup_parses = 4
+
 [assets.sample]
 path = "h264-aac.mp4"

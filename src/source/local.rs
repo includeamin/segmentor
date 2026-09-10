@@ -1,4 +1,5 @@
 use std::fs::File;
+use std::io::{Seek, SeekFrom};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::Path;
 
@@ -25,13 +26,32 @@ impl LocalMediaSource {
             length: metadata.len(),
             modified_seconds: metadata.mtime(),
             modified_nanoseconds: metadata.mtime_nsec(),
+            moov_sha256: None,
         };
 
         Ok(Self { file, identity })
     }
 
-    pub(crate) fn open_file(&self) -> Result<File> {
-        Ok(File::open(&self.identity.canonical_path)?)
+    pub(crate) fn parser_file(&self) -> Result<File> {
+        let mut file = self.file.try_clone()?;
+        file.seek(SeekFrom::Start(0))?;
+        Ok(file)
+    }
+
+    pub(crate) fn verify_unchanged(&self) -> Result<()> {
+        let metadata = self.file.metadata()?;
+        let unchanged = metadata.dev() == self.identity.device
+            && metadata.ino() == self.identity.inode
+            && metadata.len() == self.identity.length
+            && metadata.mtime() == self.identity.modified_seconds
+            && metadata.mtime_nsec() == self.identity.modified_nanoseconds;
+        if unchanged {
+            Ok(())
+        } else {
+            Err(Error::InvalidMedia(
+                "source changed while it was being parsed".to_owned(),
+            ))
+        }
     }
 }
 

@@ -3,10 +3,11 @@ use std::path::Path;
 
 use bytes::Bytes;
 
+use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
 use crate::media::{MediaIndex, Track, TrackKind};
 use crate::segment::{SegmentPlan, TrackSegment};
-use crate::source::LocalMediaSource;
+use crate::source::{LocalMediaSource, MediaSource};
 use crate::{fmp4, mp4, segment};
 
 #[derive(Debug)]
@@ -15,13 +16,18 @@ pub(crate) struct PackagedAsset {
     pub(crate) index: MediaIndex,
     pub(crate) plan: SegmentPlan,
     init_segments: HashMap<TrackKind, Bytes>,
+    limits: LimitsConfig,
 }
 
 impl PackagedAsset {
-    pub(crate) fn load(path: impl AsRef<Path>, segment_duration_ms: u64) -> Result<Self> {
+    pub(crate) fn load(
+        path: impl AsRef<Path>,
+        segment_duration_ms: u64,
+        limits: &LimitsConfig,
+    ) -> Result<Self> {
         let source = LocalMediaSource::open(path)?;
-        let index = mp4::parse(&source)?;
-        let plan = segment::plan(&index, segment_duration_ms)?;
+        let index = mp4::parse(&source, limits)?;
+        let plan = segment::plan(&index, segment_duration_ms, limits)?;
         let init_segments = index
             .tracks
             .iter()
@@ -37,6 +43,7 @@ impl PackagedAsset {
             index,
             plan,
             init_segments,
+            limits: limits.clone(),
         })
     }
 
@@ -55,7 +62,11 @@ impl PackagedAsset {
             .ok_or(Error::Unsupported("requested track is not present"))
     }
 
-    pub(crate) fn media_segment(&self, kind: TrackKind, segment_index: u32) -> Result<Bytes> {
+    pub(crate) fn prepare_media_segment(
+        &self,
+        kind: TrackKind,
+        segment_index: u32,
+    ) -> Result<fmp4::PreparedSegment> {
         let track = self.track(kind)?;
         let segment = self
             .plan
@@ -74,8 +85,25 @@ impl PackagedAsset {
             .checked_add(1)
             .ok_or_else(|| Error::InvalidMedia("sequence number overflow".to_owned()))?;
 
-        fmp4::write_media_segment(&self.source, track, track_segment, sequence_number)
-            .map(Bytes::from)
+        fmp4::prepare_media_segment(track, track_segment, sequence_number, &self.limits)
+    }
+
+    pub(crate) fn read_range(&self, range: crate::source::ByteRange) -> Result<Bytes> {
+        self.source.read_range(range)
+    }
+
+    pub(crate) fn version(&self) -> String {
+        self.index
+            .source
+            .moov_sha256
+            .expect("parsed assets always have a moov hash")
+            .iter()
+            .take(8)
+            .fold(String::with_capacity(16), |mut version, byte| {
+                use std::fmt::Write;
+                write!(version, "{byte:02x}").expect("writing to a String cannot fail");
+                version
+            })
     }
 
     pub(crate) fn track_segments(&self, track_id: u32) -> impl Iterator<Item = TrackSegment> + '_ {

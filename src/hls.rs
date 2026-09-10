@@ -19,11 +19,12 @@ pub(crate) fn master_playlist(asset: &PackagedAsset) -> Result<String> {
         return Err(Error::Unsupported("HLS video must be H.264"));
     };
     let mut codecs = format!("avc1.{profile:02x}{compatibility:02x}{level:02x}");
+    let version = asset.version();
     let mut playlist = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
     let audio_attribute = if audio.is_some() {
         codecs.push_str(",mp4a.40.2");
         playlist.push_str(
-            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/index.m3u8\"\n",
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/index.m3u8?v={version}\"\n",
         );
         ",AUDIO=\"audio\""
     } else {
@@ -37,12 +38,13 @@ pub(crate) fn master_playlist(asset: &PackagedAsset) -> Result<String> {
         "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},CODECS=\"{codecs}\",RESOLUTION={width}x{height}{audio_attribute}"
     )
     .expect("writing to a String cannot fail");
-    playlist.push_str("video/index.m3u8\n");
+    writeln!(playlist, "video/index.m3u8?v={version}").expect("writing to a String cannot fail");
     Ok(playlist)
 }
 
 pub(crate) fn media_playlist(asset: &PackagedAsset, kind: TrackKind) -> Result<String> {
     let track = asset.track(kind)?;
+    let version = asset.version();
     let segments = asset.track_segments(track.id).collect::<Vec<_>>();
     let target_duration = segments
         .iter()
@@ -50,7 +52,7 @@ pub(crate) fn media_playlist(asset: &PackagedAsset, kind: TrackKind) -> Result<S
         .max()
         .unwrap_or(1);
     let mut playlist = format!(
-        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target_duration}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"init.mp4\"\n"
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target_duration}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"init.mp4?v={version}\"\n"
     );
     for (index, segment) in segments.iter().enumerate() {
         let milliseconds = segment
@@ -60,7 +62,7 @@ pub(crate) fn media_playlist(asset: &PackagedAsset, kind: TrackKind) -> Result<S
             .ok_or_else(|| Error::InvalidMedia("segment duration overflow".to_owned()))?;
         writeln!(
             playlist,
-            "#EXTINF:{}.{:03},\nsegments/{index}/media.m4s",
+            "#EXTINF:{}.{:03},\nsegments/{index}/media.m4s?v={version}",
             milliseconds / 1000,
             milliseconds % 1000
         )
@@ -99,7 +101,8 @@ mod tests {
 
     fn asset() -> PackagedAsset {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/h264-aac.mp4");
-        PackagedAsset::load(path, 1000).expect("fixture should load")
+        PackagedAsset::load(path, 1000, &crate::config::LimitsConfig::default())
+            .expect("fixture should load")
     }
 
     #[test]
@@ -107,8 +110,8 @@ mod tests {
         let playlist = master_playlist(&asset()).expect("master playlist should render");
 
         assert!(playlist.contains("CODECS=\"avc1.64000d,mp4a.40.2\""));
-        assert!(playlist.contains("URI=\"audio/index.m3u8\""));
-        assert!(playlist.ends_with("video/index.m3u8\n"));
+        assert!(playlist.contains("URI=\"audio/index.m3u8?v="));
+        assert!(playlist.contains("video/index.m3u8?v="));
     }
 
     #[test]
@@ -117,8 +120,9 @@ mod tests {
             media_playlist(&asset(), TrackKind::Video).expect("media playlist should render");
 
         assert!(playlist.contains("#EXT-X-TARGETDURATION:1"));
-        assert!(playlist.contains("#EXT-X-MAP:URI=\"init.mp4\""));
+        assert!(playlist.contains("#EXT-X-MAP:URI=\"init.mp4?v="));
         assert_eq!(playlist.matches("#EXTINF:1.000,").count(), 3);
-        assert!(playlist.ends_with("segments/2/media.m4s\n#EXT-X-ENDLIST\n"));
+        assert!(playlist.contains("segments/2/media.m4s?v="));
+        assert!(playlist.ends_with("#EXT-X-ENDLIST\n"));
     }
 }

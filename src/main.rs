@@ -15,6 +15,7 @@ use source::LocalMediaSource;
 
 mod asset;
 mod config;
+mod dash;
 mod error;
 mod fmp4;
 mod hls;
@@ -124,8 +125,9 @@ impl PackageOptions {
 
 fn package(options: &PackageOptions) -> Result<()> {
     let source = LocalMediaSource::open(&options.input)?;
-    let index = mp4::parse(&source)?;
-    let plan = segment::plan(&index, options.segment_duration_ms)?;
+    let limits = config::LimitsConfig::default();
+    let index = mp4::parse(&source, &limits)?;
+    let plan = segment::plan(&index, options.segment_duration_ms, &limits)?;
     std::fs::create_dir_all(&options.output)?;
 
     for track in &index.tracks {
@@ -147,7 +149,8 @@ fn package(options: &PackageOptions) -> Result<()> {
                 .index
                 .checked_add(1)
                 .ok_or_else(|| Error::InvalidMedia("sequence number overflow".to_owned()))?;
-            let media = fmp4::write_media_segment(&source, track, track_segment, sequence_number)?;
+            let media =
+                fmp4::write_media_segment(&source, track, track_segment, sequence_number, &limits)?;
             std::fs::write(
                 options
                     .output

@@ -1,3 +1,4 @@
+use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
 use crate::media::{MediaIndex, Track, TrackKind};
 
@@ -21,7 +22,11 @@ pub(crate) struct TrackSegment {
     pub(crate) duration: u64,
 }
 
-pub(crate) fn plan(index: &MediaIndex, target_duration_ms: u64) -> Result<SegmentPlan> {
+pub(crate) fn plan(
+    index: &MediaIndex,
+    target_duration_ms: u64,
+    limits: &LimitsConfig,
+) -> Result<SegmentPlan> {
     let video_tracks = index
         .tracks
         .iter()
@@ -83,6 +88,14 @@ pub(crate) fn plan(index: &MediaIndex, target_duration_ms: u64) -> Result<Segmen
                 end_time,
                 end_sample == video.samples.len(),
             )?);
+        }
+        if tracks
+            .iter()
+            .any(|track| track.end_sample - track.first_sample > limits.max_samples_per_segment)
+        {
+            return Err(Error::InvalidMedia(
+                "segment sample count exceeds configured limit".to_owned(),
+            ));
         }
 
         segments.push(Segment {
@@ -186,9 +199,10 @@ mod tests {
     fn creates_three_keyframe_aligned_segments() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/h264-aac.mp4");
         let source = LocalMediaSource::open(path).expect("fixture should open");
-        let index = mp4::parse(&source).expect("fixture should parse");
+        let limits = LimitsConfig::default();
+        let index = mp4::parse(&source, &limits).expect("fixture should parse");
 
-        let plan = plan(&index, 1000).expect("fixture should be segmentable");
+        let plan = plan(&index, 1000, &limits).expect("fixture should be segmentable");
 
         assert_eq!(plan.segments.len(), 3);
         let video = index
