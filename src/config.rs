@@ -13,6 +13,7 @@ pub(crate) struct Config {
     pub(crate) segment_duration_ms: u64,
     pub(crate) assets: BTreeMap<String, PathBuf>,
     pub(crate) logging: LoggingConfig,
+    pub(crate) limits: LimitsConfig,
 }
 
 impl Config {
@@ -34,6 +35,13 @@ impl Config {
             return Err(Error::Configuration(
                 "logging.buffer_capacity must be greater than zero".to_owned(),
             ));
+        }
+        raw.limits.validate()?;
+        if raw.assets.len() > raw.limits.max_assets {
+            return Err(Error::Configuration(format!(
+                "asset count exceeds configured limit {}",
+                raw.limits.max_assets
+            )));
         }
 
         let media_root = if raw.storage.media_root.is_absolute() {
@@ -75,6 +83,7 @@ impl Config {
             segment_duration_ms: raw.packaging.segment_duration_ms,
             assets,
             logging: raw.logging,
+            limits: raw.limits,
         })
     }
 }
@@ -102,7 +111,76 @@ struct RawConfig {
     packaging: PackagingConfig,
     #[serde(default)]
     logging: LoggingConfig,
+    #[serde(default)]
+    limits: LimitsConfig,
     assets: BTreeMap<String, AssetConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct LimitsConfig {
+    pub(crate) max_assets: usize,
+    pub(crate) max_source_bytes: u64,
+    pub(crate) max_metadata_bytes: u64,
+    pub(crate) max_tracks: usize,
+    pub(crate) max_samples_per_track: usize,
+    pub(crate) max_samples_per_segment: usize,
+    pub(crate) max_segment_bytes: u64,
+    pub(crate) max_segment_jobs: usize,
+    pub(crate) segment_queue_timeout_ms: u64,
+    pub(crate) stream_chunk_bytes: usize,
+    pub(crate) max_request_header_bytes: usize,
+    pub(crate) request_timeout_ms: u64,
+    pub(crate) max_startup_parses: usize,
+}
+
+impl LimitsConfig {
+    fn validate(&self) -> Result<()> {
+        if self.max_assets == 0
+            || self.max_source_bytes == 0
+            || self.max_metadata_bytes == 0
+            || self.max_tracks == 0
+            || self.max_samples_per_track == 0
+            || self.max_samples_per_segment == 0
+            || self.max_segment_bytes == 0
+            || self.max_segment_jobs == 0
+            || self.segment_queue_timeout_ms == 0
+            || self.stream_chunk_bytes == 0
+            || self.max_request_header_bytes == 0
+            || self.request_timeout_ms == 0
+            || self.max_startup_parses == 0
+        {
+            return Err(Error::Configuration(
+                "all resource limits must be greater than zero".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_assets: 1000,
+            max_source_bytes: 1024 * 1024 * 1024 * 1024,
+            max_metadata_bytes: 64 * 1024 * 1024,
+            max_tracks: 8,
+            max_samples_per_track: 2_000_000,
+            max_samples_per_segment: 100_000,
+            max_segment_bytes: 64 * 1024 * 1024,
+            max_segment_jobs: default_segment_jobs(),
+            segment_queue_timeout_ms: 2000,
+            stream_chunk_bytes: 256 * 1024,
+            max_request_header_bytes: 16 * 1024,
+            request_timeout_ms: 30_000,
+            max_startup_parses: 4,
+        }
+    }
+}
+
+fn default_segment_jobs() -> usize {
+    std::thread::available_parallelism()
+        .map_or(2, |parallelism| parallelism.get().saturating_mul(2).min(32))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -222,6 +300,7 @@ mod tests {
         assert_eq!(config.assets.len(), 1);
         assert_eq!(config.logging.level, LogLevel::Info);
         assert_eq!(config.logging.format, LogFormat::Json);
+        assert_eq!(config.limits.max_tracks, 8);
         assert!(config.assets["sample"].ends_with("tests/fixtures/h264-aac.mp4"));
     }
 

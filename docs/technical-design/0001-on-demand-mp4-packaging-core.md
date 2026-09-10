@@ -7,7 +7,31 @@
 
 ## Implementation status
 
-The first packaging core and the initial HLS HTTP vertical slice are implemented. The service loads a validated TOML asset catalog at startup, parses and plans each local MP4 once, caches initialization segments, and serves HLS playlists and fragmented MP4 media through Axum. Media fragments are currently assembled in bounded in-memory buffers; streaming source ranges directly into HTTP response bodies remains a performance follow-up before production use.
+This design is accepted, but not every capability is implemented. Status terms in this document have precise meanings:
+
+- **Implemented:** present in the current code and covered by automated tests.
+- **Pending:** required by this design before the service is production-ready.
+- **Deferred:** intentionally outside this design or postponed to a later design.
+
+| Capability | Status | Notes |
+| --- | --- | --- |
+| Local positioned reads | Implemented | Linux `read_exact_at`; checked source bounds |
+| Progressive MP4 sample indexing | Implemented | H.264/AAC sample tables validated against FFprobe |
+| Keyframe-aligned segment planning | Implemented | One video track and optional audio track |
+| Separate-track fMP4 generation | Implemented | Init segments cached; media segments generated on request |
+| HLS VOD | Implemented | Master and media playlists with fMP4 segments |
+| TOML asset catalog | Implemented | Loaded and validated at startup |
+| Structured non-blocking logs | Implemented | Configurable level/format; bounded lossy queue |
+| Direct bounded HTTP range streaming | Implemented | Header plus coalesced source ranges; 256 KiB default chunks |
+| Enforceable parser/resource limits | Implemented | Validated TOML limits cover source, metadata, tracks, samples, segments, queues, and headers |
+| Source mutation detection | Implemented | Filesystem identity plus pre/post parse `moov` SHA-256 |
+| Explicit edit-list/encryption rejection | Implemented | Raw preflight also rejects external references and multiple descriptions |
+| Runtime cache invalidation/reload | Deferred | Assets are immutable for process lifetime; requires a separate lifecycle design |
+| DASH VOD | Implemented | Static MPD reuses separate-track fMP4 artifacts |
+| Automated HLS/DASH decode suite | Implemented | FFmpeg consumes both protocols over an ephemeral HTTP server |
+| Formal HLS/DASH conformance tools | Pending | Required before claiming protocol/CMAF conformance |
+| Browser playback suite | Pending | hls.js/dash.js Playwright coverage is not implemented |
+| Live and LL-HLS | Deferred | Requires a separate source and publication-state design |
 
 ## Summary
 
@@ -34,7 +58,7 @@ The hot path should parse and cache source metadata once, calculate keyframe-ali
 - Bound memory, metadata size, sample count, and source reads for untrusted files.
 - Cache immutable metadata and produce deterministic, CDN-cacheable responses.
 - Keep protocol manifest generation separate from ISO Base Media File Format logic.
-- Establish correctness and performance tests before adding a public configuration surface.
+- Establish correctness and performance evidence before declaring the service production-ready.
 
 ## Non-goals for the first core
 
@@ -44,7 +68,7 @@ The hot path should parse and cache source metadata once, calculate keyframe-ali
 - Remote HTTP source files. The source abstraction should allow them later, but local files come first.
 - Live ingest and LL-HLS playlist state.
 - MPEG-TS output. Initial HLS uses fragmented MP4.
-- Final TOML or YAML configuration design.
+- YAML configuration and configuration hot reload.
 
 ## Input contract
 
@@ -55,7 +79,24 @@ The first implementation accepts a seekable local MP4 with one supported video t
 
 Packaging cannot repair incompatible media. Input must already have suitable codecs and random-access points. Separate files used as an adaptive set must have aligned content, compatible durations, and matching GOP boundaries; that validation belongs after single-file packaging works.
 
-Files with unsupported edit lists, malformed timing tables, external data references, encryption, or unsupported sample descriptions must fail with a precise error rather than produce questionable output.
+Files with unsupported edit lists, malformed timing tables, external data references, encryption, or unsupported sample descriptions must fail with a precise error rather than produce questionable output. The rejection matrix is:
+
+| Input condition | Required behavior | Status |
+| --- | --- | --- |
+| Fragmented MP4 input | Reject as unsupported input | Implemented |
+| Codec other than H.264/AAC-LC | Reject as unsupported media | Implemented |
+| Missing H.264 SPS/PPS | Reject as unsupported media | Implemented |
+| More than one video or audio track | Reject during segment planning | Implemented |
+| Subtitle track | Reject as unsupported media | Implemented |
+| Missing/inconsistent sample tables | Reject as invalid media | Implemented for parsed tables |
+| Sample byte range outside source | Reject as invalid media | Implemented |
+| Any edit list | Reject until edit semantics are implemented | Implemented |
+| Encrypted `encv`/`enca` sample entry | Reject | Implemented |
+| External data reference | Reject | Implemented |
+| More than one sample description per selected track | Reject | Implemented |
+| Source changes while parsing | Discard parse result and fail startup | Implemented |
+
+Unsupported media detected while loading the startup catalog prevents the server from becoming ready. A malformed configured asset is not skipped silently.
 
 ## How an MP4 becomes streamable
 
@@ -118,7 +159,7 @@ The local implementation should use positioned reads so concurrent requests do n
 
 ### MP4 parser
 
-Parse box headers defensively, validate every offset and size against the source length, and extract only metadata needed for packaging. Unknown boxes should normally be skipped by declared size. Nesting depth, box size, track count, sample count, and total metadata allocation require configured limits.
+Parse box headers defensively, validate every offset and size against the source length, and extract only metadata needed for packaging. The bounded raw preflight rejects unsupported edit lists, encrypted entries, external data references, and multiple sample descriptions before `mp4` crate parsing. The adapter then enforces track/sample limits, expanded table counts, checked arithmetic, source ranges, and pre/post parse source identity.
 
 The parser should initially be backed by an established Rust ISO BMFF crate if a prototype proves that it exposes exact sample offsets and timing without copying payload data. We should compare candidate crates with a small fixture corpus before adopting one. Writing a complete parser is not an initial goal.
 
@@ -143,7 +184,7 @@ The writer emits:
 
 The `moof` carries sequence, track, base decode time, sample duration, size, flags, and composition offset information through `mfhd`, `traf`, `tfhd`, `tfdt`, and `trun` boxes. All arithmetic must be checked, and generated offsets must account for the final serialized header sizes.
 
-For high performance, generate the small box headers into bounded buffers and stream payload ranges directly from the source. Group adjacent samples into contiguous reads. Do not collect an entire segment in one `Vec<u8>` unless a measured small-segment threshold justifies it. The HTTP layer should apply backpressure instead of reading faster than the client can receive.
+The HTTP path generates the small `moof`/`mdat` header, groups adjacent samples into source ranges, and streams them in configurable chunks through a two-item bounded channel. Channel backpressure limits producer reads, and receiver cancellation stops subsequent reads. The developer `package` command still assembles complete files in memory because it writes local artifacts rather than serving concurrent clients.
 
 ### Protocol adapters
 
@@ -161,36 +202,57 @@ The initial DASH adapter produces a static MPD with an initialization URL and me
 
 Manifest generation must escape untrusted values and must not expose filesystem paths.
 
-## Request model
+## HTTP contract
 
-The exact public URL design remains open, but the internal request types should distinguish these operations:
+The implemented HLS routes are:
 
-```text
-asset metadata
-HLS master playlist
-HLS media playlist
-DASH MPD
-track initialization segment
-track media segment by number
-```
+| Method | Route | Content type | Cache policy |
+| --- | --- | --- | --- |
+| `GET`, `HEAD` | `/health` | `text/plain` | Framework default |
+| `GET`, `HEAD` | `/hls/{asset}/master.m3u8` | `application/vnd.apple.mpegurl` | `public, max-age=60` |
+| `GET`, `HEAD` | `/hls/{asset}/{track}/index.m3u8` | `application/vnd.apple.mpegurl` | `public, max-age=60` |
+| `GET`, `HEAD` | `/hls/{asset}/{track}/init.mp4` | `video/mp4` | `public, max-age=31536000, immutable` |
+| `GET`, `HEAD` | `/hls/{asset}/{track}/segments/{index}/media.m4s` | `video/mp4` | `public, max-age=31536000, immutable` |
+
+`{track}` is `video` or `audio`. Asset identifiers contain only ASCII letters, digits, hyphens, and underscores. Relative URLs in each playlist resolve beneath that asset's route and never expose a filesystem path. All HLS responses allow cross-origin `GET` and `HEAD` requests.
+
+Current and required status behavior:
+
+| Condition | Status | State |
+| --- | --- | --- |
+| Unknown asset, track, or segment | `404 Not Found` | Implemented |
+| Malformed path parameter | `400 Bad Request` | Provided by Axum |
+| Unexpected generation/I/O failure | `500 Internal Server Error` | Implemented |
+| Unsupported configured media | Startup failure | Implemented |
+| Request body too large | Not applicable to current read-only routes | Implemented by route shape |
+| Single HTTP byte range on init/media | `206`, or `416` when invalid/unsatisfiable | Implemented |
+| Multi-range or suffix range | `416 Range Not Satisfiable` | Deliberate first-release limitation |
+| Conditional `If-None-Match` | Strong ETag and empty `304` | Implemented |
+| Conditional `If-Modified-Since` | Not supported | Deliberate first-release limitation |
+
+Error responses must not include host filesystem paths or media payload data. Before production, internal error bodies must use a stable generic message while details remain in structured logs.
 
 A segment request follows this path:
 
 1. Resolve an opaque asset identifier to an allowed local source.
 2. Look up metadata by stable source identity.
-3. On a miss, parse once and coalesce concurrent requests for the same source.
+3. Retrieve the startup-loaded immutable index and segment plan.
 4. Resolve the requested track and segment number through the segment plan.
 5. Generate the fragment header and stream only the selected source ranges.
 
-## Caching
+## Caching and asset lifecycle
 
-Use separate caches because their values and invalidation behavior differ:
+The current implementation eagerly loads every configured asset before binding the listener. Each process stores one immutable `MediaIndex`, one `SegmentPlan`, and one initialization segment per track. There is no cache miss or request coalescing after startup. Media segments are regenerated for every request and should be cached by a reverse proxy or CDN.
+
+The production design uses separate caches because their values and invalidation behavior differ:
 
 - **Metadata cache:** parsed `MediaIndex` and segment plan, keyed by canonical asset identity plus file size and modification identity.
 - **Manifest/init cache:** small generated responses, keyed by asset version and packaging settings.
 - **Media segments:** deterministic and cacheable by an external reverse proxy or CDN. An in-process segment cache should be added only after measurements justify its memory cost.
 
-Cache misses for the same asset should be coalesced to prevent repeated parsing under burst traffic. Never keep stale metadata after the source identity changes.
+Runtime reload and cache invalidation are deferred to a separate asset-lifecycle design. The current process fails startup if any asset is invalid and treats loaded sources as immutable until restart.
+
+HLS and DASH resource URLs include a version derived from the source `moov` SHA-256. Responses also carry strong resource-specific ETags. A process restart after atomic source replacement therefore produces new media URLs and validators.
 
 ## Concurrency and performance
 
@@ -203,6 +265,44 @@ The intended hot path performs no codec work. Its main costs are metadata lookup
 - Put explicit limits on concurrent metadata parses and open sources.
 - Place a caching proxy or CDN in front of the origin at scale.
 - Measure before adopting Linux-specific I/O such as `io_uring` or `sendfile`; generated headers plus multiple source ranges may make vectored streaming simpler.
+
+### Required resource limits
+
+These are initial safety defaults, not benchmark results. They must become validated TOML settings before arbitrary media is accepted. Configuration may lower them; raising them requires capacity testing.
+
+| Limit | Default | Failure behavior | Status |
+| --- | ---: | --- | --- |
+| Configured assets | 1,000 | Configuration error | Implemented |
+| Source file length | 1 TiB | Unsupported media | Implemented |
+| Parsed MP4 metadata | 64 MiB | Invalid media | Implemented |
+| Tracks per asset | 8 | Unsupported media | Implemented |
+| Samples per track | 2,000,000 | Invalid media | Implemented |
+| Samples per segment per track | 100,000 | Invalid media | Implemented |
+| Generated media segment payload | 64 MiB | Internal error during startup/request | Implemented |
+| Concurrent startup parses | 4 | Queue remaining work in dedicated pool | Implemented |
+| Concurrent segment-generation jobs | 2 per logical CPU, maximum 32 | Queue with timeout, then `503` | Implemented and configurable |
+| Segment-generation queue wait | 2 seconds | `503 Service Unavailable` | Implemented and configurable |
+| Request header bytes | 16 KiB | `431 Request Header Fields Too Large` | Implemented after HTTP parsing |
+| Whole request timeout | 30 seconds | `408 Request Timeout` | Implemented |
+| Logging queue | 8,192 records | Drop new log records | Implemented and configurable |
+
+Limits must be checked before allocation or table expansion. Checked arithmetic remains mandatory even below configured limits.
+
+### Initial performance budgets
+
+These budgets are acceptance targets for a release build on a documented four-core x86-64 Linux reference host with local SSD storage and warm filesystem cache. Benchmarks must record CPU, storage, fixture, and command so results remain comparable.
+
+| Measurement | Initial target |
+| --- | ---: |
+| Warm startup parse and plan, 60-minute asset | p95 below 250 ms per asset |
+| Cached master/media playlist response | p95 below 2 ms server time |
+| Warm 6-second segment generation, excluding client transfer | p95 below 10 ms |
+| Segment bytes read from source | no more than payload bytes plus 256 KiB |
+| Additional buffered memory per streaming request | no more than 512 KiB after direct streaming is implemented |
+| Sustained concurrent streams | 1,000 with fewer than 0.1% origin `5xx` responses |
+| Event-loop blocking | no filesystem operation longer than 1 ms on a Tokio worker |
+
+The HTTP producer uses a two-item queue and a default 256 KiB source chunk, keeping buffered payload near the 512 KiB target plus generated headers and framework overhead.
 
 Initial performance metrics:
 
@@ -218,6 +318,8 @@ Initial performance metrics:
 Service logs use `tracing` fields rather than interpolated prose. The configured output format is either newline-delimited JSON for production collectors or compact text for local development. The configured level is one of `trace`, `debug`, `info`, `warn`, or `error`.
 
 Logging must not apply stdout backpressure to media requests. A dedicated `tracing-appender` worker writes log records from a bounded, lossy queue. When the queue is full, records are dropped instead of blocking request tasks. The worker guard remains alive for the service lifetime so queued records are flushed during orderly shutdown.
+
+Dropped records are exposed as `vod_log_dropped_lines_total` on `/metrics`. A dedicated monitor checks the appender counter every ten seconds and writes a rate-limited warning directly to stderr when it increases, avoiding the saturated queue.
 
 The level policy limits hot-path cost:
 
@@ -235,34 +337,17 @@ LL-HLS is not merely shorter VOD segments. It adds partial segments, rapidly cha
 
 For an already complete MP4, serving small fMP4 parts is possible but does not reduce source-to-viewer latency because the entire source already exists. The first core should produce CMAF-compatible fragments and clean streaming boundaries so LL-HLS can reuse the fragment writer later. Live ingest, part publication, playlist state, and blocking reload belong in a separate technical design.
 
-## How nginx-vod-module works
+## Reference architecture
 
-Kaltura's nginx-vod-module is an NGINX module written primarily in C. NGINX supplies the HTTP server, event loop, request routing, file and upstream I/O, buffer chains, and response filters. The module supplies its own media pipeline:
-
-1. Resolve a local path, remote HTTP source, or mapped media-set description.
-2. Read and parse MP4 metadata, including sample tables and codec configuration.
-3. Cache metadata so segment requests do not repeatedly parse the source.
-4. Select tracks and calculate segment boundaries, optionally aligning them to keyframes.
-5. Generate HLS, DASH, MSS, or HDS manifests with protocol-specific code.
-6. Generate segment container headers with its own HLS, DASH, MP4, and MPEG-TS writers.
-7. Read the selected encoded frames and send them through NGINX buffer chains.
-
-The normal MP4-to-HLS or MP4-to-DASH path is a repackaging path. It does not invoke an `ffmpeg` command and does not require FFmpeg libraries. The module parses MP4 and writes output containers itself, preserving encoded samples when no filter requires decoding.
-
-FFmpeg is an optional build dependency for features that need codec processing:
-
-- thumbnail decoding uses `libavcodec`, with resizing through `libswscale`;
-- volume-map generation decodes audio with `libavcodec`;
-- playback-rate, gain, and mixing filters use FFmpeg libraries such as `libavcodec` and `libavfilter`;
-- some audio filtering configurations also require an encoder such as `libfdk_aac`.
-
-OpenSSL, rather than FFmpeg, supplies optional encryption and decryption support. The relevant lesson for this service is to keep packaging independent from decoding. FFmpeg will be a development-time oracle and validator in iteration one, not a runtime packaging dependency.
+[How nginx-vod-module works](../research/nginx-vod-module.md) records the reference investigation and its optional FFmpeg usage. This design adopts its separation between packaging and decoding, while using Rust, Axum, and Tokio and requiring explicit resource limits before production.
 
 ## Configuration boundary
 
 Iteration one uses TOML only. It is native to the Rust ecosystem, has an unambiguous data model for this configuration, and avoids maintaining duplicate TOML and YAML parsing, diagnostics, examples, and tests. YAML can be proposed later if an operational requirement justifies it.
 
-The configuration loader deserializes TOML into typed settings and validates them before the server binds its listener. Iteration one reads configuration only at startup; hot reload is not supported. Settings include the listen address, one canonical media root, an explicit asset map, segment target duration, cache limits, parser limits, enabled protocols, and public base URL.
+The configuration loader deserializes TOML into typed settings and validates them before the server binds its listener. It currently includes the listen address, one canonical media root, an explicit asset map, target segment duration, and logging level/format/queue capacity. Configuration is read only at startup; hot reload is not supported.
+
+Parser, segment-generation, concurrency, queue, stream-chunk, header, timeout, logging, storage, and asset limits are implemented configuration fields. Protocol toggles and an absolute public base URL are not needed for the current relative-URL origin. Runtime source refresh is deferred to a separate lifecycle design. Unknown fields are rejected so misspelled or premature settings cannot be silently ignored.
 
 ## Security and resource limits
 
@@ -270,37 +355,59 @@ The configuration loader deserializes TOML into typed settings and validates the
 - Use checked arithmetic for offsets, durations, and allocation sizes.
 - Reject paths that escape configured media roots, including through symlinks.
 - Resolve public asset IDs separately from filesystem paths.
-- Cap box nesting, metadata bytes, tracks, samples per track, segment samples, response header size, and parse concurrency.
+- Enforce the concrete box, metadata, track, sample, segment, header, and concurrency limits in this document before accepting arbitrary sources.
 - Return stable client errors for unsupported media and internal errors for unexpected failures without leaking host paths.
-- Add fuzz targets for box parsing and segment planning once those modules exist.
+- Add fuzz targets for the MP4 adapter, table expansion, segment planning, and fragment box serialization. This is pending.
 
 ## Correctness and performance validation
 
-The first vertical-slice milestone is one local H.264/AAC MP4 producing an init segment and one media segment. It is successful only when:
+The validation contract and current evidence are:
 
-1. The source index matches trusted probe output for tracks, duration, sample count, keyframes, and timestamps.
-2. The generated init plus media segment is accepted by FFmpeg or FFprobe without decode errors.
-3. HLS and DASH validators accept generated manifests.
-4. A browser player can seek across the packaged asset.
-5. Segment requests read only metadata and requested payload ranges, not the whole source.
-6. Repeated requests hit the metadata cache and produce byte-identical responses.
+| Check | Status | Evidence or required work |
+| --- | --- | --- |
+| Source index matches trusted tracks, counts, keyframes, offsets, DTS/PTS, and durations | Implemented | Rust test compares every packet with committed FFprobe JSON |
+| Generated init and media fragments parse and decode | Implemented | Package and protocol tests validate generated media with FFmpeg |
+| Complete HLS presentation decodes | Implemented | CI-installed FFmpeg consumes the ephemeral HTTP master URL |
+| HLS protocol validator accepts output | Pending | Add an automated validator suitable for Linux CI |
+| Complete DASH presentation decodes | Implemented | CI-installed FFmpeg consumes the ephemeral HTTP MPD |
+| DASH protocol validator accepts output | Pending | Add maintained DASH-IF conformance tooling |
+| Browser starts, seeks, and plays HLS | Pending | Add Playwright with pinned hls.js |
+| Browser starts, seeks, and plays DASH | Pending | Add Playwright with pinned dash.js after DASH exists |
+| Segment response reads only requested source payload | Implemented | Generated header plus only overlapping source ranges are streamed with backpressure |
+| Repeated generation is byte-identical | Implemented by deterministic construction | Add an explicit digest regression if output stability becomes a public contract |
+| Release benchmarks meet the stated budgets | Pending | Add reproducible benchmark harness and reference-host record |
 
-Test fixtures must cover `moov` before and after `mdat`, `stco` and `co64`, constant and variable frame timing, B-frames with composition offsets, multiple audio sample rates, malformed boxes, and truncated data.
+Fixture coverage is similarly explicit:
 
-Benchmarks should separately measure metadata parsing, segment planning, fragment-header generation, local file throughput, allocation count, and concurrent request behavior. Optimization decisions require profiles from release builds and representative MP4 files.
+| Fixture characteristic | Status |
+| --- | --- |
+| H.264/AAC-LC, `moov` before `mdat`, `stco`, constant video timing, B-frames | Implemented |
+| `moov` after `mdat` | Implemented |
+| `co64` chunk offsets | Pending |
+| Variable frame timing | Pending |
+| Additional AAC sample rates and channel layouts | Pending |
+| No-audio video | Pending |
+| Malformed box sizes/counts | Pending |
+| Truncated metadata and sample payload | Pending |
+| Edit lists | Implemented rejection fixture |
+| Encrypted sample entries | Implemented raw-structure mutation test |
+
+Benchmarks must separately measure metadata parsing, segment planning, fragment-header generation, local file throughput, allocation count, and concurrent request behavior. Optimization decisions require release profiles from representative MP4 files.
 
 ## Implementation stages
 
-1. **Fixture and probe:** generate small synthetic H.264/AAC fixtures, commit their generation recipe, and record trusted metadata using FFprobe.
-2. **Source and parser spike:** test `mp4` 0.14 against exact offsets, timing, malformed-input behavior, and allocation cost. Reject it if the acceptance criteria in the first-iteration decisions are not met.
-3. **Media index:** define protocol-neutral track/sample metadata and validate it against fixtures.
-4. **Segment planner:** implement checked, keyframe-aligned timelines with unit and property tests.
-5. **Fragment writer:** generate one init segment and one media segment, then validate and decode them.
-6. **Minimal HTTP vertical slice:** use Axum and Tokio to expose one mapped asset, one HLS playlist, and separate-track fMP4 segments with streaming responses.
-7. **DASH adapter:** add a static MPD over the same segment plan and fragments.
-8. **Caching and load tests:** coalesce metadata parsing, add limits and metrics, then profile concurrency.
-9. **Configuration:** load and validate the typed TOML service and asset catalog at startup.
-10. **Later designs:** adaptive bitrate sets, remote sources, encryption/DRM, and live/LL-HLS.
+1. **Complete:** generate a synthetic H.264/AAC fixture and commit its FFprobe packet oracle.
+2. **Complete for the supported fixture:** adopt `mp4` 0.14 and derive exact sample metadata without reading `mdat` payloads.
+3. **Complete:** define and test the protocol-neutral media index.
+4. **Complete:** implement checked, keyframe-aligned video and audio segment plans.
+5. **Complete for the supported fixture:** generate separate-track init/media fragments and validate them with FFmpeg.
+6. **Complete:** serve TOML-mapped HLS through Axum and Tokio with bounded direct range streaming.
+7. **Complete:** enforce parser, memory, concurrency, timeout, header, and error-disclosure limits; add source mutation checks and rejection fixtures.
+8. **Complete for functional behavior:** replace HTTP whole-segment buffering with bounded backpressured source-range streaming. Load benchmarks remain pending.
+9. **Partially complete:** automate HLS and DASH decode over HTTP. Formal conformance and browser tests remain pending.
+10. **Complete:** add the static DASH adapter and FFmpeg validation over shared fragments.
+11. **Complete for immutable restart lifecycle:** use versioned resource URLs and ETags. Runtime catalog reload remains deferred.
+12. **Deferred to separate designs:** adaptive bitrate sets, remote sources, encryption/DRM, and live/LL-HLS.
 
 ## First-iteration decisions
 
@@ -330,7 +437,7 @@ Generate fragmented MP4 intended to be CMAF-compatible, HLS VOD playlists using 
 
 Use Axum 0.8 on Tokio 1, with Hyper and Tower through Axum. Axum provides typed routing and responses, Tokio provides scheduling and bounded blocking work, and Tower provides timeouts, tracing, limits, and other middleware without a custom server framework.
 
-The first supported production platform is Linux. Local payload reads use positioned file I/O so requests never share a mutable seek cursor. Blocking opens, metadata parsing, and positioned reads run through a bounded blocking pool. The response body yields a generated header followed by bounded source chunks; yielding is driven by HTTP body polling so downstream backpressure limits reads. Dropping the request future cancels subsequent reads.
+The first supported platform is Linux. Local payload reads use positioned file I/O so requests never share a mutable seek cursor. A semaphore and queue timeout gate segment jobs. The HTTP body receives a generated header and bounded source chunks through a two-item channel; backpressure blocks only the dedicated producer, and receiver cancellation stops subsequent reads.
 
 Do not adopt `io_uring`, memory mapping, or `sendfile` in iteration one. Generated headers plus disjoint source ranges reduce the benefit of a single-file send path. Profile the bounded positioned-read implementation before selecting a Linux-specific optimization.
 
@@ -350,13 +457,15 @@ The route contains `big-buck-bunny`, never a filesystem path. On startup, valida
 
 ### Source identity and mutation
 
-Iteration one treats source media as immutable and requires publishers to replace files atomically rather than modifying them in place. There is no portable filesystem metadata tuple that detects every possible in-place mutation.
+The current process treats source media as immutable after startup. Publishers must not replace or modify configured media while the process is running. Runtime replacement is unsupported until cache invalidation and URL versioning are implemented.
 
-For local Linux files, identify an opened source by canonical path, device, inode, byte length, nanosecond modification time, and a hash of the parsed `moov` bytes. Build and serve the index from an open file handle, compare metadata before and after parsing, and discard the result if it changed. A replacement file receives a new identity and cache entry; existing requests may finish on the old open inode. In-place changes that deliberately preserve all identity fields are unsupported operator error.
+The implemented identity contains canonical path, device, inode, byte length, and nanosecond modification time. It does not yet hash `moov` or compare file metadata before and after parsing.
+
+Before runtime refresh is enabled, extend identity with a hash of the parsed `moov` bytes, compare metadata before and after parsing, and discard a result if the source changed. A replacement file must receive a new identity and versioned public URL; existing requests may finish on the old open inode. In-place changes that deliberately preserve every identity field remain unsupported operator error.
 
 ### Validation tools and fixtures
 
-Use these validation layers:
+Use these validation layers. FFprobe comparison and automated FFmpeg playback are implemented; the remaining items are verification work:
 
 - Rust unit and property tests for box arithmetic, timing rescaling, sample-table expansion, and segment boundaries.
 - Synthetic fixtures generated from FFmpeg test video and sine-wave sources, with the generation command committed alongside expected FFprobe JSON. This avoids third-party media licensing.

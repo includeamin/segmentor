@@ -4,6 +4,8 @@ set -eu
 fixture_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 fixture="$fixture_dir/h264-aac.mp4"
 probe="$fixture_dir/h264-aac.ffprobe.json"
+moov_last="$fixture_dir/h264-aac-moov-last.mp4"
+edit_list="$fixture_dir/h264-aac-edit-list.mp4"
 
 ffmpeg \
     -hide_banner \
@@ -22,9 +24,13 @@ ffmpeg \
     -c:a aac \
     -profile:a aac_low \
     -b:a 96k \
+    -use_editlist 0 \
     -movflags +faststart \
     -y \
     "$fixture"
+
+ffmpeg -hide_banner -loglevel error -i "$fixture" -map 0 -c copy -use_editlist 0 -y "$moov_last"
+ffmpeg -hide_banner -loglevel error -i "$fixture" -map 0 -c copy -use_editlist 1 -movflags +faststart -y "$edit_list"
 
 ffprobe \
     -v error \
@@ -34,4 +40,4 @@ ffprobe \
     -of json \
     "$fixture" > "$probe"
 
-printf 'Generated %s and %s\n' "$fixture" "$probe"
+printf 'Generated MP4 fixtures and %s\n' "$probe"
