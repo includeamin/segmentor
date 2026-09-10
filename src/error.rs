@@ -1,0 +1,27 @@
+use std::io;
+
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub(crate) enum Error {
+    #[error("invalid byte range: offset {offset}, length {length}, source length {source_len}")]
+    InvalidRange {
+        offset: u64,
+        length: u64,
+        source_len: u64,
+    },
+
+    #[error("invalid media data: {0}")]
+    InvalidMedia(String),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+
+    #[error("MP4 error: {0}")]
+    Mp4(#[from] ::mp4::Error),
+
+    #[error("unsupported media: {0}")]
+    Unsupported(&'static str),
+}
+
+pub(crate) type Result<T> = std::result::Result<T, Error>;

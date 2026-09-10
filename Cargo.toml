@@ -1,0 +1,30 @@
+[package]
+name = "vod-module-rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Amin Jamal"]
+description = "A video-on-demand application built with Rust"
+license = "MIT"
+repository = "https://github.com/includeamin/vod-module-rs"
+readme = "README.md"
+
+[dependencies]
+bytes = "1"
+mp4 = "0.14"
+thiserror = "2"
+
+[dev-dependencies]
+proptest = "1"
+serde_json = "1"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
