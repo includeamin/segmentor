@@ -3,7 +3,7 @@
 CARGO ?= cargo
 MDBOOK ?= mdbook
 
-.PHONY: book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check install-doc-tools lint serve site test
+.PHONY: book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve site test
 
 help: ## Show the available targets
 	@printf '%s\n' \
@@ -19,6 +19,8 @@ help: ## Show the available targets
 		'fixtures   Regenerate media test fixtures with FFmpeg' \
 		'fmt        Format Rust sources' \
 		'fmt-check  Verify Rust formatting' \
+		'fuzz       Run media pipeline fuzzing with nightly' \
+		'fuzz-check Compile the fuzz target on stable' \
 		'install-doc-tools Install mdBook and Mermaid support' \
 		'lint       Run Clippy with warnings denied' \
 		'serve      Run the example HLS service' \
@@ -46,6 +48,14 @@ fmt: ## Format Rust sources
 fmt-check: ## Verify Rust formatting
 	$(CARGO) fmt --all -- --check
 
+fuzz-check: ## Compile the fuzz target on stable
+	$(CARGO) check --manifest-path fuzz/Cargo.toml
+
+fuzz: ## Run media pipeline fuzzing with nightly
+	mkdir -p fuzz/corpus/media-pipeline
+	cp tests/fixtures/*.mp4 fuzz/corpus/media-pipeline/
+	$(CARGO) +nightly fuzz run media-pipeline fuzz/corpus/media-pipeline
+
 lint: ## Run Clippy with warnings denied
 	$(CARGO) clippy --all-features --all-targets -- -D warnings
 
@@ -72,7 +82,7 @@ install-doc-tools: ## Install mdBook and Mermaid support
 serve: ## Run the example HLS service
 	$(CARGO) run -- serve --config vod.example.toml
 
-ci: fmt-check check lint test doc ## Run every CI check
+ci: fmt-check check lint test fuzz-check doc ## Run every CI check
 
 clean: ## Remove generated artifacts
 	$(CARGO) clean
