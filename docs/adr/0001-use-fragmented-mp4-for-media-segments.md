@@ -7,9 +7,9 @@
 
 ## Context
 
-The service must package compatible MP4 files on demand for MPEG-DASH and HLS with high throughput and without transcoding. DASH commonly carries ISO Base Media File Format fragments. HLS can carry either MPEG-2 Transport Stream or fragmented MP4, and LL-HLS relies on fragmented MP4 parts.
+The service must package compatible MP4 files on demand for MPEG-DASH and HLS with high throughput and without transcoding. DASH commonly carries ISO Base Media File Format fragments. HLS can carry either MPEG-2 Transport Stream or fragmented MP4.
 
-Maintaining unrelated segment writers for the first DASH and HLS versions would duplicate timing, sample selection, buffering, and validation logic. It would also make a later LL-HLS path diverge from the initial HLS implementation.
+Maintaining unrelated segment writers for the first DASH and HLS versions would duplicate timing, sample selection, buffering, and validation logic.
 
 ## Decision
 
@@ -26,7 +26,7 @@ This decision does not claim complete CMAF conformance until automated conforman
 - One sample-index, segmentation, and fragment-writing path serves both protocols.
 - Encoded sample payloads can usually be copied unchanged from the source MP4.
 - HLS and DASH outputs can share timing and cache behavior.
-- The media path is compatible with a future LL-HLS design.
+- Fragmented MP4 provides one modern media path for both supported VOD protocols.
 - Fragmented MP4 avoids implementing MPEG-TS packetization in the initial core.
 
 ### Negative
@@ -59,4 +59,3 @@ Transcoding can normalize arbitrary input and create bitrate ladders, but it cha
 - Define the initial H.264/AAC input and CMAF compatibility profile.
 - Validate generated fragments with FFmpeg, HLS tools, DASH tools, and representative players.
 - Record a separate ADR before adding MPEG-TS output or claiming full CMAF conformance.
-- Design LL-HLS only after a live or progressive-ingest source model exists.

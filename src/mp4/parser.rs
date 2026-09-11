@@ -525,6 +525,104 @@ mod tests {
     }
 
     #[test]
+    fn parses_video_without_audio() {
+        let source =
+            LocalMediaSource::open(fixture("h264-video-only.mp4")).expect("fixture should open");
+
+        let index = parse(&source, &LimitsConfig::default()).expect("video-only MP4 should parse");
+
+        assert_eq!(index.tracks.len(), 1);
+        assert_eq!(index.tracks[0].kind, TrackKind::Video);
+    }
+
+    #[test]
+    fn parses_44100_hz_stereo_aac() {
+        let source = LocalMediaSource::open(fixture("h264-aac-44100-stereo.mp4"))
+            .expect("fixture should open");
+
+        let index = parse(&source, &LimitsConfig::default()).expect("AAC variant should parse");
+        let audio = index
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Audio)
+            .expect("fixture should contain audio");
+
+        assert_eq!(
+            audio.codec,
+            CodecConfig::Aac {
+                sample_rate: 44_100,
+                channels: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn preserves_variable_sample_durations() {
+        let source = LocalMediaSource::open(fixture("h264-variable-timing.mp4"))
+            .expect("fixture should open");
+
+        let index = parse(&source, &LimitsConfig::default()).expect("VFR fixture should parse");
+        let durations = index.tracks[0]
+            .samples
+            .iter()
+            .map(|sample| sample.duration)
+            .collect::<HashSet<_>>();
+
+        assert!(durations.len() > 1);
+    }
+
+    #[test]
+    fn rejects_malformed_child_box_size() {
+        let mut moov = fixture_moov();
+        moov[8..12].copy_from_slice(&4u32.to_be_bytes());
+
+        let error = validate_raw_moov(&moov).expect_err("undersized child box should fail");
+
+        assert!(error.to_string().contains("box size"));
+    }
+
+    #[test]
+    fn rejects_truncated_metadata() {
+        let moov = fixture_moov();
+
+        let error =
+            validate_raw_moov(&moov[..moov.len() / 2]).expect_err("truncated moov should fail");
+
+        assert!(error.to_string().contains("box size"));
+    }
+
+    #[test]
+    fn rejects_truncated_sample_payload() {
+        let original = fixture("h264-aac.mp4");
+        let original_source = LocalMediaSource::open(&original).expect("fixture should open");
+        let index =
+            parse(&original_source, &LimitsConfig::default()).expect("fixture should parse");
+        let final_sample_end = index
+            .tracks
+            .iter()
+            .flat_map(|track| &track.samples)
+            .map(|sample| sample.offset + u64::from(sample.size))
+            .max()
+            .expect("fixture should contain samples");
+        let truncated =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/h264-aac-truncated-payload.mp4");
+        std::fs::copy(original, &truncated).expect("fixture should copy");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&truncated)
+            .expect("copy should open")
+            .set_len(final_sample_end - 1)
+            .expect("copy should truncate");
+        let source = LocalMediaSource::open(&truncated).expect("truncated fixture should open");
+
+        let error = parse(&source, &LimitsConfig::default())
+            .expect_err("truncated sample payload should fail");
+
+        assert!(error.to_string().contains("sample byte range exceeds"));
+        std::fs::remove_file(truncated).expect("temporary fixture should be removable");
+    }
+
+    #[test]
     fn rejects_multiple_sample_descriptions() {
         let mut moov = fixture_moov();
         let stsd = find_type(&moov, *b"stsd");

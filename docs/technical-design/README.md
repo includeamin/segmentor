@@ -6,7 +6,7 @@ Technical design documents explain a proposed subsystem before or during impleme
 
 | ID | Title | Status |
 | --- | --- | --- |
-| [0001](0001-on-demand-mp4-packaging-core.md) | On-demand MP4 packaging core | Accepted, partially implemented |
+| [0001](0001-on-demand-mp4-packaging-core.md) | On-demand MP4 packaging core | Accepted; verification pending |
 
 ## Workflow
 

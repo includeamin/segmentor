@@ -31,7 +31,7 @@ This design is accepted, but not every capability is implemented. Status terms i
 | Automated HLS/DASH decode suite | Implemented | FFmpeg consumes both protocols over an ephemeral HTTP server |
 | Formal HLS/DASH conformance tools | Pending | Required before claiming protocol/CMAF conformance |
 | Browser playback suite | Pending | hls.js/dash.js Playwright coverage is not implemented |
-| Live and LL-HLS | Deferred | Requires a separate source and publication-state design |
+| Seeded media pipeline fuzzing | Implemented | One target covers preflight, parsing, planning, init writing, and fragment preparation |
 
 ## Summary
 
@@ -66,7 +66,7 @@ The hot path should parse and cache source metadata once, calculate keyframe-ali
 - Creating an adaptive bitrate ladder from one source file.
 - DRM, HLS encryption, subtitles, ad insertion, clipping, or concatenation.
 - Remote HTTP source files. The source abstraction should allow them later, but local files come first.
-- Live ingest and LL-HLS playlist state.
+- Live ingest, simulated live playback, and LL-HLS. This project is currently VOD-only, with no commitment to add live streaming later.
 - MPEG-TS output. Initial HLS uses fragmented MP4.
 - YAML configuration and configuration hot reload.
 
@@ -331,11 +331,9 @@ The level policy limits hot-path cost:
 
 No event logs media payloads, sample arrays, authentication values, or filesystem paths at `info`. Disabled `debug` events are filtered before formatting, and there is no event per MP4 sample.
 
-## LL-HLS boundary
+## VOD-only scope
 
-LL-HLS is not merely shorter VOD segments. It adds partial segments, rapidly changing playlists, blocking playlist reload, preload hints, rendition reports, and strict availability timing. These features require a stateful live or progressively growing source pipeline.
-
-For an already complete MP4, serving small fMP4 parts is possible but does not reduce source-to-viewer latency because the entire source already exists. The first core should produce CMAF-compatible fragments and clean streaming boundaries so LL-HLS can reuse the fragment writer later. Live ingest, part publication, playlist state, and blocking reload belong in a separate technical design.
+This service packages complete, immutable MP4 assets for on-demand playback. Live ingest, simulated live playlists, sliding windows, partial-segment publication, blocking playlist reload, and LL-HLS are excluded from the project scope. Supporting them would require a different stateful ingest and publication architecture and is not part of the current roadmap.
 
 ## Reference architecture
 
@@ -357,7 +355,7 @@ Parser, segment-generation, concurrency, queue, stream-chunk, header, timeout, l
 - Resolve public asset IDs separately from filesystem paths.
 - Enforce the concrete box, metadata, track, sample, segment, header, and concurrency limits in this document before accepting arbitrary sources.
 - Return stable client errors for unsupported media and internal errors for unexpected failures without leaking host paths.
-- Add fuzz targets for the MP4 adapter, table expansion, segment planning, and fragment box serialization. This is pending.
+- The `media_pipeline` fuzz target drives bounded raw MP4 preflight, table expansion, segment planning, init writing, and fragment preparation. Stable CI compiles the target; nightly fuzz campaigns use the synthetic fixtures as seeds.
 
 ## Correctness and performance validation
 
@@ -374,7 +372,7 @@ The validation contract and current evidence are:
 | Browser starts, seeks, and plays HLS | Pending | Add Playwright with pinned hls.js |
 | Browser starts, seeks, and plays DASH | Pending | Add Playwright with pinned dash.js after DASH exists |
 | Segment response reads only requested source payload | Implemented | Generated header plus only overlapping source ranges are streamed with backpressure |
-| Repeated generation is byte-identical | Implemented by deterministic construction | Add an explicit digest regression if output stability becomes a public contract |
+| Repeated generation is byte-identical | Implemented | Integration test compares every generated artifact byte-for-byte across two runs |
 | Release benchmarks meet the stated budgets | Pending | Add reproducible benchmark harness and reference-host record |
 
 Fixture coverage is similarly explicit:
@@ -384,11 +382,11 @@ Fixture coverage is similarly explicit:
 | H.264/AAC-LC, `moov` before `mdat`, `stco`, constant video timing, B-frames | Implemented |
 | `moov` after `mdat` | Implemented |
 | `co64` chunk offsets | Pending |
-| Variable frame timing | Pending |
-| Additional AAC sample rates and channel layouts | Pending |
-| No-audio video | Pending |
-| Malformed box sizes/counts | Pending |
-| Truncated metadata and sample payload | Pending |
+| Variable frame timing | Implemented with two packet-duration classes |
+| Additional AAC sample rates and channel layouts | Implemented for 44.1 kHz stereo alongside 48 kHz mono |
+| No-audio video | Implemented |
+| Malformed box sizes/counts | Implemented for undersized child boxes and continuously exercised by fuzzing |
+| Truncated metadata and sample payload | Implemented |
 | Edit lists | Implemented rejection fixture |
 | Encrypted sample entries | Implemented raw-structure mutation test |
 
@@ -407,7 +405,7 @@ Benchmarks must separately measure metadata parsing, segment planning, fragment-
 9. **Partially complete:** automate HLS and DASH decode over HTTP. Formal conformance and browser tests remain pending.
 10. **Complete:** add the static DASH adapter and FFmpeg validation over shared fragments.
 11. **Complete for immutable restart lifecycle:** use versioned resource URLs and ETags. Runtime catalog reload remains deferred.
-12. **Deferred to separate designs:** adaptive bitrate sets, remote sources, encryption/DRM, and live/LL-HLS.
+12. **Later designs:** adaptive bitrate sets, remote sources, and encryption/DRM. Live streaming remains excluded from project scope.
 
 ## First-iteration decisions
 
@@ -459,9 +457,7 @@ The route contains `big-buck-bunny`, never a filesystem path. On startup, valida
 
 The current process treats source media as immutable after startup. Publishers must not replace or modify configured media while the process is running. Runtime replacement is unsupported until cache invalidation and URL versioning are implemented.
 
-The implemented identity contains canonical path, device, inode, byte length, and nanosecond modification time. It does not yet hash `moov` or compare file metadata before and after parsing.
-
-Before runtime refresh is enabled, extend identity with a hash of the parsed `moov` bytes, compare metadata before and after parsing, and discard a result if the source changed. A replacement file must receive a new identity and versioned public URL; existing requests may finish on the old open inode. In-place changes that deliberately preserve every identity field remain unsupported operator error.
+The implemented identity contains canonical path, device, inode, byte length, nanosecond modification time, and the raw `moov` SHA-256. The parser compares filesystem metadata and the `moov` hash before and after parsing and discards a result if the source changed. A restart after atomic replacement produces a new identity and versioned public URL. In-place changes that deliberately preserve every identity field remain unsupported operator error.
 
 ### Validation tools and fixtures
 

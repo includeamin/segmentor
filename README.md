@@ -12,6 +12,14 @@ make ci
 
 Run `make help` to list the individual build, check, format, lint, test, and documentation targets.
 
+Compile the media-pipeline fuzz target on stable with `make fuzz-check`. To run a fuzz campaign, install the separate nightly tooling. `make fuzz` copies the generated MP4 fixtures into an ignored, writable corpus before starting libFuzzer:
+
+```sh
+rustup toolchain install nightly
+cargo install cargo-fuzz --locked
+make fuzz
+```
+
 ## Packaging prototype
 
 The first implementation slice parses a local H.264/AAC MP4, creates keyframe-aligned segment plans, and writes separate fragmented MP4 audio and video tracks:

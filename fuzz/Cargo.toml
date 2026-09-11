@@ -1,0 +1,25 @@
+[package]
+name = "vod-module-rs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+bytes = "1"
+libfuzzer-sys = "0.4"
+mp4 = "0.14"
+serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+toml = "0.9"
+
+[[bin]]
+name = "media-pipeline"
+path = "fuzz_targets/media_pipeline.rs"
+test = false
+doc = false
+bench = false
