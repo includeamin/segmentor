@@ -29,12 +29,18 @@ make doc
 
 The complete `make site` output places rustdoc under the book's `/api/` path. The documentation workflow publishes the combined site to GitHub Pages after changes reach `main`.
 
+## Implementation guide
+
+The [implementation guide](internals/README.md) explains how each module works and how to contribute to it, starting with a map of the code, the startup and request lifecycles, and the concurrency model.
+
 ## Technical design documents
 
 Technical design documents describe how a feature or subsystem should work before implementation. They capture requirements, data flow, interfaces, performance constraints, risks, and validation plans.
 
 - [Technical design index](technical-design/README.md)
 - [On-demand MP4 packaging core](technical-design/0001-on-demand-mp4-packaging-core.md)
+- [Asset mapper interface](technical-design/0002-asset-map-interface.md)
+- [Production-grade HTTP API](technical-design/0003-production-grade-http-api.md)
 - [Technical design template](technical-design/template.md)
 
 ## Architectural decision records
@@ -47,4 +53,7 @@ Architectural decision records (ADRs) capture durable choices, their context, an
 
 ## Guides
 
+- [Operating the origin](operations.md) covers probes, shutdown, CORS, metrics, and limits for production deployments.
+- [Performance budgets](benchmarks.md) records how the budgets are measured and the current results.
+- [Protocol conformance](conformance.md) lists what the automated conformance suite checks and what still needs vendor validators.
 - [Architecture](architecture.md) records the current boundaries and should evolve with the crate.

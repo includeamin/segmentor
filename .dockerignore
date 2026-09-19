@@ -1,0 +1,6 @@
+# Keep the build context to what the image needs: manifests and sources.
+*
+!Cargo.toml
+!Cargo.lock
+!src/
+!Dockerfile
