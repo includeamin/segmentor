@@ -5,6 +5,7 @@ use axum::http::header::{CACHE_CONTROL, RETRY_AFTER};
 use axum::response::{IntoResponse, Response};
 
 use crate::error::Error;
+use crate::registry::RegistryError;
 
 const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
 
@@ -31,6 +32,13 @@ impl HttpError {
         }
     }
 
+    pub(crate) fn bad_gateway(message: String) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            message,
+        }
+    }
+
     pub(crate) fn unavailable(message: &str) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -39,10 +47,23 @@ impl HttpError {
     }
 }
 
+impl From<RegistryError> for HttpError {
+    fn from(error: RegistryError) -> Self {
+        match error {
+            RegistryError::NotFound => Self::not_found("asset does not exist"),
+            RegistryError::Unavailable(message) => Self::unavailable(&message),
+            RegistryError::BadUpstream(message) => Self::bad_gateway(message),
+            RegistryError::LoadFailed(message) => Self::internal(message),
+        }
+    }
+}
+
 impl From<Error> for HttpError {
     fn from(error: Error) -> Self {
         match error {
             Error::NotFound(message) => Self::not_found(message),
+            Error::Upstream(message) => Self::bad_gateway(message),
+            Error::UpstreamUnavailable(message) => Self::unavailable(&message),
             error => Self::internal(error.to_string()),
         }
     }
@@ -58,6 +79,13 @@ impl IntoResponse for HttpError {
                     error = %self.message,
                 );
                 "service unavailable"
+            } else if self.status == StatusCode::BAD_GATEWAY {
+                tracing::error!(
+                    event = "upstream_failed",
+                    http.status = self.status.as_u16(),
+                    error = %self.message,
+                );
+                "bad gateway"
             } else {
                 tracing::error!(
                     event = "request_failed",

@@ -1,6 +1,5 @@
 //! Middleware: request IDs, metrics, header limits, and load shedding.
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use axum::extract::{MatchedPath, State};
 use axum::http::{HeaderName, HeaderValue, StatusCode};
@@ -9,6 +8,7 @@ use axum::response::{IntoResponse, Response};
 
 use super::error::HttpError;
 use super::state::AppState;
+use crate::observability::request_id;
 
 pub(crate) const X_REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 const MAX_REQUEST_ID_BYTES: usize = 128;
@@ -27,21 +27,14 @@ pub(crate) async fn request_id(mut request: axum::extract::Request, next: Next) 
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         })
         .cloned();
-    let id = supplied.unwrap_or_else(generate_request_id);
+    let id = supplied.unwrap_or_else(|| {
+        HeaderValue::from_str(&request_id::generate())
+            .expect("hexadecimal digits and hyphens are valid header characters")
+    });
     request.headers_mut().insert(X_REQUEST_ID, id.clone());
     let mut response = next.run(request).await;
     response.headers_mut().insert(X_REQUEST_ID, id);
     response
-}
-
-pub(crate) fn generate_request_id() -> HeaderValue {
-    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    let nanoseconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos());
-    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    HeaderValue::from_str(&format!("{nanoseconds:x}-{sequence:x}"))
-        .expect("hexadecimal digits and hyphens are valid header characters")
 }
 
 pub(crate) async fn record_metrics(

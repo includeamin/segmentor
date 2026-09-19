@@ -193,14 +193,22 @@ mod tests {
 
     use super::*;
     use crate::mp4;
-    use crate::source::LocalMediaSource;
+    use crate::source::{LocalMediaSource, MediaSourceKind};
 
     #[test]
     fn creates_three_keyframe_aligned_segments() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/h264-aac.mp4");
-        let source = LocalMediaSource::open(path).expect("fixture should open");
+        let source = MediaSourceKind::Local(std::sync::Arc::new(
+            LocalMediaSource::open(path).expect("fixture should open"),
+        ));
         let limits = LimitsConfig::default();
-        let index = mp4::parse(&source, &limits).expect("fixture should parse");
+        let index = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build")
+            .block_on(mp4::parse(&source, &limits))
+            .expect("fixture should parse")
+            .index;
 
         let plan = plan(&index, 1000, &limits).expect("fixture should be segmentable");
 

@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 use crate::asset::PackagedAsset;
-use crate::config::{Config, CorsConfig, LimitsConfig, LoggingConfig};
+use crate::config::{Config, LimitsConfig};
 use crate::http::{AppState, ConnectionLimits, router, serve_connections};
 use crate::media::TrackKind;
 use crate::observability::metrics::Metrics;
@@ -30,8 +30,9 @@ impl BenchAsset {
     /// # Errors
     ///
     /// Returns the failure message if the file cannot be loaded.
-    pub fn load(path: &Path, segment_duration_ms: u64) -> Result<Self, String> {
-        PackagedAsset::load(path, segment_duration_ms, &LimitsConfig::default())
+    pub async fn load(path: &Path, segment_duration_ms: u64) -> Result<Self, String> {
+        PackagedAsset::load_local(path, segment_duration_ms, &LimitsConfig::default())
+            .await
             .map(|asset| Self(Arc::new(asset)))
             .map_err(|error| error.to_string())
     }
@@ -103,22 +104,20 @@ impl BenchServer {
             limits.max_concurrent_requests = options.max_concurrent_requests;
         }
         let mut assets = BTreeMap::new();
-        assets.insert("asset".to_owned(), path.to_path_buf());
-        let config = Config {
-            listen: "127.0.0.1:0".parse().map_err(|error| format!("{error}"))?,
-            shutdown_delay_ms: 0,
-            shutdown_grace_ms: 1000,
-            cors: CorsConfig::default(),
-            segment_duration_ms: if options.segment_duration_ms == 0 {
-                6000
-            } else {
-                options.segment_duration_ms
-            },
-            assets,
-            logging: LoggingConfig::default(),
-            limits,
+        let canonical = path.canonicalize().map_err(|error| error.to_string())?;
+        assets.insert("asset".to_owned(), canonical.clone());
+        let media_root = canonical
+            .parent()
+            .map_or_else(|| canonical.clone(), Path::to_path_buf);
+        let segment_duration_ms = if options.segment_duration_ms == 0 {
+            6000
+        } else {
+            options.segment_duration_ms
         };
-        let state = AppState::load(&config).map_err(|error| error.to_string())?;
+        let mut config = Config::for_catalog(media_root, assets, segment_duration_ms, limits);
+        config.listen = "127.0.0.1:0".parse().map_err(|error| format!("{error}"))?;
+        let state = AppState::new(&config).map_err(|error| error.to_string())?;
+        state.preload().await.map_err(|error| error.to_string())?;
         let metrics = Arc::clone(&state.metrics);
         let connection_limits = ConnectionLimits {
             max_connections: state.max_connections,

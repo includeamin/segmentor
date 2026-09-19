@@ -6,7 +6,7 @@ The `src/http/` module (plus `observability/metrics.rs`), built on Axum 0.8, Tok
 | --- | --- |
 | `mod.rs` | `serve`: bind, wire shutdown, grace timer |
 | `server.rs` | The accept loop: connection cap, header-read timeout, graceful drain |
-| `state.rs` | `AppState`, startup asset loading, job-slot acquisition |
+| `state.rs` | `AppState::new` (resolver, registry, clients, CORS), `preload`, job-slot acquisition |
 | `router.rs` | Route table and layer order |
 | `middleware.rs` | `request_id`, `record_metrics`, `enforce_header_limit`, `shed_load` |
 | `handlers/` | `health.rs` (health, ready, metrics), `playlist.rs`, `media.rs`; `parse_track` in `mod.rs` |
@@ -26,7 +26,7 @@ Cheaply cloneable shared state passed to every handler and middleware:
 
 | Field | Purpose |
 | --- | --- |
-| `assets` | `Arc<HashMap<String, Arc<PackagedAsset>>>`, immutable after startup |
+| `registry` | `Arc<AssetRegistry>`: `state.asset(id).await` resolves and loads on demand (see [Registry and resolvers](registry-and-resolvers.md)) |
 | `segment_jobs` | Semaphore of `limits.max_segment_jobs` source-read slots |
 | `request_slots` | Semaphore of `limits.max_concurrent_requests` handler slots |
 | `metrics` | `Arc<Metrics>` |
@@ -34,7 +34,7 @@ Cheaply cloneable shared state passed to every handler and middleware:
 | `cors` | Optional prebuilt CORS layer |
 | timeouts and sizes | Queue timeout, idle timeout, request timeout, chunk size, header limit |
 
-`AppState::load(config)` (in `state.rs`) builds the CORS layer (`cors_layer`), loads every asset on a `rayon` pool, checks total `index_bytes()` against `limits.max_index_bytes`, and returns the state. It is synchronous and blocks the caller while it parses, which is fine because it runs before the listener exists. `asset(id)` looks up an asset or returns a `404` error.
+`AppState::new(config)` (in `state.rs`) is synchronous and loads nothing: it builds the CORS layer, the remote-media client and `SourceOpener`, the chosen resolver, and the registry. `preload()` then loads the static catalog before the listener binds, so a bad asset stops startup; with a mapper it does nothing. `asset(id)` is async and delegates to the registry; `RegistryError` becomes `404`, `503`, `502`, or `500` in `http/error.rs`.
 
 ## `serve` and shutdown
 

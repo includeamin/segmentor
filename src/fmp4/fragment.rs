@@ -4,7 +4,7 @@ use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
 use crate::media::{Sample, Track, TrackKind};
 use crate::segment::TrackSegment;
-use crate::source::{ByteRange, LocalMediaSource, MediaSource};
+use crate::source::{ByteRange, MediaSourceKind};
 
 const TRUN_FLAGS: u32 = 0x0000_0f01;
 const TFHD_DEFAULT_BASE_IS_MOOF: u32 = 0x0002_0000;
@@ -18,8 +18,8 @@ pub(crate) struct PreparedSegment {
     pub(crate) content_length: u64,
 }
 
-pub(crate) fn write_media_segment(
-    source: &LocalMediaSource,
+pub(crate) async fn write_media_segment(
+    source: &MediaSourceKind,
     track: &Track,
     segment: TrackSegment,
     sequence_number: u32,
@@ -31,7 +31,7 @@ pub(crate) fn write_media_segment(
     let mut output = Vec::with_capacity(capacity);
     output.extend_from_slice(&prepared.header);
     for range in prepared.ranges {
-        let bytes = source.read_range(range)?;
+        let bytes = source.read_range(range).await?;
         output.extend_from_slice(&bytes);
     }
     Ok(output)

@@ -73,6 +73,8 @@ Each configured asset exposes:
 
 Initialization and media responses support single and suffix byte ranges, `If-Range`, strong ETags, and immutable content-versioned URLs. Media URLs must carry the `v` query parameter the playlists emit; a missing or stale version is a `404`. Media payloads are read through a bounded backpressured stream instead of buffering the complete segment in each HTTP request.
 
+Assets can also be resolved on demand from an external mapper service, including media held on remote HTTP origins; see the [Mapper API reference](docs/mapper-api.md) and [docs/operations.md](docs/operations.md).
+
 CORS, shutdown behavior, concurrency limits, and metrics are configurable in the same file; see [docs/operations.md](docs/operations.md) for production guidance.
 
 ## Documentation

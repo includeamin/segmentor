@@ -27,6 +27,14 @@ pub(crate) struct Metrics {
     duration_sum_micros: Vec<AtomicU64>,
     in_flight: AtomicI64,
     connections_open: AtomicI64,
+    resolver_outcomes: [AtomicU64; RESOLVER_OUTCOMES.len()],
+    cache_events: [AtomicU64; CACHE_EVENTS.len()],
+    loads_ok: AtomicU64,
+    loads_failed: AtomicU64,
+    load_micros: AtomicU64,
+    coalesced_waiters: AtomicU64,
+    loaded_assets: AtomicU64,
+    loaded_bytes: AtomicU64,
     connections_rejected: AtomicU64,
     response_bytes: AtomicU64,
     source_read_bytes: AtomicU64,
@@ -54,6 +62,14 @@ impl Metrics {
             duration_sum_micros: (0..slots).map(|_| AtomicU64::new(0)).collect(),
             in_flight: AtomicI64::new(0),
             connections_open: AtomicI64::new(0),
+            resolver_outcomes: std::array::from_fn(|_| AtomicU64::new(0)),
+            cache_events: std::array::from_fn(|_| AtomicU64::new(0)),
+            loads_ok: AtomicU64::new(0),
+            loads_failed: AtomicU64::new(0),
+            load_micros: AtomicU64::new(0),
+            coalesced_waiters: AtomicU64::new(0),
+            loaded_assets: AtomicU64::new(0),
+            loaded_bytes: AtomicU64::new(0),
             connections_rejected: AtomicU64::new(0),
             response_bytes: AtomicU64::new(0),
             source_read_bytes: AtomicU64::new(0),
@@ -87,6 +103,30 @@ impl Drop for InFlight {
         self.0.in_flight.fetch_sub(1, Relaxed);
     }
 }
+
+/// The result of one call to the asset resolver.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ResolverOutcome {
+    Ok,
+    Unchanged,
+    NotFound,
+    Unavailable,
+    Rejected,
+}
+
+const RESOLVER_OUTCOMES: [&str; 5] = ["ok", "unchanged", "not_found", "unavailable", "rejected"];
+
+/// How a request found (or did not find) a cached resolution.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum CacheEvent {
+    Hit,
+    Miss,
+    Revalidate,
+    Stale,
+    NegativeHit,
+}
+
+const CACHE_EVENTS: [&str; 5] = ["hit", "miss", "revalidate", "stale", "negative_hit"];
 
 /// Decrements the open-connection gauge when dropped.
 #[derive(Debug)]
@@ -135,6 +175,37 @@ impl Metrics {
     pub(crate) fn connection_opened(self: &Arc<Self>) -> OpenConnection {
         self.connections_open.fetch_add(1, Relaxed);
         OpenConnection(Arc::clone(self))
+    }
+
+    pub(crate) fn resolver_result(&self, outcome: ResolverOutcome) {
+        self.resolver_outcomes[outcome as usize].fetch_add(1, Relaxed);
+    }
+
+    pub(crate) fn resolution_event(&self, event: CacheEvent) {
+        self.cache_events[event as usize].fetch_add(1, Relaxed);
+    }
+
+    pub(crate) fn asset_load(&self, succeeded: bool, elapsed: Duration) {
+        if succeeded {
+            &self.loads_ok
+        } else {
+            &self.loads_failed
+        }
+        .fetch_add(1, Relaxed);
+        self.load_micros.fetch_add(
+            u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+            Relaxed,
+        );
+    }
+
+    /// A request that waited on another request's in-flight resolve or load.
+    pub(crate) fn coalesced_waiter(&self) {
+        self.coalesced_waiters.fetch_add(1, Relaxed);
+    }
+
+    pub(crate) fn set_loaded(&self, assets: usize, bytes: u64) {
+        self.loaded_assets.store(assets as u64, Relaxed);
+        self.loaded_bytes.store(bytes, Relaxed);
     }
 
     pub(crate) fn connection_rejected(&self) {
@@ -296,6 +367,38 @@ impl Metrics {
                 self.stream_aborts_client.load(Relaxed),
             ),
         ];
+        let _ = writeln!(
+            out,
+            "# HELP vod_resolver_requests_total Asset resolver calls by outcome.\n# TYPE vod_resolver_requests_total counter"
+        );
+        for (label, count) in RESOLVER_OUTCOMES.iter().zip(&self.resolver_outcomes) {
+            let _ = writeln!(
+                out,
+                "vod_resolver_requests_total{{outcome=\"{label}\"}} {}",
+                count.load(Relaxed)
+            );
+        }
+        let _ = writeln!(
+            out,
+            "# HELP vod_resolution_cache_events_total Resolution cache lookups by result.\n# TYPE vod_resolution_cache_events_total counter"
+        );
+        for (label, count) in CACHE_EVENTS.iter().zip(&self.cache_events) {
+            let _ = writeln!(
+                out,
+                "vod_resolution_cache_events_total{{event=\"{label}\"}} {}",
+                count.load(Relaxed)
+            );
+        }
+        let _ = writeln!(
+            out,
+            "# HELP vod_asset_loads_total Asset loads by outcome.\n# TYPE vod_asset_loads_total counter\nvod_asset_loads_total{{outcome=\"ok\"}} {}\nvod_asset_loads_total{{outcome=\"failed\"}} {}\n# HELP vod_asset_load_seconds_total Time spent loading assets.\n# TYPE vod_asset_load_seconds_total counter\nvod_asset_load_seconds_total {}\n# HELP vod_registry_coalesced_waiters_total Requests that shared another request's resolve or load.\n# TYPE vod_registry_coalesced_waiters_total counter\nvod_registry_coalesced_waiters_total {}\n# HELP vod_loaded_assets Assets currently held in memory.\n# TYPE vod_loaded_assets gauge\nvod_loaded_assets {}\n# HELP vod_loaded_bytes Estimated bytes held by loaded assets.\n# TYPE vod_loaded_bytes gauge\nvod_loaded_bytes {}",
+            self.loads_ok.load(Relaxed),
+            self.loads_failed.load(Relaxed),
+            Duration::from_micros(self.load_micros.load(Relaxed)).as_secs_f64(),
+            self.coalesced_waiters.load(Relaxed),
+            self.loaded_assets.load(Relaxed),
+            self.loaded_bytes.load(Relaxed),
+        );
         for (name, kind, help, value) in gauges_and_counters {
             let _ = writeln!(
                 out,

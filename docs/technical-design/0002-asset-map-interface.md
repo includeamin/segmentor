@@ -1,8 +1,8 @@
 # TDD 0002: Asset mapper interface
 
-- Status: Draft
+- Status: Accepted; implemented
 - Created: 2026-09-19
-- Updated: 2026-09-19
+- Updated: 2026-09-20
 - Related ADRs: None yet. Required before implementation: async media source, outbound HTTP client (see [Decisions](#decisions))
 - Related designs: [TDD 0001](0001-on-demand-mp4-packaging-core.md), [TDD 0003](0003-production-grade-http-api.md) (the hardened HTTP layer this design builds on)
 
@@ -19,12 +19,30 @@ This document defines:
 
 The existing TOML catalog stays as the `static` resolver, so current deployments keep working unchanged.
 
+## Implementation status
+
+Everything in the rollout is implemented and tested: the async media source, the registry, the static and mapper resolvers, `file` and `http` locations, and the SSRF controls. The mapper contract is also published as a standalone reference for mapper authors in [Mapper API reference](../mapper-api.md); how the code works is in [Registry and resolvers](../internals/registry-and-resolvers.md).
+
+Places where the implementation differs from the first draft of this document:
+
+| Draft | Implemented |
+| --- | --- |
+| Registry knobs (`max_cached_resolutions`, `max_loaded_bytes`, `max_concurrent_loads`, `load_queue_timeout_ms`) inside `[resolver.http]` | They apply to both resolvers, so they live in a `[registry]` table. The byte budget is the existing `limits.max_index_bytes` and the concurrent-load bound is the existing `limits.max_startup_parses`, so there is one memory knob |
+| `allowed_http_hosts`, `allow_insecure_http`, and remote timeouts in `[resolver.http]` | A separate `[remote_media]` table, because they govern media reads rather than mapper calls |
+| Address filter: private ranges refused "unless the host is explicitly allow-listed" | Hosts must always be allow-listed, so that clause could never apply. The rule is now an explicit `remote_media.allow_private_addresses` switch, defaulting to off |
+| `MediaSourceKind` with a `stream_range` method | Payload reads use `read_range` in chunks (`stream_chunk_bytes`), which the streaming task already does, so a separate streaming method was unnecessary |
+| Parse over a "virtual reader" to be confirmed by a spike | Confirmed: `mp4::Mp4Reader::read_header` runs over `SparseFile`, which holds only box headers plus `ftyp` and `moov`. The spike passed, so the raw-box-walk fallback was not needed. The same path is now used for local files too, which removed a second read of `moov` |
+| A changed `location` was not part of the cache key | A new location for the same version (a rotated signed URL) also drops the loaded copy, because the loaded asset keeps reading from the URL it was opened with |
+| Startup preload was an open question | `registry.preload` (default on) loads the static catalog before serving so a bad file stops startup. It is a no-op for a mapper |
+| Reachability probe was optional | Implemented as `resolver.http.readiness_probe_interval_ms`; zero disables it |
+| A weak `ETag` | Refused as a validator, since `If-Range` requires a strong one. `Last-Modified` is the fallback |
+
 ## Context
 
 Today the asset lifecycle is fixed at startup (TDD 0001, "Caching and asset lifecycle"; the HTTP layer around it is described in [TDD 0003](0003-production-grade-http-api.md)):
 
 - [src/config/](../../src/config/) parses `[assets.<id>] path = "..."` into `BTreeMap<String, PathBuf>` and validates every path beneath `storage.media_root`.
-- `AppState::load` in [src/http/](../../src/http/) parses every asset with a rayon pool before the listener binds. A bad asset fails startup.
+- Before this design, `AppState::load` parsed every asset with a rayon pool before the listener bound, and a bad asset failed startup. (Now: `AppState::new` plus `preload`, see [Implementation status](#implementation-status).)
 - `PackagedAsset` in [src/asset.rs](../../src/asset.rs) holds a concrete `LocalMediaSource`, the `MediaIndex`, the `SegmentPlan`, and init segments.
 - `AppState.assets` is an immutable `HashMap`. An unknown ID is a `404`. There is no cache miss path, no request coalescing, and no reload.
 - `SourceIdentity` in [src/source/mod.rs](../../src/source/mod.rs) is filesystem-shaped (canonical path, device, inode, mtime).
@@ -415,7 +433,7 @@ Readiness: `/health` remains process liveness. A separate readiness signal repor
 
 ## Rollout
 
-Already done by [TDD 0003](0003-production-grade-http-api.md): the async streaming path with per-read job slots and idle timeouts, precomputed playlists, `v` enforcement, and the index memory budget. The stages below build on it.
+All stages are done. The first items were delivered by [TDD 0003](0003-production-grade-http-api.md): the async streaming path with per-read job slots and idle timeouts, precomputed playlists, `v` enforcement, and the index memory budget. The stages below build on it.
 
 1. **Async media source:** replace `MediaSource` with `MediaSourceKind` (local variant only), make `PackagedAsset::load` and the parser entry point async-aware, and keep every existing test green. This is a refactor with no behavior change.
 2. **Registry and static resolver:** introduce `AssetRegistry`, `AssetResolver::Static`, the async `state.asset()` path, the weighted loaded cache, and single-flight loading, with an optional `lazy = true` for the static resolver to exercise lazy loading.
@@ -439,6 +457,6 @@ Recorded from review of the first draft.
 
 ## Open questions
 
-- **Startup preload.** Should operators be able to list asset IDs to resolve and load at startup (warming) so the first viewer does not pay parse latency? Not in this draft.
-- **Authentication scope.** A single static bearer token is specified. Is token rotation without restart needed (for example re-reading the token file periodically)?
-- **`moov`-only parsing spike.** Can `mp4` 0.14 `Mp4Reader::read_header` run over a virtual reader without fetching `mdat`? Outcome decides between that and the raw-box-walk fallback.
+- **Token rotation.** A single static bearer token is read from the environment at startup. Rotation without a restart (re-reading a file) is not implemented.
+- **Batch resolve.** The obvious first extension if per-request latency on cold assets matters; it would be a new `/v1` path.
+- **Signed-URL lifetime for in-flight streams.** A stream already reading from a signed URL keeps using it after the answer is rotated. Streams that outlive the URL fail; giving the loaded source a swappable location would remove that limit.

@@ -1,3 +1,3 @@
 mod parser;
 
-pub(crate) use parser::parse;
+pub(crate) use parser::{ParsedMedia, parse};

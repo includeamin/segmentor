@@ -15,6 +15,10 @@ ARG RUST_IMAGE=rust:1-slim-bookworm
 ARG RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot
 
 FROM ${RUST_IMAGE} AS chef
+# `aws-lc-sys` (the TLS provider behind reqwest) compiles C code and wants cmake.
+RUN apt-get update \
+ && apt-get install --yes --no-install-recommends build-essential cmake \
+ && rm -rf /var/lib/apt/lists/*
 # The cargo-chef binary is cached in this layer; the toolchain comes from the base image, so
 # rust-toolchain.toml is excluded by .dockerignore and rustup never downloads components.
 RUN cargo install cargo-chef --locked
@@ -52,6 +56,7 @@ LABEL org.opencontainers.image.title="vod-module-rs" \
 
 COPY --from=builder /out/vod-module-rs /usr/local/bin/vod-module-rs
 
+# TLS roots come from the distroless image's CA bundle, so https mappers and origins verify.
 # Runtime contract:
 #   /etc/vod/vod.toml  configuration (mount read-only); set server.listen = "0.0.0.0:3000"
 #   /srv/vod           media root named by storage.media_root (mount read-only)

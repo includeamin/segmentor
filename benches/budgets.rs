@@ -268,12 +268,14 @@ fn resident_kib() -> u64 {
 // Measurements
 // ---------------------------------------------------------------------------------------------
 
-fn startup(report: &mut Report, path: &Path) -> BenchAsset {
+async fn startup(report: &mut Report, path: &Path) -> BenchAsset {
     let mut samples = Vec::new();
     let mut last = None;
     for iteration in 0..12 {
         let started = Instant::now();
-        let asset = BenchAsset::load(path, 6000).expect("long asset should load");
+        let asset = BenchAsset::load(path, 6000)
+            .await
+            .expect("long asset should load");
         let elapsed = started.elapsed();
         if iteration > 0 {
             samples.push(elapsed);
@@ -530,7 +532,7 @@ fn main() {
     match long_asset() {
         None => println!("skipping long-asset checks: FFmpeg is unavailable or failed"),
         Some(path) => {
-            let asset = startup(&mut report, &path);
+            let asset = runtime.block_on(startup(&mut report, &path));
             segment_preparation(&mut report, &asset);
             runtime.block_on(async {
                 let server = BenchServer::start(&path, ServerOptions::default())
