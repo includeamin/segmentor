@@ -3,10 +3,13 @@
 CARGO ?= cargo
 MDBOOK ?= mdbook
 
-.PHONY: book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve site test
+.PHONY: bench bench-enforce conformance book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve site test
 
 help: ## Show the available targets
 	@printf '%s\n' \
+		'bench      Measure the performance budgets (generates a 60-minute asset on first run)' \
+		'bench-enforce Like bench, but fail when a budget is missed' \
+		'conformance Run the black-box HLS/DASH conformance suite' \
 		'book       Build the mdBook documentation' \
 		'book-serve Build, serve, and watch the documentation' \
 		'book-test  Test Rust examples in the book' \
@@ -26,6 +29,15 @@ help: ## Show the available targets
 		'serve      Run the example HLS service' \
 		'site       Build mdBook with rustdoc under /api' \
 		'test       Run unit and integration tests'
+
+bench: ## Measure the performance budgets
+	$(CARGO) bench --bench budgets
+
+bench-enforce: ## Measure the performance budgets and fail on a miss
+	$(CARGO) bench --bench budgets -- --enforce
+
+conformance: ## Run the black-box HLS/DASH conformance suite
+	$(CARGO) test --test conformance
 
 book: ## Build the mdBook documentation
 	$(MDBOOK) build

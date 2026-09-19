@@ -1,20 +1,20 @@
 use std::fmt::Write;
 
-use crate::asset::PackagedAsset;
+use super::Presentation;
 use crate::error::{Error, Result};
 use crate::media::{CodecConfig, Track, TrackKind};
 
-pub(crate) fn manifest(asset: &PackagedAsset) -> Result<String> {
-    let video = asset.track(TrackKind::Video)?;
-    let audio = asset.track(TrackKind::Audio).ok();
-    let duration = presentation_duration(asset)?;
-    let version = asset.version();
+pub(crate) fn manifest(presentation: Presentation<'_>) -> Result<String> {
+    let video = presentation.track(TrackKind::Video)?;
+    let audio = presentation.track(TrackKind::Audio).ok();
+    let duration = presentation_duration(presentation)?;
+    let version = presentation.version();
     let mut manifest = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"static\" mediaPresentationDuration=\"PT{duration}S\" minBufferTime=\"PT1.5S\" profiles=\"urn:mpeg:dash:profile:isoff-main:2011\">\n  <Period start=\"PT0S\">\n"
     );
-    write_video_adaptation(&mut manifest, asset, video, &version)?;
+    write_video_adaptation(&mut manifest, presentation, video, version)?;
     if let Some(audio) = audio {
-        write_audio_adaptation(&mut manifest, asset, audio, &version)?;
+        write_audio_adaptation(&mut manifest, presentation, audio, version)?;
     }
     manifest.push_str("  </Period>\n</MPD>\n");
     Ok(manifest)
@@ -22,7 +22,7 @@ pub(crate) fn manifest(asset: &PackagedAsset) -> Result<String> {
 
 fn write_video_adaptation(
     manifest: &mut String,
-    asset: &PackagedAsset,
+    presentation: Presentation<'_>,
     track: &Track,
     version: &str,
 ) -> Result<()> {
@@ -43,16 +43,16 @@ fn write_video_adaptation(
         "    <AdaptationSet contentType=\"video\" segmentAlignment=\"true\" startWithSAP=\"1\">"
     )
     .expect("writing to a String cannot fail");
-    writeln!(manifest, "      <Representation id=\"video\" bandwidth=\"{}\" codecs=\"{codec}\" mimeType=\"video/mp4\" width=\"{width}\" height=\"{height}\">", estimate_bandwidth(track)?)
+    writeln!(manifest, "      <Representation id=\"video\" bandwidth=\"{}\" codecs=\"{codec}\" mimeType=\"video/mp4\" width=\"{width}\" height=\"{height}\">", presentation.bandwidth(track)?.peak)
         .expect("writing to a String cannot fail");
-    write_segment_template(manifest, asset, track, version);
+    write_segment_template(manifest, presentation, track, version);
     manifest.push_str("      </Representation>\n    </AdaptationSet>\n");
     Ok(())
 }
 
 fn write_audio_adaptation(
     manifest: &mut String,
-    asset: &PackagedAsset,
+    presentation: Presentation<'_>,
     track: &Track,
     version: &str,
 ) -> Result<()> {
@@ -68,35 +68,34 @@ fn write_audio_adaptation(
         "    <AdaptationSet contentType=\"audio\" segmentAlignment=\"true\">"
     )
     .expect("writing to a String cannot fail");
-    writeln!(manifest, "      <Representation id=\"audio\" bandwidth=\"{}\" codecs=\"mp4a.40.2\" mimeType=\"audio/mp4\" audioSamplingRate=\"{sample_rate}\">", estimate_bandwidth(track)?)
+    writeln!(manifest, "      <Representation id=\"audio\" bandwidth=\"{}\" codecs=\"mp4a.40.2\" mimeType=\"audio/mp4\" audioSamplingRate=\"{sample_rate}\">", presentation.bandwidth(track)?.peak)
         .expect("writing to a String cannot fail");
     writeln!(manifest, "        <AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"{channels}\" />")
         .expect("writing to a String cannot fail");
-    write_segment_template(manifest, asset, track, version);
+    write_segment_template(manifest, presentation, track, version);
     manifest.push_str("      </Representation>\n    </AdaptationSet>\n");
     Ok(())
 }
 
 fn write_segment_template(
     manifest: &mut String,
-    asset: &PackagedAsset,
+    presentation: Presentation<'_>,
     track: &Track,
     version: &str,
 ) {
     writeln!(manifest, "        <SegmentTemplate timescale=\"{}\" startNumber=\"0\" initialization=\"$RepresentationID$/init.mp4?v={version}\" media=\"$RepresentationID$/segments/$Number$/media.m4s?v={version}\">", track.timescale)
         .expect("writing to a String cannot fail");
     manifest.push_str("          <SegmentTimeline>\n");
-    for segment in asset.track_segments(track.id) {
+    for segment in presentation.track_segments(track.id) {
         writeln!(manifest, "            <S d=\"{}\" />", segment.duration)
             .expect("writing to a String cannot fail");
     }
     manifest.push_str("          </SegmentTimeline>\n        </SegmentTemplate>\n");
 }
 
-fn presentation_duration(asset: &PackagedAsset) -> Result<String> {
-    let milliseconds = asset
-        .index
-        .tracks
+fn presentation_duration(presentation: Presentation<'_>) -> Result<String> {
+    let milliseconds = presentation
+        .tracks()
         .iter()
         .map(|track| {
             track
@@ -116,32 +115,16 @@ fn presentation_duration(asset: &PackagedAsset) -> Result<String> {
     ))
 }
 
-fn estimate_bandwidth(track: &Track) -> Result<u64> {
-    let bytes = track.samples.iter().try_fold(0u64, |total, sample| {
-        total
-            .checked_add(u64::from(sample.size))
-            .ok_or_else(|| Error::InvalidMedia("track size overflow".to_owned()))
-    })?;
-    bytes
-        .checked_mul(8)
-        .and_then(|bits| bits.checked_mul(u64::from(track.timescale)))
-        .and_then(|scaled| scaled.checked_div(track.duration))
-        .ok_or_else(|| Error::InvalidMedia("bandwidth calculation overflow".to_owned()))
-}
-
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
+    use crate::protocol::fixtures::Loaded;
 
     #[test]
     fn renders_static_manifest_with_both_representations() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/h264-aac.mp4");
-        let asset = PackagedAsset::load(path, 1000, &crate::config::LimitsConfig::default())
-            .expect("fixture should load");
+        let loaded = Loaded::h264_aac();
 
-        let manifest = manifest(&asset).expect("manifest should render");
+        let manifest = manifest(loaded.presentation()).expect("manifest should render");
 
         assert!(manifest.contains("type=\"static\""));
         assert!(manifest.contains("id=\"video\""));
