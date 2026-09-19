@@ -1,5 +1,7 @@
 [server]
 listen = "127.0.0.1:3000"
+shutdown_delay_ms = 0       # keep serving this long after SIGTERM while /ready reports 503
+shutdown_grace_ms = 30000   # then wait at most this long for in-flight streams to finish
 
 [storage]
 media_root = "tests/fixtures"
@@ -26,6 +28,20 @@ stream_chunk_bytes = 262144
 max_request_header_bytes = 16384
 request_timeout_ms = 30000
 max_startup_parses = 4
+max_concurrent_requests = 10000
+response_idle_timeout_ms = 30000
+max_index_bytes = 4294967296
+max_connections = 10000          # raise `ulimit -n` to match
+header_read_timeout_ms = 10000   # also bounds idle keep-alive connections
+
+[cors]
+enabled = true                      # set false when a proxy or CDN adds CORS headers
+allowed_origins = ["*"]             # or exact origins, e.g. ["https://player.example.com"]
+allowed_methods = ["GET", "HEAD"]
+allowed_headers = ["range", "if-none-match", "if-range", "x-request-id"]
+exposed_headers = ["content-length", "content-range", "accept-ranges", "etag", "x-request-id"]
+allow_credentials = false           # cannot be combined with "*"
+max_age_seconds = 86400
 
 [assets.sample]
 path = "h264-aac.mp4"

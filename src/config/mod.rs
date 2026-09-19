@@ -7,9 +7,20 @@ use serde::Deserialize;
 
 use crate::error::{Error, Result};
 
+mod cors;
+mod limits;
+mod logging;
+
+pub(crate) use cors::CorsConfig;
+pub(crate) use limits::LimitsConfig;
+pub(crate) use logging::{LogFormat, LoggingConfig};
+
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
     pub(crate) listen: SocketAddr,
+    pub(crate) shutdown_delay_ms: u64,
+    pub(crate) shutdown_grace_ms: u64,
+    pub(crate) cors: CorsConfig,
     pub(crate) segment_duration_ms: u64,
     pub(crate) assets: BTreeMap<String, PathBuf>,
     pub(crate) logging: LoggingConfig,
@@ -37,6 +48,8 @@ impl Config {
             ));
         }
         raw.limits.validate()?;
+        raw.server.validate()?;
+        raw.cors.validate()?;
         if raw.assets.len() > raw.limits.max_assets {
             return Err(Error::Configuration(format!(
                 "asset count exceeds configured limit {}",
@@ -80,6 +93,9 @@ impl Config {
 
         Ok(Self {
             listen: raw.server.listen,
+            shutdown_delay_ms: raw.server.shutdown_delay_ms,
+            shutdown_grace_ms: raw.server.shutdown_grace_ms,
+            cors: raw.cors,
             segment_duration_ms: raw.packaging.segment_duration_ms,
             assets,
             logging: raw.logging,
@@ -113,127 +129,34 @@ struct RawConfig {
     logging: LoggingConfig,
     #[serde(default)]
     limits: LimitsConfig,
+    #[serde(default)]
+    cors: CorsConfig,
     assets: BTreeMap<String, AssetConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct LimitsConfig {
-    pub(crate) max_assets: usize,
-    pub(crate) max_source_bytes: u64,
-    pub(crate) max_metadata_bytes: u64,
-    pub(crate) max_tracks: usize,
-    pub(crate) max_samples_per_track: usize,
-    pub(crate) max_samples_per_segment: usize,
-    pub(crate) max_segment_bytes: u64,
-    pub(crate) max_segment_jobs: usize,
-    pub(crate) segment_queue_timeout_ms: u64,
-    pub(crate) stream_chunk_bytes: usize,
-    pub(crate) max_request_header_bytes: usize,
-    pub(crate) request_timeout_ms: u64,
-    pub(crate) max_startup_parses: usize,
-}
-
-impl LimitsConfig {
-    fn validate(&self) -> Result<()> {
-        if self.max_assets == 0
-            || self.max_source_bytes == 0
-            || self.max_metadata_bytes == 0
-            || self.max_tracks == 0
-            || self.max_samples_per_track == 0
-            || self.max_samples_per_segment == 0
-            || self.max_segment_bytes == 0
-            || self.max_segment_jobs == 0
-            || self.segment_queue_timeout_ms == 0
-            || self.stream_chunk_bytes == 0
-            || self.max_request_header_bytes == 0
-            || self.request_timeout_ms == 0
-            || self.max_startup_parses == 0
-        {
-            return Err(Error::Configuration(
-                "all resource limits must be greater than zero".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-}
-
-impl Default for LimitsConfig {
-    fn default() -> Self {
-        Self {
-            max_assets: 1000,
-            max_source_bytes: 1024 * 1024 * 1024 * 1024,
-            max_metadata_bytes: 64 * 1024 * 1024,
-            max_tracks: 8,
-            max_samples_per_track: 2_000_000,
-            max_samples_per_segment: 100_000,
-            max_segment_bytes: 64 * 1024 * 1024,
-            max_segment_jobs: default_segment_jobs(),
-            segment_queue_timeout_ms: 2000,
-            stream_chunk_bytes: 256 * 1024,
-            max_request_header_bytes: 16 * 1024,
-            request_timeout_ms: 30_000,
-            max_startup_parses: 4,
-        }
-    }
-}
-
-fn default_segment_jobs() -> usize {
-    std::thread::available_parallelism()
-        .map_or(2, |parallelism| parallelism.get().saturating_mul(2).min(32))
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct LoggingConfig {
-    pub(crate) level: LogLevel,
-    pub(crate) format: LogFormat,
-    pub(crate) buffer_capacity: usize,
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            level: LogLevel::Info,
-            format: LogFormat::Json,
-            buffer_capacity: 8192,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum LogLevel {
-    Trace,
-    Debug,
-    Info,
-    Warn,
-    Error,
-}
-
-impl LogLevel {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Trace => "trace",
-            Self::Debug => "debug",
-            Self::Info => "info",
-            Self::Warn => "warn",
-            Self::Error => "error",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum LogFormat {
-    Compact,
-    Json,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ServerConfig {
     listen: SocketAddr,
+    #[serde(default)]
+    shutdown_delay_ms: u64,
+    #[serde(default = "default_shutdown_grace_ms")]
+    shutdown_grace_ms: u64,
+}
+
+impl ServerConfig {
+    fn validate(&self) -> Result<()> {
+        if self.shutdown_grace_ms == 0 {
+            return Err(Error::Configuration(
+                "server.shutdown_grace_ms must be greater than zero".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+const fn default_shutdown_grace_ms() -> u64 {
+    30_000
 }
 
 #[derive(Debug, Deserialize)]
@@ -269,6 +192,7 @@ const fn default_segment_duration_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::logging::LogLevel;
     use super::*;
 
     fn fixture_directory() -> PathBuf {
@@ -362,5 +286,75 @@ mod tests {
         assert_eq!(config.logging.level, LogLevel::Debug);
         assert_eq!(config.logging.format, LogFormat::Compact);
         assert_eq!(config.logging.buffer_capacity, 1024);
+    }
+
+    fn parse_with(extra: &str) -> Result<Config> {
+        Config::parse(
+            &format!(
+                r#"
+                    [server]
+                    listen = "127.0.0.1:8080"
+                    [storage]
+                    media_root = "."
+                    {extra}
+                    [assets.sample]
+                    path = "h264-aac.mp4"
+                "#
+            ),
+            &fixture_directory(),
+        )
+    }
+
+    #[test]
+    fn cors_defaults_allow_any_origin_and_expose_range_headers() {
+        let config = parse_with("").expect("defaults should be valid");
+
+        assert!(config.cors.enabled);
+        assert_eq!(config.cors.allowed_origins, ["*"]);
+        assert!(
+            config
+                .cors
+                .exposed_headers
+                .iter()
+                .any(|name| name == "content-range")
+        );
+        assert_eq!(config.shutdown_grace_ms, 30_000);
+    }
+
+    #[test]
+    fn parses_explicit_cors_policy() {
+        let config = parse_with(
+            r#"
+            [cors]
+            allowed_origins = ["https://player.example.com", "http://localhost:5173"]
+            allowed_headers = ["range"]
+            allow_credentials = true
+            max_age_seconds = 600
+            "#,
+        )
+        .expect("explicit CORS policy should be valid");
+
+        assert_eq!(config.cors.allowed_origins.len(), 2);
+        assert!(config.cors.allow_credentials);
+        assert_eq!(config.cors.max_age_seconds, 600);
+    }
+
+    #[test]
+    fn rejects_invalid_cors_policies() {
+        for extra in [
+            "[cors]\nallowed_origins = []",
+            "[cors]\nallowed_origins = [\"*\", \"https://a.example\"]",
+            "[cors]\nallow_credentials = true",
+            "[cors]\nallowed_origins = [\"https://a.example/path\"]",
+            "[cors]\nallowed_origins = [\"a.example\"]",
+        ] {
+            parse_with(extra).expect_err(extra);
+        }
+    }
+
+    #[test]
+    fn disabled_cors_skips_validation() {
+        parse_with("[cors]\nenabled = false\nallowed_origins = []")
+            .expect("disabled CORS should not be validated");
     }
 }

@@ -31,6 +31,9 @@ pub(crate) enum Error {
 
     #[error("unsupported media: {0}")]
     Unsupported(&'static str),
+
+    #[error("not found: {0}")]
+    NotFound(&'static str),
 }
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
