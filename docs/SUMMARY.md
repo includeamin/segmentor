@@ -9,6 +9,7 @@
 - [Performance budgets](benchmarks.md)
 - [Protocol conformance](conformance.md)
 - [Mapper API reference](mapper-api.md)
+- [Releasing](releasing.md)
 - [Technical design documents](technical-design/README.md)
   - [On-demand MP4 packaging core](technical-design/0001-on-demand-mp4-packaging-core.md)
   - [Asset mapper interface](technical-design/0002-asset-map-interface.md)
