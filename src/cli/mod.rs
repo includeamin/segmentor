@@ -18,7 +18,7 @@ pub(crate) async fn run(mut arguments: impl Iterator<Item = OsString>) -> Result
         return Ok(());
     };
     match command.to_str() {
-        Some("package") => package::run(arguments),
+        Some("package") => package::run(arguments).await,
         Some("serve") => serve::run(arguments).await,
         _ => Err(Error::InvalidMedia(
             "expected the `package` or `serve` command".to_owned(),

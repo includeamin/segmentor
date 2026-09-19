@@ -3,13 +3,14 @@
 CARGO ?= cargo
 MDBOOK ?= mdbook
 
-.PHONY: bench bench-enforce conformance book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve site test
+.PHONY: bench test-scripts bench-enforce conformance book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve site test
 
 help: ## Show the available targets
 	@printf '%s\n' \
 		'bench      Measure the performance budgets (generates a 60-minute asset on first run)' \
 		'bench-enforce Like bench, but fail when a budget is missed' \
 		'conformance Run the black-box HLS/DASH conformance suite' \
+		'test-scripts Test the release automation scripts' \
 		'book       Build the mdBook documentation' \
 		'book-serve Build, serve, and watch the documentation' \
 		'book-test  Test Rust examples in the book' \
@@ -29,6 +30,9 @@ help: ## Show the available targets
 		'serve      Run the example HLS service' \
 		'site       Build mdBook with rustdoc under /api' \
 		'test       Run unit and integration tests'
+
+test-scripts: ## Test the release automation scripts
+	.github/scripts/test.sh
 
 bench: ## Measure the performance budgets
 	$(CARGO) bench --bench budgets
@@ -94,7 +98,7 @@ install-doc-tools: ## Install mdBook and Mermaid support
 serve: ## Run the example HLS service
 	$(CARGO) run -- serve --config vod.example.toml
 
-ci: fmt-check check lint test fuzz-check doc ## Run every CI check
+ci: fmt-check check lint test test-scripts fuzz-check doc ## Run every CI check
 
 clean: ## Remove generated artifacts
 	$(CARGO) clean

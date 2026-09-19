@@ -5,16 +5,18 @@
 
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
 use crate::media::{CodecConfig, TrackKind};
-use crate::source::LocalMediaSource;
+use crate::mp4::ParsedMedia;
+use crate::source::{LocalMediaSource, MediaSourceKind, Origin};
 use crate::{fmp4, mp4, segment};
 
-pub(super) fn run(arguments: impl Iterator<Item = OsString>) -> Result<()> {
+pub(super) async fn run(arguments: impl Iterator<Item = OsString>) -> Result<()> {
     let options = PackageOptions::parse(arguments)?;
-    package(&options)
+    package(&options).await
 }
 
 #[derive(Debug)]
@@ -61,10 +63,10 @@ impl PackageOptions {
     }
 }
 
-fn package(options: &PackageOptions) -> Result<()> {
-    let source = LocalMediaSource::open(&options.input)?;
+async fn package(options: &PackageOptions) -> Result<()> {
+    let source = MediaSourceKind::Local(Arc::new(LocalMediaSource::open(&options.input)?));
     let limits = LimitsConfig::default();
-    let index = mp4::parse(&source, &limits)?;
+    let ParsedMedia { index, metadata } = mp4::parse(&source, &limits).await?;
     let plan = segment::plan(&index, options.segment_duration_ms, &limits)?;
     std::fs::create_dir_all(&options.output)?;
 
@@ -73,7 +75,7 @@ fn package(options: &PackageOptions) -> Result<()> {
             TrackKind::Audio => "audio",
             TrackKind::Video => "video",
         };
-        let init = fmp4::write_init_segment(&source, track.id)?;
+        let init = fmp4::write_init_segment(&metadata, track.id)?;
         std::fs::write(options.output.join(format!("{label}-init.mp4")), init)?;
 
         for segment in &plan.segments {
@@ -88,7 +90,8 @@ fn package(options: &PackageOptions) -> Result<()> {
                 .checked_add(1)
                 .ok_or_else(|| Error::InvalidMedia("sequence number overflow".to_owned()))?;
             let media =
-                fmp4::write_media_segment(&source, track, track_segment, sequence_number, &limits)?;
+                fmp4::write_media_segment(&source, track, track_segment, sequence_number, &limits)
+                    .await?;
             std::fs::write(
                 options
                     .output
@@ -99,15 +102,23 @@ fn package(options: &PackageOptions) -> Result<()> {
     }
 
     let identity = &index.source;
-    println!(
-        "packaged {} bytes from {} (device {}, inode {}, mtime {}.{:09})",
-        identity.length,
-        identity.canonical_path.display(),
-        identity.device,
-        identity.inode,
-        identity.modified_seconds,
-        identity.modified_nanoseconds
-    );
+    match &identity.origin {
+        Origin::Local {
+            canonical_path,
+            device,
+            inode,
+            modified_seconds,
+            modified_nanoseconds,
+        } => println!(
+            "packaged {} bytes from {} (device {device}, inode {inode}, mtime {modified_seconds}.{modified_nanoseconds:09})",
+            identity.length,
+            canonical_path.display(),
+        ),
+        Origin::Remote { url, validator } => println!(
+            "packaged {} bytes from {url} (validator {validator})",
+            identity.length
+        ),
+    }
     println!(
         "movie: timescale {}, duration {}, segments {}",
         index.movie_timescale,

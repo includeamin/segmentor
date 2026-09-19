@@ -1,11 +1,10 @@
 use ::mp4::{Mp4Reader, WriteBox};
 
 use crate::error::{Error, Result};
-use crate::source::{LocalMediaSource, MediaSource};
+use crate::source::SparseFile;
 
-pub(crate) fn write_init_segment(source: &LocalMediaSource, track_id: u32) -> Result<Vec<u8>> {
-    let file = source.parser_file()?;
-    let reader = Mp4Reader::read_header(file, source.len())?;
+pub(crate) fn write_init_segment(metadata: &SparseFile, track_id: u32) -> Result<Vec<u8>> {
+    let reader = Mp4Reader::read_header(metadata.reader(), metadata.len())?;
     let mut movie = reader.moov.clone();
     movie.traks.retain(|track| track.tkhd.track_id == track_id);
     if movie.traks.len() != 1 {

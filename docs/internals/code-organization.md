@@ -16,10 +16,14 @@ src/
                      cors.rs, range.rs, validators.rs, server.rs, shutdown.rs, stream.rs,
                      handlers/{mod,health,playlist,media}.rs, tests.rs
   asset.rs           PackagedAsset: source, index, plan, init segments, rendered text
+  resolver/          mod.rs (types), catalog.rs (static), mapper.rs (client), policy.rs (trust rules)
+  registry/          mod.rs (single flight, caches), cache.rs (byte-weighted LRU), opener.rs, tests.rs
   protocol/          mod.rs, presentation.rs (read-only view), hls.rs, dash.rs
   observability/     mod.rs, logging.rs, metrics.rs
   error.rs
-  source/  media/  mp4/  segment/  fmp4/     one focused file each (mod.rs is only re-exports)
+  source/            mod.rs, local.rs, http.rs (remote), sparse.rs (metadata regions)
+  media/  mp4/  segment/  fmp4/     one focused file each (mod.rs is only re-exports)
+  testutil.rs        mock mapper and origin servers (tests only)
 tests/               cli.rs, package.rs, fixtures/
 fuzz/                separate crate that depends on the library
 ```

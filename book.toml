@@ -14,7 +14,7 @@ preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/includeamin/vod-module-rs"
 edit-url-template = "https://github.com/includeamin/vod-module-rs/edit/main/{path}"
 site-url = "/vod-module-rs/"
-additional-js = ["mermaid.min.js", "mermaid-init.js"]
+additional-js = ["docs/assets/js/mermaid.min.js", "docs/assets/js/mermaid-init.js"]
 
 [output.html.search]
 enable = true

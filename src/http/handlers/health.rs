@@ -15,10 +15,10 @@ pub(crate) async fn health() -> &'static str {
 
 /// Readiness differs from liveness: it flips to `503` when shutdown begins.
 pub(crate) async fn ready(State(state): State<AppState>) -> Response {
-    if state.ready.load(Ordering::Relaxed) {
+    if state.ready.load(Ordering::Relaxed) && state.resolver_healthy.load(Ordering::Relaxed) {
         (StatusCode::OK, "ready\n").into_response()
     } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "shutting down\n").into_response()
+        (StatusCode::SERVICE_UNAVAILABLE, "not ready\n").into_response()
     }
 }
 

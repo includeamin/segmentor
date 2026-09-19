@@ -34,6 +34,15 @@ pub(crate) enum Error {
 
     #[error("not found: {0}")]
     NotFound(&'static str),
+
+    #[error("upstream error: {0}")]
+    Upstream(String),
+
+    #[error("location rejected by the media origin: {0}")]
+    LocationRejected(String),
+
+    #[error("upstream unavailable: {0}")]
+    UpstreamUnavailable(String),
 }
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;

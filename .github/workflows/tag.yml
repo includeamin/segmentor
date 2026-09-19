@@ -1,0 +1,59 @@
+name: Tag release
+
+# Tags main with the next semantic version after every merge whose CI run succeeded.
+# The version comes from the Conventional Commits since the last tag (see docs/releasing.md).
+# Publishing a GitHub release is a separate, manual step (the Release workflow).
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+# Merges are tagged one at a time, in the order their CI runs finish.
+concurrency:
+  group: tag-release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Tag the merge
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tested commit with full history
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Decide the next version
+        id: version
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: .github/scripts/next-version.sh "$SHA" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Create and push the tag
+        if: steps.version.outputs.should_tag == 'true'
+        env:
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::notice::$TAG already exists; nothing to do"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG" "$SHA"
+          git push origin "refs/tags/$TAG"
+          echo "### Tagged $TAG" >>"$GITHUB_STEP_SUMMARY"
+          echo "Bump: ${{ steps.version.outputs.bump }}. Run the **Release** workflow to publish it." >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Explain why nothing was tagged
+        if: steps.version.outputs.should_tag != 'true'
+        env:
+          REASON: ${{ steps.version.outputs.reason }}
+        run: echo "### No tag created" >>"$GITHUB_STEP_SUMMARY" && echo "$REASON" >>"$GITHUB_STEP_SUMMARY"
