@@ -29,9 +29,16 @@ This design is accepted, but not every capability is implemented. Status terms i
 | Runtime cache invalidation/reload | Deferred | Assets are immutable for process lifetime; requires a separate lifecycle design |
 | DASH VOD | Implemented | Static MPD reuses separate-track fMP4 artifacts |
 | Automated HLS/DASH decode suite | Implemented | FFmpeg consumes both protocols over an ephemeral HTTP server |
-| Formal HLS/DASH conformance tools | Pending | Required before claiming protocol/CMAF conformance |
+| Structural HLS/DASH/fMP4 conformance suite | Implemented | `tests/conformance.rs`; see [conformance](../conformance.md) |
+| Formal HLS/DASH conformance tools | Pending | Apple validator and DASH-IF tool not run; required before claiming protocol/CMAF conformance |
 | Browser playback suite | Pending | hls.js/dash.js Playwright coverage is not implemented |
 | Seeded media pipeline fuzzing | Implemented | One target covers preflight, parsing, planning, init writing, and fragment preparation |
+| Async segment streaming with slow-client protection | Implemented | Job slots are held per source read, not per response; `response_idle_timeout_ms` drops stalled clients |
+| Version-enforced immutable URLs | Implemented | `v` is required on init and media URLs; missing or stale versions return `404` with `no-store` |
+| Configurable CORS | Implemented | `[cors]` table; exposes range/ETag headers and covers error responses |
+| Readiness, SIGTERM drain, request shedding | Implemented | `/ready`, `shutdown_delay_ms`/`shutdown_grace_ms`, `max_concurrent_requests` |
+| Request metrics and request IDs | Implemented | Prometheus counters/histogram with fixed cardinality; `X-Request-Id` on every response |
+| Precomputed playlists and index memory budget | Implemented | Rendered at load; `max_index_bytes` bounds total index memory |
 
 ## Summary
 
@@ -209,12 +216,14 @@ The implemented HLS routes are:
 | Method | Route | Content type | Cache policy |
 | --- | --- | --- | --- |
 | `GET`, `HEAD` | `/health` | `text/plain` | Framework default |
+| `GET`, `HEAD` | `/ready` | `text/plain` | `200`, or `503` once shutdown begins |
+| `GET`, `HEAD` | `/metrics` | Prometheus text | Framework default |
 | `GET`, `HEAD` | `/hls/{asset}/master.m3u8` | `application/vnd.apple.mpegurl` | `public, max-age=60` |
 | `GET`, `HEAD` | `/hls/{asset}/{track}/index.m3u8` | `application/vnd.apple.mpegurl` | `public, max-age=60` |
-| `GET`, `HEAD` | `/hls/{asset}/{track}/init.mp4` | `video/mp4` | `public, max-age=31536000, immutable` |
-| `GET`, `HEAD` | `/hls/{asset}/{track}/segments/{index}/media.m4s` | `video/mp4` | `public, max-age=31536000, immutable` |
+| `GET`, `HEAD` | `/hls/{asset}/{track}/init.mp4?v={version}` | `video/mp4` or `audio/mp4` by track | `public, max-age=31536000, immutable` |
+| `GET`, `HEAD` | `/hls/{asset}/{track}/segments/{index}/media.m4s?v={version}` | `video/mp4` or `audio/mp4` by track | `public, max-age=31536000, immutable` |
 
-`{track}` is `video` or `audio`. Asset identifiers contain only ASCII letters, digits, hyphens, and underscores. Relative URLs in each playlist resolve beneath that asset's route and never expose a filesystem path. All HLS responses allow cross-origin `GET` and `HEAD` requests.
+`{track}` is `video` or `audio`. Asset identifiers contain only ASCII letters, digits, hyphens, and underscores. Relative URLs in each playlist resolve beneath that asset's route and never expose a filesystem path. Init and media URLs require the `v` query parameter that the playlists emit; a missing or non-matching value is `404`, so an immutable URL can never return different bytes. Cross-origin access is governed by the `[cors]` configuration. `HEAD` on a media segment answers from metadata and reads no source bytes.
 
 Current and required status behavior:
 
@@ -225,9 +234,11 @@ Current and required status behavior:
 | Unexpected generation/I/O failure | `500 Internal Server Error` | Implemented |
 | Unsupported configured media | Startup failure | Implemented |
 | Request body too large | Not applicable to current read-only routes | Implemented by route shape |
-| Single HTTP byte range on init/media | `206`, or `416` when invalid/unsatisfiable | Implemented |
-| Multi-range or suffix range | `416 Range Not Satisfiable` | Deliberate first-release limitation |
-| Conditional `If-None-Match` | Strong ETag and empty `304` | Implemented |
+| Single or suffix HTTP byte range on init/media | `206`, or `416` when invalid/unsatisfiable | Implemented |
+| `If-Range` that does not match the current ETag | Range ignored, full `200` | Implemented |
+| Multi-range | `416 Range Not Satisfiable` | Deliberate first-release limitation |
+| Conditional `If-None-Match` | Strong ETag; tag lists, weak tags, and `*` match; empty `304` | Implemented |
+| Handler concurrency above `max_concurrent_requests` | `503` with `Retry-After` | Implemented |
 | Conditional `If-Modified-Since` | Not supported | Deliberate first-release limitation |
 
 Error responses must not include host filesystem paths or media payload data. Before production, internal error bodies must use a stable generic message while details remain in structured logs.
@@ -373,7 +384,7 @@ The validation contract and current evidence are:
 | Browser starts, seeks, and plays DASH | Pending | Add Playwright with pinned dash.js after DASH exists |
 | Segment response reads only requested source payload | Implemented | Generated header plus only overlapping source ranges are streamed with backpressure |
 | Repeated generation is byte-identical | Implemented | Integration test compares every generated artifact byte-for-byte across two runs |
-| Release benchmarks meet the stated budgets | Pending | Add reproducible benchmark harness and reference-host record |
+| Release benchmarks meet the stated budgets | Measured on a laptop; reference host pending | `make bench`; every budget passes on an i7-8550U, see [benchmarks](../benchmarks.md). Reference-host record still required |
 
 Fixture coverage is similarly explicit:
 

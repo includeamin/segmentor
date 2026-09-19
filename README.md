@@ -12,6 +12,8 @@ make ci
 
 Run `make help` to list the individual build, check, format, lint, test, and documentation targets.
 
+`make conformance` runs the black-box HLS and DASH conformance suite, and `make bench` measures the performance budgets (see [docs/benchmarks.md](docs/benchmarks.md)).
+
 Compile the media-pipeline fuzz target on stable with `make fuzz-check`. To run a fuzz campaign, install the separate nightly tooling. `make fuzz` copies the generated MP4 fixtures into an ignored, writable corpus before starting libFuzzer:
 
 ```sh
@@ -64,10 +66,14 @@ Each configured asset exposes:
 /dash/{asset}/manifest.mpd
 /dash/{asset}/{track}/init.mp4
 /dash/{asset}/{track}/segments/{index}/media.m4s
-/metrics
+/health   liveness
+/ready    readiness (503 once shutdown begins)
+/metrics  Prometheus text
 ```
 
-Initialization and media responses support single byte ranges, strong ETags, and immutable content-versioned URLs. Media payloads are read through a bounded backpressured stream instead of buffering the complete segment in each HTTP request.
+Initialization and media responses support single and suffix byte ranges, `If-Range`, strong ETags, and immutable content-versioned URLs. Media URLs must carry the `v` query parameter the playlists emit; a missing or stale version is a `404`. Media payloads are read through a bounded backpressured stream instead of buffering the complete segment in each HTTP request.
+
+CORS, shutdown behavior, concurrency limits, and metrics are configurable in the same file; see [docs/operations.md](docs/operations.md) for production guidance.
 
 ## Documentation
 

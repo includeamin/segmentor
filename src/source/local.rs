@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Seek, SeekFrom};
+use std::io::{BufReader, Seek, SeekFrom};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::Path;
 
@@ -7,6 +7,8 @@ use bytes::Bytes;
 
 use super::{ByteRange, MediaSource, SourceIdentity};
 use crate::error::{Error, Result};
+
+const PARSER_BUFFER_BYTES: usize = 256 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct LocalMediaSource {
@@ -32,10 +34,15 @@ impl LocalMediaSource {
         Ok(Self { file, identity })
     }
 
-    pub(crate) fn parser_file(&self) -> Result<File> {
+    /// A buffered handle positioned at the start, for the `mp4` crate.
+    ///
+    /// The crate reads every sample-table entry with a separate `read`, so an unbuffered file
+    /// costs one system call per four bytes: seconds for an hour of media. The buffer turns
+    /// that into a handful of reads. Seeking past `mdat` simply discards it.
+    pub(crate) fn parser_file(&self) -> Result<BufReader<File>> {
         let mut file = self.file.try_clone()?;
         file.seek(SeekFrom::Start(0))?;
-        Ok(file)
+        Ok(BufReader::with_capacity(PARSER_BUFFER_BYTES, file))
     }
 
     pub(crate) fn verify_unchanged(&self) -> Result<()> {

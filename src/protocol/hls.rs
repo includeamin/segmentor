@@ -1,12 +1,12 @@
 use std::fmt::Write;
 
-use crate::asset::PackagedAsset;
+use super::Presentation;
 use crate::error::{Error, Result};
-use crate::media::{CodecConfig, Track, TrackKind};
+use crate::media::{CodecConfig, TrackKind};
 
-pub(crate) fn master_playlist(asset: &PackagedAsset) -> Result<String> {
-    let video = asset.track(TrackKind::Video)?;
-    let audio = asset.track(TrackKind::Audio).ok();
+pub(crate) fn master_playlist(presentation: Presentation<'_>) -> Result<String> {
+    let video = presentation.track(TrackKind::Video)?;
+    let audio = presentation.track(TrackKind::Audio).ok();
     let CodecConfig::Avc {
         width,
         height,
@@ -19,33 +19,44 @@ pub(crate) fn master_playlist(asset: &PackagedAsset) -> Result<String> {
         return Err(Error::Unsupported("HLS video must be H.264"));
     };
     let mut codecs = format!("avc1.{profile:02x}{compatibility:02x}{level:02x}");
-    let version = asset.version();
+    let version = presentation.version();
     let mut playlist = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
     let audio_attribute = if audio.is_some() {
         codecs.push_str(",mp4a.40.2");
-        playlist.push_str(
-            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/index.m3u8?v={version}\"\n",
-        );
+        writeln!(
+            playlist,
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Audio\",DEFAULT=YES,AUTOSELECT=YES,URI=\"audio/index.m3u8?v={version}\""
+        )
+        .expect("writing to a String cannot fail");
         ",AUDIO=\"audio\""
     } else {
         ""
     };
-    let bandwidth = estimate_bandwidth(video)?
-        .checked_add(audio.map(estimate_bandwidth).transpose()?.unwrap_or(0))
+    let video_bandwidth = presentation.bandwidth(video)?;
+    let audio_bandwidth = audio
+        .map(|track| presentation.bandwidth(track))
+        .transpose()?;
+    let bandwidth = video_bandwidth
+        .peak
+        .checked_add(audio_bandwidth.map_or(0, |audio| audio.peak))
+        .ok_or_else(|| Error::InvalidMedia("bandwidth overflow".to_owned()))?;
+    let average_bandwidth = video_bandwidth
+        .average
+        .checked_add(audio_bandwidth.map_or(0, |audio| audio.average))
         .ok_or_else(|| Error::InvalidMedia("bandwidth overflow".to_owned()))?;
     writeln!(
         playlist,
-        "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},CODECS=\"{codecs}\",RESOLUTION={width}x{height}{audio_attribute}"
+        "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={average_bandwidth},CODECS=\"{codecs}\",RESOLUTION={width}x{height}{audio_attribute}"
     )
     .expect("writing to a String cannot fail");
     writeln!(playlist, "video/index.m3u8?v={version}").expect("writing to a String cannot fail");
     Ok(playlist)
 }
 
-pub(crate) fn media_playlist(asset: &PackagedAsset, kind: TrackKind) -> Result<String> {
-    let track = asset.track(kind)?;
-    let version = asset.version();
-    let segments = asset.track_segments(track.id).collect::<Vec<_>>();
+pub(crate) fn media_playlist(presentation: Presentation<'_>, kind: TrackKind) -> Result<String> {
+    let track = presentation.track(kind)?;
+    let version = presentation.version();
+    let segments = presentation.track_segments(track.id).collect::<Vec<_>>();
     let target_duration = segments
         .iter()
         .map(|segment| div_ceil(segment.duration, u64::from(track.timescale)))
@@ -72,19 +83,6 @@ pub(crate) fn media_playlist(asset: &PackagedAsset, kind: TrackKind) -> Result<S
     Ok(playlist)
 }
 
-fn estimate_bandwidth(track: &Track) -> Result<u64> {
-    let bytes = track.samples.iter().try_fold(0u64, |total, sample| {
-        total
-            .checked_add(u64::from(sample.size))
-            .ok_or_else(|| Error::InvalidMedia("track size overflow".to_owned()))
-    })?;
-    bytes
-        .checked_mul(8)
-        .and_then(|bits| bits.checked_mul(u64::from(track.timescale)))
-        .and_then(|scaled| scaled.checked_div(track.duration))
-        .ok_or_else(|| Error::InvalidMedia("bandwidth calculation overflow".to_owned()))
-}
-
 const fn div_ceil(dividend: u64, divisor: u64) -> u64 {
     if dividend % divisor == 0 {
         dividend / divisor
@@ -95,34 +93,47 @@ const fn div_ceil(dividend: u64, divisor: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
-
-    fn asset() -> PackagedAsset {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/h264-aac.mp4");
-        PackagedAsset::load(path, 1000, &crate::config::LimitsConfig::default())
-            .expect("fixture should load")
-    }
+    use crate::protocol::fixtures::Loaded;
 
     #[test]
     fn master_references_separate_audio_and_video_playlists() {
-        let playlist = master_playlist(&asset()).expect("master playlist should render");
+        let loaded = Loaded::h264_aac();
+        let playlist =
+            master_playlist(loaded.presentation()).expect("master playlist should render");
 
         assert!(playlist.contains("CODECS=\"avc1.64000d,mp4a.40.2\""));
-        assert!(playlist.contains("URI=\"audio/index.m3u8?v="));
-        assert!(playlist.contains("video/index.m3u8?v="));
+        assert!(playlist.contains("AVERAGE-BANDWIDTH="));
+        let version = &loaded.version;
+        assert!(playlist.contains(&format!("URI=\"audio/index.m3u8?v={version}\"")));
+        assert!(playlist.contains(&format!("video/index.m3u8?v={version}\n")));
+        assert!(
+            !playlist.contains('{'),
+            "no unexpanded placeholders: {playlist}"
+        );
     }
 
     #[test]
     fn video_playlist_references_init_and_three_segments() {
-        let playlist =
-            media_playlist(&asset(), TrackKind::Video).expect("media playlist should render");
+        let loaded = Loaded::h264_aac();
+        let playlist = media_playlist(loaded.presentation(), TrackKind::Video)
+            .expect("media playlist should render");
 
         assert!(playlist.contains("#EXT-X-TARGETDURATION:1"));
         assert!(playlist.contains("#EXT-X-MAP:URI=\"init.mp4?v="));
         assert_eq!(playlist.matches("#EXTINF:1.000,").count(), 3);
         assert!(playlist.contains("segments/2/media.m4s?v="));
         assert!(playlist.ends_with("#EXT-X-ENDLIST\n"));
+    }
+
+    #[test]
+    fn a_missing_track_is_not_found() {
+        let loaded = Loaded::h264_aac();
+        let presentation = Presentation::new(&loaded.index.tracks[..1], &loaded.plan, "v");
+
+        let error = media_playlist(presentation, TrackKind::Audio)
+            .expect_err("audio is absent from the view");
+
+        assert!(matches!(error, Error::NotFound(_)));
     }
 }

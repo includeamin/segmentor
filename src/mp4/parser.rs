@@ -414,7 +414,13 @@ fn sample_times(track: &Mp4Track, sample_count: usize) -> Result<Vec<(u64, u32)>
     let mut times = Vec::with_capacity(sample_count);
     let mut decode_time = 0u64;
     for entry in &track.trak.mdia.minf.stbl.stts.entries {
-        for _ in 0..entry.sample_count {
+        // Bound the running total before expanding: a single run-length entry can claim
+        // billions of samples, and expansion must never outgrow the already-limited count.
+        let run = usize::try_from(entry.sample_count)
+            .ok()
+            .filter(|run| times.len().saturating_add(*run) <= sample_count)
+            .ok_or_else(|| invalid_media("stts entry count does not match sample count"))?;
+        for _ in 0..run {
             times.push((decode_time, entry.sample_delta));
             decode_time = decode_time
                 .checked_add(u64::from(entry.sample_delta))
@@ -435,10 +441,11 @@ fn composition_offsets(track: &Mp4Track, sample_count: usize) -> Result<Vec<i32>
     };
     let mut offsets = Vec::with_capacity(sample_count);
     for entry in &table.entries {
-        offsets.extend(std::iter::repeat_n(
-            entry.sample_offset,
-            entry.sample_count as usize,
-        ));
+        let run = usize::try_from(entry.sample_count)
+            .ok()
+            .filter(|run| offsets.len().saturating_add(*run) <= sample_count)
+            .ok_or_else(|| invalid_media("ctts entry count does not match sample count"))?;
+        offsets.extend(std::iter::repeat_n(entry.sample_offset, run));
     }
     if offsets.len() != sample_count {
         return Err(invalid_media(
@@ -653,6 +660,24 @@ mod tests {
         let error = validate_raw_moov(&moov).expect_err("external reference should fail");
 
         assert!(error.to_string().contains("external data reference"));
+    }
+
+    #[test]
+    fn rejects_run_length_entries_that_claim_more_samples_than_stsz() {
+        let original = std::fs::read(fixture("h264-aac.mp4")).expect("fixture should read");
+        let mut mutated = original.clone();
+        // stts payload: version/flags (4), entry count (4), then (sample_count, delta) pairs.
+        let stts = find_type(&mutated, *b"stts");
+        mutated[stts + 12..stts + 16].copy_from_slice(&i32::MAX.to_be_bytes());
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/h264-aac-huge-stts.mp4");
+        std::fs::write(&path, mutated).expect("mutated fixture should write");
+        let source = LocalMediaSource::open(&path).expect("mutated fixture should open");
+
+        let error = parse(&source, &LimitsConfig::default())
+            .expect_err("oversized run-length entry should fail before expansion");
+
+        assert!(error.to_string().contains("stts entry count"), "{error}");
+        std::fs::remove_file(path).expect("temporary fixture should be removable");
     }
 
     fn fixture_moov() -> Vec<u8> {
