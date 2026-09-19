@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, RawQuery, State};
 use axum::http::header::{
     AUTHORIZATION, CACHE_CONTROL, CONTENT_RANGE, CONTENT_TYPE, ETAG, IF_NONE_MATCH, IF_RANGE, RANGE,
 };
@@ -89,6 +89,8 @@ pub(crate) struct MapperState {
     pub(crate) seen_tokens: Mutex<Vec<Option<String>>>,
     pub(crate) unhealthy: AtomicBool,
     pub(crate) delay_ms: AtomicU64,
+    /// When set, a `304` is never sent, so every lookup gets a full answer (a fresh signature).
+    pub(crate) always_full: AtomicBool,
 }
 
 impl MapperState {
@@ -175,7 +177,9 @@ async fn mapper_asset(
     let Some(answer) = state.answers.lock().unwrap().get(&id).cloned() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    if condition.as_deref() == Some(&format!("\"{}\"", answer.version)) {
+    if !state.always_full.load(Ordering::SeqCst)
+        && condition.as_deref() == Some(&format!("\"{}\"", answer.version))
+    {
         return (StatusCode::NOT_MODIFIED, [(CACHE_CONTROL, "max-age=300")]).into_response();
     }
     let mut body = json!({
@@ -208,6 +212,10 @@ pub(crate) struct OriginState {
     pub(crate) ignore_ranges: AtomicBool,
     /// When non-zero, every request answers with this status.
     pub(crate) forced_status: AtomicU16,
+    /// Every query string seen, in order.
+    pub(crate) queries: Mutex<Vec<String>>,
+    /// When set, requests whose query differs get `403`, as an expired signature would.
+    pub(crate) required_query: Mutex<Option<String>>,
 }
 
 #[derive(Clone)]
@@ -265,9 +273,17 @@ impl MockOrigin {
 async fn origin_media(
     State(state): State<Arc<OriginState>>,
     Path(name): Path<String>,
+    RawQuery(query): RawQuery,
     headers: HeaderMap,
 ) -> Response {
     state.requests.fetch_add(1, Ordering::SeqCst);
+    let query = query.unwrap_or_default();
+    state.queries.lock().unwrap().push(query.clone());
+    if let Some(required) = state.required_query.lock().unwrap().clone()
+        && query != required
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let forced = state.forced_status.load(Ordering::SeqCst);
     if forced != 0 {
         return StatusCode::from_u16(forced).unwrap().into_response();

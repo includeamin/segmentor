@@ -95,7 +95,15 @@ The origin must:
 - honor `Range` requests with `206` and a correct `Content-Range`;
 - send a strong `ETag`, or a `Last-Modified`, on the response. The server sends it back as `If-Range` on every read, so an object that changes while it is being read fails the read instead of mixing two versions. A weak `ETag` alone is refused.
 
-Signed query parameters are treated as secrets: they are not logged at `info` and never appear in error responses. Give a signed URL a lifetime longer than the longest segment a player will request from it, and set `expires_at` so the server stops reusing it in time.
+### Signed URLs
+
+Signed query parameters are treated as secrets: they are not logged at `info` and never appear in error responses. The server handles URL rotation in three ways, so a mapper only has to issue a fresh signature when asked:
+
+- **Refresh ahead.** When an answer has `expires_at`, the server re-asks the mapper *before* the deadline (`resolver.http.refresh_margin_ms`, default 30 seconds early, but never before half the remaining lifetime has passed). The mapper is asked at the next request after that point, so playback that is in progress keeps refreshing itself.
+- **In-place rotation.** If the new answer has the **same `version`** and names the same object (same scheme, host, port, and path, differing only in the query string), the server keeps the loaded asset and simply uses the new URL from the next read on. Nothing is reparsed, and streams already in flight pick up the new signature on their next chunk. Any other change (a different version, path, or host) reloads the asset.
+- **Recovery on rejection.** If the origin answers `401`, `403`, or `410` to a read (an expired or revoked signature, or clock skew), the server asks the mapper once for a fresh answer, without an `If-None-Match`, and retries the read. Concurrent rejections share one lookup. If the mapper cannot provide a working location, the response ends in an error rather than retrying forever. This recovery is disabled while an asset is first loading; a rejected location at that point is a `502`.
+
+So: set `expires_at` on anything signed, keep the **same `version`** when you only re-sign, and answer unconditional requests (no `If-None-Match`) with a full body and a new signature. A `304` is only appropriate while the current signature is still valid.
 
 ## What a `version` means to the server
 
@@ -156,5 +164,5 @@ Then `curl http://127.0.0.1:3000/hls/movie/master.m3u8`.
 - Removed assets answer `404` or `410`, not `200`.
 - Answers are small (the server's default limit is 16 KiB).
 - The mapper answers quickly: the server's default per-request timeout is two seconds, with two retries.
-- `expires_at` is set for anything signed.
+- `expires_at` is set for anything signed, and re-signing keeps the same `version`.
 - The mapper is reachable over `https` in production and requires the bearer token.

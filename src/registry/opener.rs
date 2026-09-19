@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::error::{Error, Result};
 use crate::resolver::AssetLocation;
-use crate::source::{LocalMediaSource, MediaSourceKind, RemoteReader};
+use crate::source::{LocalMediaSource, LocationRefresher, MediaSourceKind, RemoteReader};
 
 #[derive(Debug)]
 pub(crate) struct SourceOpener {
@@ -18,7 +18,12 @@ impl SourceOpener {
         Self { media_root, remote }
     }
 
-    pub(crate) async fn open(&self, location: &AssetLocation) -> Result<MediaSourceKind> {
+    /// Opens `location`. A remote source is given `refresher` so it can recover a rejected URL.
+    pub(crate) async fn open(
+        &self,
+        location: &AssetLocation,
+        refresher: Arc<dyn LocationRefresher>,
+    ) -> Result<MediaSourceKind> {
         match location {
             AssetLocation::File(path) => {
                 let root = self.media_root.clone();
@@ -33,6 +38,7 @@ impl SourceOpener {
             }
             AssetLocation::Http(url) => {
                 let source = self.remote.open(url.clone()).await?;
+                source.set_refresher(refresher);
                 Ok(MediaSourceKind::Http(Arc::new(source)))
             }
         }

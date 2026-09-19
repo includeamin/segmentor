@@ -268,7 +268,10 @@ impl HttpResolver {
                 .filter(|remaining| !remaining.is_zero())
                 .ok_or_else(|| ResolveError::Rejected("location has already expired".to_owned()))?;
             hard_expiry = Some(now + remaining);
-            valid_until = valid_until.min(now + remaining);
+            // Refresh ahead of the deadline, but not before half the lifetime has passed.
+            let margin = Duration::from_millis(self.settings.refresh_margin_ms);
+            let refresh_after = remaining.saturating_sub(margin).max(remaining / 2);
+            valid_until = valid_until.min(now + refresh_after);
         }
         Ok(ResolvedAsset {
             location,

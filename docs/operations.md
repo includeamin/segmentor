@@ -96,7 +96,7 @@ A mapper can return `http` locations, in which case the server reads the media f
 - Locations must be `https` (`allow_insecure_http` is for development), carry no credentials, and are never redirected.
 - Names that resolve to loopback, private, link-local, shared, or multicast addresses are refused unless `allow_private_addresses = true`. Leave it off in production so a mapper cannot point the server at internal services.
 - The origin must support `Range` and send a strong `ETag` or a `Last-Modified`; reads are conditional on it, so a replaced object fails playback instead of mixing versions.
-- Signed URLs should outlive the longest segment request and carry an `expires_at` in the mapper answer.
+- Signed URLs are supported: the mapper should set `expires_at` and re-sign under the same `version`. The server refreshes ahead of expiry (`resolver.http.refresh_margin_ms`), rotates the URL on a loaded asset without reloading it, and re-asks the mapper once if the origin rejects a read with `401`, `403`, or `410`. Watch `vod_location_rotations_total`.
 
 TLS uses the operating system's trusted roots (the container image carries a CA bundle).
 
@@ -108,6 +108,7 @@ TLS uses the operating system's trusted roots (the container image carries a CA 
 | `vod_resolution_cache_events_total{event}` | counter | `hit`, `miss`, `revalidate`, `stale`, `negative_hit` |
 | `vod_asset_loads_total{outcome}` | counter | `ok` or `failed` |
 | `vod_asset_load_seconds_total` | counter | Divide by loads for the mean load time |
+| `vod_location_rotations_total` | counter | Signed URLs replaced in place on loaded assets |
 | `vod_registry_coalesced_waiters_total` | counter | Requests that shared another request's resolve or load |
 | `vod_loaded_assets`, `vod_loaded_bytes` | gauge | What is in memory now |
 

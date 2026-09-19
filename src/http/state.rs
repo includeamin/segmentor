@@ -66,7 +66,10 @@ impl AppState {
                     Duration::ZERO,
                 ),
                 ResolverSettings::Http(mapper) => (
-                    AssetResolver::Http(HttpResolver::new(mapper, LocationPolicy::new(remote))?),
+                    AssetResolver::Http(Box::new(HttpResolver::new(
+                        mapper,
+                        LocationPolicy::new(remote),
+                    )?)),
                     Duration::from_millis(mapper.negative_ttl_ms),
                     Duration::from_millis(mapper.error_ttl_ms),
                     Duration::from_millis(mapper.stale_if_error_ms),

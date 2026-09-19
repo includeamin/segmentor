@@ -38,6 +38,9 @@ pub(crate) enum Error {
     #[error("upstream error: {0}")]
     Upstream(String),
 
+    #[error("location rejected by the media origin: {0}")]
+    LocationRejected(String),
+
     #[error("upstream unavailable: {0}")]
     UpstreamUnavailable(String),
 }

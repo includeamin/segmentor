@@ -62,7 +62,9 @@ impl From<Error> for HttpError {
     fn from(error: Error) -> Self {
         match error {
             Error::NotFound(message) => Self::not_found(message),
-            Error::Upstream(message) => Self::bad_gateway(message),
+            Error::Upstream(message) | Error::LocationRejected(message) => {
+                Self::bad_gateway(message)
+            }
             Error::UpstreamUnavailable(message) => Self::unavailable(&message),
             error => Self::internal(error.to_string()),
         }
