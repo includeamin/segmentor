@@ -6,18 +6,56 @@ use sha2::{Digest, Sha256};
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
 use crate::media::{CodecConfig, MediaIndex, Sample, Track, TrackKind};
-use crate::source::{ByteRange, LocalMediaSource, MediaSource};
+use crate::source::{MediaSourceKind, SourceIdentity, SparseFile};
 
-pub(crate) fn parse(source: &LocalMediaSource, limits: &LimitsConfig) -> Result<MediaIndex> {
+/// A parsed file: the sample index plus the metadata regions it was built from, which the init
+/// segment writer reuses so the file is not read again.
+#[derive(Debug)]
+pub(crate) struct ParsedMedia {
+    pub(crate) index: MediaIndex,
+    pub(crate) metadata: SparseFile,
+}
+
+/// Fetches a file's metadata, builds its sample index, and confirms the source did not change.
+///
+/// Only box headers, `ftyp`, and `moov` are read, whether the source is a local file or a remote
+/// object. The CPU-bound table expansion runs on the blocking pool.
+pub(crate) async fn parse(source: &MediaSourceKind, limits: &LimitsConfig) -> Result<ParsedMedia> {
     if source.len() > limits.max_source_bytes {
         return Err(Error::Unsupported("source exceeds configured size limit"));
     }
-    let moov_range = find_moov(source, limits.max_metadata_bytes)?;
-    let moov_bytes = source.read_range(moov_range)?;
-    validate_raw_moov(&moov_bytes)?;
-    let moov_sha256 = Sha256::digest(&moov_bytes).into();
-    let file = source.parser_file()?;
-    let reader = Mp4Reader::read_header(file, source.len())?;
+    let metadata = SparseFile::fetch(source, limits.max_metadata_bytes).await?;
+    let identity = source.identity().clone();
+    let limits_for_parse = limits.clone();
+    let (metadata, index) = tokio::task::spawn_blocking(move || {
+        parse_metadata(&metadata, identity, &limits_for_parse).map(|index| (metadata, index))
+    })
+    .await
+    .map_err(|error| Error::Io(std::io::Error::other(error)))??;
+
+    // Mutation check: the object must be unchanged, and `moov` must hash the same when re-read.
+    source.verify_unchanged().await?;
+    let current = source.read_range(metadata.moov_range()).await?;
+    let expected = index
+        .source
+        .moov_sha256
+        .expect("parse_metadata always records the moov hash");
+    if Sha256::digest(&current)[..] != expected[..] {
+        return Err(invalid_media("moov changed while it was being parsed"));
+    }
+    Ok(ParsedMedia { index, metadata })
+}
+
+/// The synchronous, CPU-bound half of parsing: validation, table expansion, and limits.
+fn parse_metadata(
+    metadata: &SparseFile,
+    mut identity: SourceIdentity,
+    limits: &LimitsConfig,
+) -> Result<MediaIndex> {
+    let moov_bytes = metadata.moov_bytes();
+    validate_raw_moov(moov_bytes)?;
+    let moov_sha256: [u8; 32] = Sha256::digest(moov_bytes).into();
+    let reader = Mp4Reader::read_header(metadata.reader(), metadata.len())?;
 
     if reader.is_fragmented() {
         return Err(Error::Unsupported("fragmented MP4 input"));
@@ -38,15 +76,9 @@ pub(crate) fn parse(source: &LocalMediaSource, limits: &LimitsConfig) -> Result<
     let mut tracks = reader
         .tracks()
         .values()
-        .map(|track| parse_track(track, source.len(), limits))
+        .map(|track| parse_track(track, metadata.len(), limits))
         .collect::<Result<Vec<_>>>()?;
     tracks.sort_unstable_by_key(|track| track.id);
-    source.verify_unchanged()?;
-    let current_moov_sha256: [u8; 32] = Sha256::digest(source.read_range(moov_range)?).into();
-    if current_moov_sha256 != moov_sha256 {
-        return Err(invalid_media("moov changed while it was being parsed"));
-    }
-    let mut identity = source.identity().clone();
     identity.moov_sha256 = Some(moov_sha256);
 
     Ok(MediaIndex {
@@ -175,38 +207,6 @@ fn parse_samples(track: &Mp4Track, source_len: u64, limits: &LimitsConfig) -> Re
     }
 
     Ok(samples)
-}
-
-fn find_moov(source: &LocalMediaSource, max_metadata_bytes: u64) -> Result<ByteRange> {
-    let mut offset = 0u64;
-    while offset < source.len() {
-        let header = source.read_range(ByteRange::new(offset, 8))?;
-        let size32 = u32::from_be_bytes(header[..4].try_into().unwrap());
-        let name: [u8; 4] = header[4..8].try_into().unwrap();
-        let (size, header_size) = if size32 == 1 {
-            let extended = source.read_range(ByteRange::new(offset + 8, 8))?;
-            (u64::from_be_bytes(extended[..8].try_into().unwrap()), 16)
-        } else if size32 == 0 {
-            (source.len() - offset, 8)
-        } else {
-            (u64::from(size32), 8)
-        };
-        if size < header_size
-            || offset
-                .checked_add(size)
-                .is_none_or(|end| end > source.len())
-        {
-            return Err(invalid_media("invalid top-level MP4 box size"));
-        }
-        if &name == b"moov" {
-            if size > max_metadata_bytes {
-                return Err(invalid_media("moov exceeds configured metadata limit"));
-            }
-            return Ok(ByteRange::new(offset, size));
-        }
-        offset += size;
-    }
-    Err(invalid_media("missing moov box"))
 }
 
 fn validate_raw_moov(moov: &[u8]) -> Result<()> {
@@ -466,6 +466,25 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
+    use crate::source::LocalMediaSource;
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build")
+            .block_on(future)
+    }
+
+    fn open_kind(path: impl AsRef<std::path::Path>) -> Result<MediaSourceKind> {
+        Ok(MediaSourceKind::Local(std::sync::Arc::new(
+            LocalMediaSource::open(path)?,
+        )))
+    }
+
+    fn parse_index(source: &MediaSourceKind, limits: &LimitsConfig) -> Result<MediaIndex> {
+        block_on(parse(source, limits)).map(|parsed| parsed.index)
+    }
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -475,8 +494,8 @@ mod tests {
 
     #[test]
     fn sample_index_matches_ffprobe_packets() {
-        let source = LocalMediaSource::open(fixture("h264-aac.mp4")).expect("fixture should open");
-        let index = parse(&source, &LimitsConfig::default()).expect("fixture should parse");
+        let source = open_kind(fixture("h264-aac.mp4")).expect("fixture should open");
+        let index = parse_index(&source, &LimitsConfig::default()).expect("fixture should parse");
         let expected: Value = serde_json::from_slice(
             &std::fs::read(fixture("h264-aac.ffprobe.json")).expect("probe should be readable"),
         )
@@ -512,31 +531,30 @@ mod tests {
 
     #[test]
     fn parses_moov_after_media_data() {
-        let source =
-            LocalMediaSource::open(fixture("h264-aac-moov-last.mp4")).expect("fixture should open");
+        let source = open_kind(fixture("h264-aac-moov-last.mp4")).expect("fixture should open");
 
-        let index = parse(&source, &LimitsConfig::default()).expect("moov-last MP4 should parse");
+        let index =
+            parse_index(&source, &LimitsConfig::default()).expect("moov-last MP4 should parse");
 
         assert_eq!(index.tracks.len(), 2);
     }
 
     #[test]
     fn rejects_edit_lists() {
-        let source =
-            LocalMediaSource::open(fixture("h264-aac-edit-list.mp4")).expect("fixture should open");
+        let source = open_kind(fixture("h264-aac-edit-list.mp4")).expect("fixture should open");
 
-        let error =
-            parse(&source, &LimitsConfig::default()).expect_err("edit-list MP4 should be rejected");
+        let error = parse_index(&source, &LimitsConfig::default())
+            .expect_err("edit-list MP4 should be rejected");
 
         assert!(error.to_string().contains("edit lists"));
     }
 
     #[test]
     fn parses_video_without_audio() {
-        let source =
-            LocalMediaSource::open(fixture("h264-video-only.mp4")).expect("fixture should open");
+        let source = open_kind(fixture("h264-video-only.mp4")).expect("fixture should open");
 
-        let index = parse(&source, &LimitsConfig::default()).expect("video-only MP4 should parse");
+        let index =
+            parse_index(&source, &LimitsConfig::default()).expect("video-only MP4 should parse");
 
         assert_eq!(index.tracks.len(), 1);
         assert_eq!(index.tracks[0].kind, TrackKind::Video);
@@ -544,10 +562,10 @@ mod tests {
 
     #[test]
     fn parses_44100_hz_stereo_aac() {
-        let source = LocalMediaSource::open(fixture("h264-aac-44100-stereo.mp4"))
-            .expect("fixture should open");
+        let source = open_kind(fixture("h264-aac-44100-stereo.mp4")).expect("fixture should open");
 
-        let index = parse(&source, &LimitsConfig::default()).expect("AAC variant should parse");
+        let index =
+            parse_index(&source, &LimitsConfig::default()).expect("AAC variant should parse");
         let audio = index
             .tracks
             .iter()
@@ -565,10 +583,10 @@ mod tests {
 
     #[test]
     fn preserves_variable_sample_durations() {
-        let source = LocalMediaSource::open(fixture("h264-variable-timing.mp4"))
-            .expect("fixture should open");
+        let source = open_kind(fixture("h264-variable-timing.mp4")).expect("fixture should open");
 
-        let index = parse(&source, &LimitsConfig::default()).expect("VFR fixture should parse");
+        let index =
+            parse_index(&source, &LimitsConfig::default()).expect("VFR fixture should parse");
         let durations = index.tracks[0]
             .samples
             .iter()
@@ -601,9 +619,9 @@ mod tests {
     #[test]
     fn rejects_truncated_sample_payload() {
         let original = fixture("h264-aac.mp4");
-        let original_source = LocalMediaSource::open(&original).expect("fixture should open");
+        let original_source = open_kind(&original).expect("fixture should open");
         let index =
-            parse(&original_source, &LimitsConfig::default()).expect("fixture should parse");
+            parse_index(&original_source, &LimitsConfig::default()).expect("fixture should parse");
         let final_sample_end = index
             .tracks
             .iter()
@@ -620,12 +638,17 @@ mod tests {
             .expect("copy should open")
             .set_len(final_sample_end - 1)
             .expect("copy should truncate");
-        let source = LocalMediaSource::open(&truncated).expect("truncated fixture should open");
+        let source = open_kind(&truncated).expect("truncated fixture should open");
 
-        let error = parse(&source, &LimitsConfig::default())
+        let error = parse_index(&source, &LimitsConfig::default())
             .expect_err("truncated sample payload should fail");
 
-        assert!(error.to_string().contains("sample byte range exceeds"));
+        // Discovery walks every top-level box, so the truncated `mdat` is caught before any
+        // sample table is expanded.
+        assert!(
+            error.to_string().contains("invalid top-level MP4 box size"),
+            "{error}"
+        );
         std::fs::remove_file(truncated).expect("temporary fixture should be removable");
     }
 
@@ -671,9 +694,9 @@ mod tests {
         mutated[stts + 12..stts + 16].copy_from_slice(&i32::MAX.to_be_bytes());
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/h264-aac-huge-stts.mp4");
         std::fs::write(&path, mutated).expect("mutated fixture should write");
-        let source = LocalMediaSource::open(&path).expect("mutated fixture should open");
+        let source = open_kind(&path).expect("mutated fixture should open");
 
-        let error = parse(&source, &LimitsConfig::default())
+        let error = parse_index(&source, &LimitsConfig::default())
             .expect_err("oversized run-length entry should fail before expansion");
 
         assert!(error.to_string().contains("stts entry count"), "{error}");
@@ -681,11 +704,10 @@ mod tests {
     }
 
     fn fixture_moov() -> Vec<u8> {
-        let source = LocalMediaSource::open(fixture("h264-aac.mp4")).expect("fixture should open");
-        let range = find_moov(&source, u64::MAX).expect("fixture should contain moov");
-        source
-            .read_range(range)
-            .expect("moov should be readable")
+        let source = open_kind(fixture("h264-aac.mp4")).expect("fixture should open");
+        block_on(SparseFile::fetch(&source, u64::MAX))
+            .expect("fixture should contain moov")
+            .moov_bytes()
             .to_vec()
     }
 

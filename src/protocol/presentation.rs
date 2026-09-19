@@ -99,7 +99,7 @@ pub(crate) mod fixtures {
     use crate::config::LimitsConfig;
     use crate::media::MediaIndex;
     use crate::segment::SegmentPlan;
-    use crate::source::LocalMediaSource;
+    use crate::source::{LocalMediaSource, MediaSourceKind};
     use crate::{mp4, segment};
 
     pub(crate) struct Loaded {
@@ -113,8 +113,16 @@ pub(crate) mod fixtures {
             let path =
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/h264-aac.mp4");
             let limits = LimitsConfig::default();
-            let source = LocalMediaSource::open(path).expect("fixture should open");
-            let index = mp4::parse(&source, &limits).expect("fixture should parse");
+            let source = MediaSourceKind::Local(std::sync::Arc::new(
+                LocalMediaSource::open(path).expect("fixture should open"),
+            ));
+            let index = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime should build")
+                .block_on(mp4::parse(&source, &limits))
+                .expect("fixture should parse")
+                .index;
             let plan = segment::plan(&index, 1000, &limits).expect("fixture should plan");
             Self {
                 index,

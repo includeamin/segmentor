@@ -4,9 +4,10 @@
 //! of including source files by path.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::config::LimitsConfig;
-use crate::source::LocalMediaSource;
+use crate::source::{LocalMediaSource, MediaSourceKind};
 use crate::{fmp4, mp4, segment};
 
 /// Drives the whole packaging pipeline over the file at `path`: parse, plan, then write init
@@ -16,19 +17,31 @@ use crate::{fmp4, mp4, segment};
 /// panics, hangs, and runaway allocation.
 #[doc(hidden)]
 pub fn exercise_media_pipeline(path: &Path) {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+    runtime.block_on(exercise(path));
+}
+
+async fn exercise(path: &Path) {
     let limits = LimitsConfig::default();
-    let Ok(source) = LocalMediaSource::open(path) else {
+    let Ok(local) = LocalMediaSource::open(path) else {
         return;
     };
-    let Ok(index) = mp4::parse(&source, &limits) else {
+    let source = MediaSourceKind::Local(Arc::new(local));
+    let Ok(parsed) = mp4::parse(&source, &limits).await else {
         return;
     };
-    let Ok(plan) = segment::plan(&index, 6000, &limits) else {
+    let index = &parsed.index;
+    let Ok(plan) = segment::plan(index, 6000, &limits) else {
         return;
     };
 
     for track in &index.tracks {
-        let _ = fmp4::write_init_segment(&source, track.id);
+        let _ = fmp4::write_init_segment(&parsed.metadata, track.id);
         for segment in plan.segments.iter().take(2) {
             let Some(track_segment) = segment
                 .tracks

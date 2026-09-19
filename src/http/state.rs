@@ -1,10 +1,8 @@
-//! Shared application state and startup loading.
-use std::collections::HashMap;
+//! Shared application state and startup wiring.
+
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
 
-use rayon::prelude::*;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Duration, timeout};
 use tower_http::cors::CorsLayer;
@@ -13,17 +11,22 @@ use super::cors::cors_layer;
 use super::error::{HttpError, HttpResult};
 use super::router::ROUTES;
 use crate::asset::PackagedAsset;
-use crate::config::Config;
-use crate::error::{Error, Result};
+use crate::config::{Config, ResolverSettings};
+use crate::error::Result;
 use crate::observability::metrics::Metrics;
+use crate::registry::{AssetRegistry, RegistrySettings, SourceOpener};
+use crate::resolver::{AssetResolver, HttpResolver, LocationPolicy, StaticResolver};
+use crate::source::{RemoteReader, RemoteSettings};
 
 #[derive(Debug, Clone)]
 pub(crate) struct AppState {
-    pub(crate) assets: Arc<HashMap<String, Arc<PackagedAsset>>>,
+    pub(crate) registry: Arc<AssetRegistry>,
     pub(crate) segment_jobs: Arc<Semaphore>,
     pub(crate) request_slots: Arc<Semaphore>,
     pub(crate) metrics: Arc<Metrics>,
     pub(crate) ready: Arc<AtomicBool>,
+    /// Cleared by the background probe while the mapper is unreachable.
+    pub(crate) resolver_healthy: Arc<AtomicBool>,
     pub(crate) cors: Option<CorsLayer>,
     pub(crate) segment_queue_timeout: Duration,
     pub(crate) stream_chunk_bytes: usize,
@@ -32,56 +35,67 @@ pub(crate) struct AppState {
     pub(crate) response_idle_timeout: Duration,
     pub(crate) max_connections: usize,
     pub(crate) header_read_timeout: Duration,
+    /// Seconds between mapper reachability probes; zero disables them.
+    pub(crate) probe_interval: Duration,
+    pub(crate) preload: bool,
 }
 
 impl AppState {
-    pub(crate) fn load(config: &Config) -> Result<Self> {
+    /// Builds the resolver, clients, and registry. Nothing is loaded yet; see [`Self::preload`].
+    pub(crate) fn new(config: &Config) -> Result<Self> {
         let cors = cors_layer(&config.cors)?;
-        let parse_pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.limits.max_startup_parses)
-            .thread_name(|index| format!("vod-startup-parser-{index}"))
-            .build()
-            .map_err(|error| Error::Configuration(error.to_string()))?;
-        let assets = parse_pool.install(|| {
-            config
-                .assets
-                .par_iter()
-                .map(|(asset_id, path)| {
-                    let started = Instant::now();
-                    tracing::debug!(event = "asset_load_started", asset.id = %asset_id, asset.path = %path.display());
-                    let asset = Arc::new(PackagedAsset::load(
-                        path,
-                        config.segment_duration_ms,
-                        &config.limits,
-                    )?);
-                    tracing::info!(
-                        event = "asset_loaded",
-                        asset.id = %asset_id,
-                        media.tracks = asset.index.tracks.len(),
-                        media.segments = asset.plan.segments.len(),
-                        index.bytes = asset.index_bytes(),
-                        elapsed_ms = started.elapsed().as_millis(),
-                    );
-                    Ok((asset_id.clone(), asset))
-                })
-                .collect::<Result<HashMap<_, _>>>()
-        })?;
-        let index_bytes = assets
-            .values()
-            .map(|asset| asset.index_bytes())
-            .fold(0u64, u64::saturating_add);
-        if index_bytes > config.limits.max_index_bytes {
-            return Err(Error::Configuration(format!(
-                "loaded asset indexes need {index_bytes} bytes, exceeding limits.max_index_bytes {}",
-                config.limits.max_index_bytes
-            )));
-        }
+        let metrics = Arc::new(Metrics::new(&ROUTES));
+        let remote = &config.remote_media;
+        let opener = SourceOpener::new(
+            config.media_root.clone(),
+            RemoteReader::new(RemoteSettings {
+                connect_timeout: Duration::from_millis(remote.connect_timeout_ms),
+                request_timeout: Duration::from_millis(remote.request_timeout_ms),
+                max_retries: remote.max_retries,
+                max_inflight_reads: remote.max_inflight_reads,
+                allow_private_addresses: remote.allow_private_addresses,
+            })?,
+        );
+        let (resolver, negative_ttl, error_ttl, stale_if_error, probe_interval) =
+            match &config.resolver {
+                ResolverSettings::Static => (
+                    AssetResolver::Static(StaticResolver::new(config.assets.clone())),
+                    Duration::from_secs(1),
+                    Duration::from_secs(1),
+                    Duration::ZERO,
+                    Duration::ZERO,
+                ),
+                ResolverSettings::Http(mapper) => (
+                    AssetResolver::Http(HttpResolver::new(mapper, LocationPolicy::new(remote))?),
+                    Duration::from_millis(mapper.negative_ttl_ms),
+                    Duration::from_millis(mapper.error_ttl_ms),
+                    Duration::from_millis(mapper.stale_if_error_ms),
+                    Duration::from_millis(mapper.readiness_probe_interval_ms),
+                ),
+            };
+        let registry = Arc::new(AssetRegistry::new(
+            resolver,
+            opener,
+            config,
+            RegistrySettings {
+                segment_duration_ms: config.segment_duration_ms,
+                max_cached_resolutions: config.registry.max_cached_resolutions,
+                negative_ttl,
+                error_ttl,
+                stale_if_error,
+                load_queue_timeout: Duration::from_millis(config.registry.load_queue_timeout_ms),
+                max_concurrent_loads: config.limits.max_startup_parses,
+                loaded_budget_bytes: config.limits.max_index_bytes,
+            },
+            Arc::clone(&metrics),
+        ));
         Ok(Self {
-            assets: Arc::new(assets),
+            registry,
             segment_jobs: Arc::new(Semaphore::new(config.limits.max_segment_jobs)),
             request_slots: Arc::new(Semaphore::new(config.limits.max_concurrent_requests)),
-            metrics: Arc::new(Metrics::new(&ROUTES)),
+            metrics,
             ready: Arc::new(AtomicBool::new(true)),
+            resolver_healthy: Arc::new(AtomicBool::new(true)),
             cors,
             segment_queue_timeout: Duration::from_millis(config.limits.segment_queue_timeout_ms),
             stream_chunk_bytes: config.limits.stream_chunk_bytes,
@@ -90,14 +104,22 @@ impl AppState {
             response_idle_timeout: Duration::from_millis(config.limits.response_idle_timeout_ms),
             max_connections: config.limits.max_connections,
             header_read_timeout: Duration::from_millis(config.limits.header_read_timeout_ms),
+            probe_interval,
+            preload: config.registry.preload,
         })
     }
 
-    pub(crate) fn asset(&self, asset_id: &str) -> HttpResult<Arc<PackagedAsset>> {
-        self.assets
-            .get(asset_id)
-            .cloned()
-            .ok_or_else(|| HttpError::not_found("asset does not exist"))
+    /// With the static catalog, loads every asset before serving so a bad file stops startup.
+    /// Does nothing for a mapper, whose assets load on first request.
+    pub(crate) async fn preload(&self) -> Result<()> {
+        if self.preload {
+            self.registry.preload().await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn asset(&self, asset_id: &str) -> HttpResult<Arc<PackagedAsset>> {
+        Ok(self.registry.get(asset_id).await?)
     }
 
     pub(crate) async fn segment_permit(&self) -> HttpResult<OwnedSemaphorePermit> {

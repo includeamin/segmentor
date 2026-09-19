@@ -45,3 +45,38 @@ max_age_seconds = 86400
 
 [assets.sample]
 path = "h264-aac.mp4"
+
+# --- Resolving assets from a mapper service instead of the [assets.*] tables above ---
+# Replace the [assets.*] tables with the following; the two forms cannot be combined.
+#
+# [resolver]
+# type = "http"
+#
+# [resolver.http]
+# base_url = "https://mapper.internal.example.net"
+# bearer_token_env = "VOD_MAPPER_TOKEN"   # name of an environment variable; never the token itself
+# connect_timeout_ms = 500
+# request_timeout_ms = 2000
+# max_retries = 2
+# max_response_bytes = 16384
+# default_ttl_ms = 300000
+# min_ttl_ms = 5000
+# max_ttl_ms = 3600000
+# negative_ttl_ms = 5000                  # how long "no such asset" is remembered
+# error_ttl_ms = 2000                     # how long a failed lookup or load is remembered
+# stale_if_error_ms = 60000               # serve an expired answer this long if the mapper is down
+# readiness_probe_interval_ms = 0         # >0: /ready reports 503 while the mapper is unreachable
+#
+# [registry]
+# max_cached_resolutions = 10000
+# load_queue_timeout_ms = 5000
+# preload = true                          # static catalog only: load everything before serving
+#
+# [remote_media]                          # policy for `http` locations returned by a mapper
+# allowed_hosts = ["origin.example.net"]  # empty refuses all remote locations
+# allow_insecure_http = false
+# allow_private_addresses = false
+# connect_timeout_ms = 1000
+# request_timeout_ms = 10000
+# max_retries = 2
+# max_inflight_reads = 64

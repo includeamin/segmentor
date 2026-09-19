@@ -26,7 +26,8 @@ This design is accepted, but not every capability is implemented. Status terms i
 | Enforceable parser/resource limits | Implemented | Validated TOML limits cover source, metadata, tracks, samples, segments, queues, and headers |
 | Source mutation detection | Implemented | Filesystem identity plus pre/post parse `moov` SHA-256 |
 | Explicit edit-list/encryption rejection | Implemented | Raw preflight also rejects external references and multiple descriptions |
-| Runtime cache invalidation/reload | Deferred | Assets are immutable for process lifetime; requires a separate lifecycle design |
+| Runtime cache invalidation/reload | Implemented for mapper-resolved assets | See [TDD 0002](0002-asset-map-interface.md). Static catalog assets are still immutable for the process lifetime |
+| Remote HTTP sources and asset mapping service | Implemented | See [TDD 0002](0002-asset-map-interface.md) and the [mapper API](../mapper-api.md) |
 | DASH VOD | Implemented | Static MPD reuses separate-track fMP4 artifacts |
 | Automated HLS/DASH decode suite | Implemented | FFmpeg consumes both protocols over an ephemeral HTTP server |
 | Structural HLS/DASH/fMP4 conformance suite | Implemented | `tests/conformance.rs`; see [conformance](../conformance.md) |
@@ -72,7 +73,7 @@ The hot path should parse and cache source metadata once, calculate keyframe-ali
 - Transcoding or changing codecs, resolution, bitrate, frame rate, or GOP layout.
 - Creating an adaptive bitrate ladder from one source file.
 - DRM, HLS encryption, subtitles, ad insertion, clipping, or concatenation.
-- Remote HTTP source files. The source abstraction should allow them later, but local files come first.
+- Remote HTTP source files (delivered later by [TDD 0002](0002-asset-map-interface.md)).
 - Live ingest, simulated live playback, and LL-HLS. This project is currently VOD-only, with no commitment to add live streaming later.
 - MPEG-TS output. Initial HLS uses fragmented MP4.
 - YAML configuration and configuration hot reload.

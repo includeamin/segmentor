@@ -38,7 +38,9 @@ pub(crate) async fn serve(config: Config) -> Result<()> {
         assets.count = config.assets.len(),
         packaging.segment_duration_ms = config.segment_duration_ms,
     );
-    let state = AppState::load(&config)?;
+    let state = AppState::new(&config)?;
+    state.preload().await?;
+    spawn_resolver_probe(&state);
     let ready = Arc::clone(&state.ready);
     let metrics = Arc::clone(&state.metrics);
     let limits = ConnectionLimits {
@@ -80,4 +82,24 @@ pub(crate) async fn serve(config: Config) -> Result<()> {
     }
     tracing::info!(event = "service_stopped", service.name = APP_NAME);
     Ok(())
+}
+
+/// Periodically checks the mapper and flips readiness when it is unreachable, so an orchestrator
+/// can hold traffic during a mapper outage without restarting the process.
+pub(crate) fn spawn_resolver_probe(state: &AppState) {
+    if state.probe_interval.is_zero() {
+        return;
+    }
+    let registry = Arc::clone(&state.registry);
+    let healthy = Arc::clone(&state.resolver_healthy);
+    let interval = state.probe_interval;
+    tokio::spawn(async move {
+        loop {
+            sleep(interval).await;
+            let now_healthy = registry.resolver_healthy().await;
+            if healthy.swap(now_healthy, Ordering::Relaxed) != now_healthy {
+                tracing::warn!(event = "resolver_health_changed", healthy = now_healthy);
+            }
+        }
+    });
 }

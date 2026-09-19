@@ -82,19 +82,12 @@ impl StreamJob {
                 }
             },
         };
-        let asset = Arc::clone(&self.asset);
-        let result =
-            tokio::task::spawn_blocking(move || asset.read_range(ByteRange::new(offset, length)))
-                .await;
+        let result = self.asset.read_range(ByteRange::new(offset, length)).await;
         drop(permit);
         match result {
-            Ok(Ok(bytes)) => {
+            Ok(bytes) => {
                 self.metrics.source_read_bytes(bytes.len());
                 Ok(bytes)
-            }
-            Ok(Err(error)) => {
-                tracing::error!(event = "source_read_failed", %error);
-                self.fail("source read failed").await
             }
             Err(error) => {
                 tracing::error!(event = "source_read_failed", %error);

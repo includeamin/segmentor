@@ -6,6 +6,7 @@ This part of the book explains how `vod-module-rs` works inside, module by modul
 | --- | --- |
 | This page | Big picture, lifecycles, data model, concurrency, conventions |
 | [Media pipeline](media-pipeline.md) | `source`, `mp4`, `media`, `segment`, `fmp4`: from bytes on disk to fragments |
+| [Registry and resolvers](registry-and-resolvers.md) | `resolver`, `registry`, remote `source`: asset lookup, caching, and loading |
 | [Protocols and assets](protocols.md) | `protocol` (`hls`, `dash`, `Presentation`) and `asset`: playlists, manifests, and the loaded-asset object |
 | [HTTP server](http-server.md) | `http/`: router, middleware, handlers, streaming, ranges, errors |
 | [Runtime support](runtime-support.md) | `config/`, `error`, `observability/` (logging, metrics), `cli/`, `lib`/`main` |
@@ -30,7 +31,9 @@ flowchart TD
     cli --> config[config/]
     cli --> obs
     cli --> http
-    http[http/<br/>router, handlers, streaming] --> asset
+    http[http/<br/>router, handlers, streaming] --> registry[registry/<br/>caches, single flight]
+    registry --> resolver[resolver/<br/>static, mapper]
+    registry --> asset
     http --> obs[observability/<br/>logging, metrics]
     http --> config
     asset[asset.rs<br/>PackagedAsset] --> protocol
@@ -59,8 +62,9 @@ The crate is a library plus a ten-line binary. Almost everything is `pub(crate)`
 1. `main` calls `lib::run`, which dispatches through `cli::run` and parses `serve --config` by hand.
 2. `Config::load` reads and validates the TOML file, resolves the media root and every asset path to canonical absolute paths, and rejects anything outside the root.
 3. `observability::logging::init` installs the non-blocking `tracing` subscriber.
-4. `http::serve` calls `AppState::load`, which builds the CORS layer, then loads **every** configured asset on a bounded `rayon` pool. Loading an asset is `LocalMediaSource::open`, `mp4::parse`, `segment::plan`, one `fmp4::write_init_segment` per track, computing the version, and rendering all playlists from a `Presentation` view. Total index memory is checked against `limits.max_index_bytes`.
-5. Only after all assets load does the process bind the listener and log `service_ready`. A bad asset therefore prevents startup instead of failing later.
+4. `http::serve` calls `AppState::new`, which builds the CORS layer, the resolver, the remote-media client, and the asset registry. Nothing is loaded yet.
+5. With the static catalog, `preload()` then loads **every** configured asset (bounded by `limits.max_startup_parses`): open the source, `mp4::parse`, `segment::plan`, one `fmp4::write_init_segment` per track, compute the version, and render all playlists from a `Presentation` view. Total index memory is checked against `limits.max_index_bytes`. A bad asset stops startup. With a mapper, assets load on their first request instead.
+6. The process binds the listener and logs `service_ready`.
 
 ## Request lifecycle
 
@@ -72,7 +76,7 @@ request_id -> TraceLayer -> record_metrics -> CORS -> shed_load -> enforce_heade
 
 A handler then does, in order:
 
-1. Look up the asset by ID (`404` if missing).
+1. Ask the registry for the asset by ID: a cache hit is two short mutex sections; a miss resolves the location, opens the source, and loads it (`404`, `502`, `503`, or `500` on failure).
 2. For init and media routes, require `?v=` to equal the asset version (`404` otherwise).
 3. Check `If-None-Match` and answer `304` if it matches.
 4. Produce the body:
@@ -103,9 +107,10 @@ Timestamps are integers in each track's own **timescale** (ticks per second). Co
 | Work | Runs on | Bounded by |
 | --- | --- | --- |
 | HTTP accept, routing, middleware, playlists | Tokio worker threads | `max_concurrent_requests` (soft) |
-| Asset parsing at startup | A dedicated `rayon` pool | `limits.max_startup_parses` |
+| Asset metadata fetch (local or remote) | Async tasks | `limits.max_startup_parses` load slots, remote `max_inflight_reads` |
+| Asset assembly (planning, init segments, rendering) | Tokio blocking pool | The same load slots |
 | Segment header construction | Tokio blocking pool (`spawn_blocking`) | Blocking pool size |
-| Source file reads for segments | Tokio blocking pool, one read per chunk | `limits.max_segment_jobs` slots, held per read |
+| Source reads for segments | Local: blocking pool, one read per chunk; remote: async ranged HTTP | `limits.max_segment_jobs` slots, held per read |
 | Streaming a segment response | One async task per response | Two-item channel, `response_idle_timeout_ms` |
 | Log writing | One dedicated thread (`tracing-appender`) | `logging.buffer_capacity`, lossy |
 | Dropped-log monitor | One dedicated thread | Wakes every 10 s |

@@ -35,7 +35,7 @@ use tokio::time::timeout;
 use super::middleware::X_REQUEST_ID;
 use super::server::{ConnectionLimits, serve_connections};
 use super::{AppState, router};
-use crate::config::{Config, CorsConfig, LimitsConfig, LoggingConfig};
+use crate::config::{Config, CorsConfig, LimitsConfig};
 
 fn fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/h264-aac.mp4")
@@ -44,29 +44,42 @@ fn fixture() -> PathBuf {
 fn test_config(limits: LimitsConfig, cors: CorsConfig) -> Config {
     let mut assets = BTreeMap::new();
     assets.insert("sample".to_owned(), fixture());
-    Config {
-        listen: "127.0.0.1:0".parse().unwrap(),
-        shutdown_delay_ms: 0,
-        shutdown_grace_ms: 1000,
-        cors,
-        segment_duration_ms: 1000,
+    let mut config = Config::for_catalog(
+        fixture().parent().unwrap().to_path_buf(),
         assets,
-        logging: LoggingConfig::default(),
+        1000,
         limits,
-    }
+    );
+    config.cors = cors;
+    config
 }
 
 fn state() -> AppState {
-    AppState::load(&test_config(LimitsConfig::default(), CorsConfig::default()))
-        .expect("fixture should load")
+    AppState::new(&test_config(LimitsConfig::default(), CorsConfig::default()))
+        .expect("state should build")
 }
 
 fn app() -> Router {
     router(state())
 }
 
+/// The asset version, computed on a private runtime so synchronous helpers can call it.
 fn version() -> String {
-    state().asset("sample").unwrap().version().to_owned()
+    std::thread::spawn(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                crate::asset::PackagedAsset::load_local(fixture(), 1000, &LimitsConfig::default())
+                    .await
+                    .unwrap()
+                    .version()
+                    .to_owned()
+            })
+    })
+    .join()
+    .unwrap()
 }
 
 /// Adds the version query the playlists always emit.
@@ -435,7 +448,7 @@ async fn returns_503_when_no_segment_job_slot_frees_in_time() {
         segment_queue_timeout_ms: 20,
         ..LimitsConfig::default()
     };
-    let state = AppState::load(&test_config(limits, CorsConfig::default())).unwrap();
+    let state = AppState::new(&test_config(limits, CorsConfig::default())).unwrap();
     let _held = Arc::clone(&state.segment_jobs)
         .acquire_owned()
         .await
@@ -458,7 +471,7 @@ async fn drops_clients_that_stop_reading_and_frees_the_job_slot() {
         max_segment_jobs: 1,
         ..LimitsConfig::default()
     };
-    let state = AppState::load(&test_config(limits, CorsConfig::default())).unwrap();
+    let state = AppState::new(&test_config(limits, CorsConfig::default())).unwrap();
     let app = router(state.clone());
     let uri = versioned("/hls/sample/video/segments/0/media.m4s");
 
@@ -554,7 +567,7 @@ async fn restricts_cors_to_configured_origins() {
         allowed_origins: vec!["https://player.example.com".to_owned()],
         ..CorsConfig::default()
     };
-    let app = router(AppState::load(&test_config(LimitsConfig::default(), cors)).unwrap());
+    let app = router(AppState::new(&test_config(LimitsConfig::default(), cors)).unwrap());
     let request = |origin: &'static str| {
         Request::get("/health")
             .header(ORIGIN, origin)
@@ -587,7 +600,7 @@ async fn disabled_cors_adds_no_headers() {
         enabled: false,
         ..CorsConfig::default()
     };
-    let app = router(AppState::load(&test_config(LimitsConfig::default(), cors)).unwrap());
+    let app = router(AppState::new(&test_config(LimitsConfig::default(), cors)).unwrap());
 
     let response = app
         .oneshot(
@@ -614,20 +627,23 @@ fn rejects_unparseable_cors_header_names_at_startup() {
         ..CorsConfig::default()
     };
 
-    let error = AppState::load(&test_config(LimitsConfig::default(), cors))
+    let error = AppState::new(&test_config(LimitsConfig::default(), cors))
         .expect_err("invalid header name should fail startup");
 
     assert!(error.to_string().contains("cors.allowed_headers"));
 }
 
-#[test]
-fn rejects_asset_indexes_over_the_memory_budget() {
+#[tokio::test]
+async fn rejects_asset_indexes_over_the_memory_budget() {
     let limits = LimitsConfig {
         max_index_bytes: 1024,
         ..LimitsConfig::default()
     };
+    let state = AppState::new(&test_config(limits, CorsConfig::default())).unwrap();
 
-    let error = AppState::load(&test_config(limits, CorsConfig::default()))
+    let error = state
+        .preload()
+        .await
         .expect_err("tiny budget should fail startup");
 
     assert!(error.to_string().contains("max_index_bytes"));

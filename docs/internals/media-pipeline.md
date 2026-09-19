@@ -4,14 +4,15 @@ These modules turn an MP4 file into segment data. They contain no HTTP and no pr
 
 ```mermaid
 flowchart LR
-    File[(MP4 file)] --> Source[source::LocalMediaSource]
-    Source --> Parser[mp4::parse]
+    File[(MP4 file or remote object)] --> Source[source::MediaSourceKind]
+    Source --> Sparse[source::SparseFile<br/>headers, ftyp, moov]
+    Sparse --> Parser[mp4::parse]
     Parser --> Index[media::MediaIndex]
     Index --> Planner[segment::plan]
     Planner --> Plan[SegmentPlan]
     Index --> Frag[fmp4::prepare_media_segment]
     Plan --> Frag
-    Source --> Init[fmp4::write_init_segment]
+    Sparse --> Init[fmp4::write_init_segment]
     Frag --> Seg[header + byte ranges]
 ```
 
@@ -37,22 +38,21 @@ The sample table is stored compactly, as separate run-length or chunked tables t
 
 ## `source/` : reading bytes
 
-`source/mod.rs` defines the abstraction the rest of the pipeline reads through.
+`source/mod.rs` defines what the rest of the pipeline reads through.
 
 - `ByteRange { offset, length }` with a checked `end()`.
-- `SourceIdentity`: canonical path, device, inode, length, modification time, and an optional `moov_sha256`. It identifies exactly which bytes were parsed.
-- `trait MediaSource { identity(); len(); read_range(range) }`.
+- `SourceIdentity`: an `Origin`, the length, and an optional `moov_sha256`. `Origin::Local` records canonical path, device, inode, and modification time; `Origin::Remote` records the URL without its query string and the validator reads are conditioned on. It identifies exactly which bytes were parsed.
+- `MediaSourceKind`: `Local` or `Http`, with async `read_range` and `verify_unchanged`.
 
-`source/local.rs` implements it for a Linux file.
+`local.rs` (`LocalMediaSource`) is the Linux file source.
 
-- **`open`** canonicalizes the path, opens the file, and records device, inode, length, and mtime from its metadata.
-- **`read_range`** checks that `offset + length` does not overflow and stays within the file, *then* allocates a buffer and fills it with `read_exact_at`. Positioned reads (`pread`) do not touch a shared cursor, so concurrent requests can read the same `File` without locking.
-- **`parser_file`** returns a `try_clone` of the handle, seeked to zero, for the `mp4` crate, which needs `Read + Seek`. This is safe because the clone shares an open file description with the original, but all payload reads use positioned I/O and ignore the shared cursor.
-- **`verify_unchanged`** re-reads file metadata and fails if device, inode, length, or mtime changed since `open`.
+- **`open`** canonicalizes the path, opens the file, and records device, inode, length, and mtime.
+- **`read_range`** checks that `offset + length` does not overflow and stays within the file, *then* allocates and fills the buffer with `read_exact_at`. Positioned reads (`pread`) share no cursor, so concurrent requests can read one `File` without locking. It is synchronous; `MediaSourceKind::read_range` runs it on the blocking pool, one chunk per call.
+- **`verify_unchanged`** re-reads metadata and fails if device, inode, length, or mtime changed since `open`.
 
-`PackagedAsset` currently holds a concrete `LocalMediaSource`, not the trait. The trait exists so a remote source can be added ([TDD 0002](../technical-design/0002-asset-map-interface.md)).
+`http.rs` is the remote source and `sparse.rs` the metadata reader; both are described in [Registry and resolvers](registry-and-resolvers.md#source-reading-the-media).
 
-**Contributing:** keep reads bounds-checked before allocating. Never seek a shared handle on the request path.
+**Contributing:** keep reads bounds-checked before allocating, and never share a seek cursor on the request path.
 
 ## `media/` : the immutable index
 
@@ -60,22 +60,28 @@ The sample table is stored compactly, as separate run-length or chunked tables t
 
 ## `mp4/parser.rs` : bytes to `MediaIndex`
 
-Entry point: `parse(source, limits) -> MediaIndex`. It is deliberately defensive, in this order:
+Entry point: `async parse(&MediaSourceKind, limits) -> ParsedMedia { index, metadata }`, where `metadata` is the `SparseFile` the index was built from (the init segment writer reuses it, so the file is not read again). It is deliberately defensive, in this order:
 
 1. **Size limit.** Reject sources larger than `limits.max_source_bytes`.
-2. **`find_moov`.** Walk top-level boxes with tiny `read_range` calls (8-byte headers, plus 8 more for 64-bit sizes, and size `0` meaning "to end of file"). Reject impossible sizes, and reject a `moov` larger than `limits.max_metadata_bytes`. Nothing in `mdat` is ever read.
-3. **Read `moov` and `validate_raw_moov`.** A small hand-written box walker, independent of the `mp4` crate, checks each track before the crate sees it:
+2. **`SparseFile::fetch`** (async). Walk top-level boxes with tiny reads (8-byte headers, plus 8 more for 64-bit sizes, and size `0` meaning "to end of file"), fetching `ftyp` and `moov` whole. Reject impossible sizes, more than 4,096 top-level boxes, a missing `moov`, and a `moov` larger than `limits.max_metadata_bytes`. Nothing in `mdat` is ever read, whether the source is local or remote. Because every top-level box header is visited, a truncated `mdat` is rejected here, before any table is expanded.
+
+The remaining steps are synchronous CPU work in `parse_metadata`, run on the blocking pool:
+
+3. **`validate_raw_moov`.** A small hand-written box walker, independent of the `mp4` crate, checks each track before the crate sees it:
    - `dinf/dref` must contain exactly one self-contained `url ` entry (no external data references);
    - `stsd` must contain exactly one entry, and it must be `avc1` or `mp4a`; `encv`/`enca` (encrypted) are rejected.
 4. **Hash `moov`** with SHA-256.
-5. **Parse with the `mp4` crate** (`Mp4Reader::read_header`) over `parser_file`. Reject fragmented input, too many tracks, and any edit list (`elst`), because edit lists change presentation timing and are not implemented.
+5. **Parse with the `mp4` crate** (`Mp4Reader::read_header`) over `SparseFile::reader()`. Reject fragmented input, too many tracks, and any edit list (`elst`), because edit lists change presentation timing and are not implemented.
 6. **`parse_track`** per track: kind (subtitle tracks are rejected), `parse_codec` (H.264 needs `avc1` with SPS and PPS; AAC must be AAC-LC), and `parse_samples`.
 7. **`parse_samples`** checks the sample count against `limits.max_samples_per_track`, then expands the tables through `sample_sizes`, `sample_offsets`, `sample_times`, and `composition_offsets`. `sample_times` and `composition_offsets` bound each run-length entry against the sample count *before* expanding it, so a crafted `stts` claiming billions of samples fails immediately. Every sample's byte range must end inside the source.
-8. **Mutation check.** After parsing, call `verify_unchanged` and re-hash `moov`; if either differs, the source changed mid-parse and the result is discarded.
+
+Back in async code:
+
+8. **Mutation check.** `verify_unchanged` on the source, then re-read and re-hash `moov`; if either differs, the source changed mid-parse and the result is discarded. For a remote object `verify_unchanged` re-probes length and validator.
 
 The result carries the `moov` hash in its `SourceIdentity`. `PackagedAsset::version` is derived from it.
 
-**Contributing:** the tests in the module compare every sample against `tests/fixtures/h264-aac.ffprobe.json`, an FFprobe dump committed as ground truth. When adding a rejection rule, mutate the fixture's `moov` bytes in a test (see `find_type` and `fixture_moov` in the tests) instead of committing another binary.
+**Contributing:** the tests in the module compare every sample against `tests/fixtures/h264-aac.ffprobe.json`, an FFprobe dump committed as ground truth. When adding a rejection rule, mutate the fixture's `moov` bytes in a test (see `find_type` and `fixture_moov` in the tests, which run the async fetch on a private runtime) instead of committing another binary.
 
 ## `segment/planner.rs` : where to cut
 
@@ -98,7 +104,7 @@ Two independent writers, both producing ISO BMFF that players can consume.
 
 ### `fmp4/init.rs`: initialization segment
 
-`write_init_segment(source, track_id)` builds `ftyp + moov` for a single track. It re-reads the header through the `mp4` crate, clones the parsed `moov`, keeps only the requested track, zeroes durations, clears every sample table (`stts`, `ctts`, `stss`, `stsc`, `stsz`, `stco`, `co64`), drops `mvex` and `udta`, and writes it back. It then patches the `moov` size and appends a hand-built `mvex/trex` box, which tells players the file is fragmented. Each track gets its own init segment ("separate tracks"; see [ADR 0001](../adr/0001-use-fragmented-mp4-for-media-segments.md)). Init segments are built once at asset load and cached.
+`write_init_segment(metadata, track_id)` builds `ftyp + moov` for a single track from the `SparseFile` kept by the parse. It runs the `mp4` crate over that in-memory metadata, clones the parsed `moov`, keeps only the requested track, zeroes durations, clears every sample table (`stts`, `ctts`, `stss`, `stsc`, `stsz`, `stco`, `co64`), drops `mvex` and `udta`, and writes it back. It then patches the `moov` size and appends a hand-built `mvex/trex` box, which tells players the file is fragmented. Each track gets its own init segment ("separate tracks"; see [ADR 0001](../adr/0001-use-fragmented-mp4-for-media-segments.md)). Init segments are built once at asset load and cached.
 
 ### `fmp4/fragment.rs`: media segment
 
@@ -112,6 +118,6 @@ The `moof` is built by `build_moof` with `mfhd` (sequence number), `traf`, `tfhd
 
 Sample flags mark keyframes (`SYNC_SAMPLE_FLAGS`) versus dependent frames (`NON_SYNC_SAMPLE_FLAGS`); audio samples are always sync. Payload total is checked against `limits.max_segment_bytes`. Boxes larger than 4 GiB are not supported (32-bit sizes).
 
-`write_media_segment` assembles a complete in-memory segment (header plus ranges). Only the `package` command and tests use it; the server streams instead.
+`write_media_segment` is async and assembles a complete in-memory segment (header plus ranges read through the source). Only the `package` command uses it; the server streams instead.
 
 **Contributing:** never read payload inside `prepare_media_segment`; the HTTP path depends on it being metadata-only so `HEAD` and range requests stay cheap. Changing box layout should be validated by the FFmpeg decode tests and `tests/package.rs` (determinism).

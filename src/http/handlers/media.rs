@@ -45,7 +45,7 @@ pub(crate) async fn init_segment(
     Query(version): Query<VersionQuery>,
     headers: HeaderMap,
 ) -> HttpResult<Response> {
-    let asset = state.asset(&asset_id)?;
+    let asset = state.asset(&asset_id).await?;
     version.require(&asset)?;
     let kind = parse_track(&track)?;
     let etag = entity_tag(&asset, &format!("{track}-init"));
@@ -66,7 +66,7 @@ pub(crate) async fn media_segment(
     Query(version): Query<VersionQuery>,
     headers: HeaderMap,
 ) -> HttpResult<Response> {
-    let asset = state.asset(&asset_id)?;
+    let asset = state.asset(&asset_id).await?;
     version.require(&asset)?;
     let kind = parse_track(&track)?;
     let etag = entity_tag(&asset, &format!("{track}-segment-{segment_index}"));

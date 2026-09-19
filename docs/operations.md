@@ -65,6 +65,54 @@ Alert on a rising `vod_segment_queue_timeouts_total` or `vod_http_requests_shed_
 
 Each loaded asset keeps its full sample index in memory, about 40 bytes per sample. `limits.max_index_bytes` (default 4 GiB) rejects a catalog whose combined indexes exceed it, and startup fails with the measured size. Size the container's memory limit above that budget plus headroom for in-flight segment reads (`stream_chunk_bytes` times `max_segment_jobs`).
 
+## Resolving assets from a mapper
+
+By default the catalog is the `[assets.*]` tables and every asset is loaded before the server accepts traffic. To resolve assets from an external service instead, replace those tables with a resolver (see the commented example in `vod.example.toml` and the [Mapper API reference](mapper-api.md)):
+
+```toml
+[resolver]
+type = "http"
+
+[resolver.http]
+base_url = "https://mapper.internal.example.net"
+bearer_token_env = "VOD_MAPPER_TOKEN"
+```
+
+Behavior worth knowing before you run it:
+
+- **Assets load on first request.** The first viewer of an asset pays the resolve, open, and parse cost (about 100 ms for a one-hour file; more for a remote object). Later requests are served from memory. Warm popular assets with a request after deployment if that matters.
+- **Memory is bounded by bytes.** Loaded assets are kept in a least-recently-used cache limited by `limits.max_index_bytes` (about 40 bytes per sample). An evicted asset reloads transparently.
+- **Mapper answers are cached** for their TTL (clamped by `min_ttl_ms` and `max_ttl_ms`), revalidated with `If-None-Match`, and a missing asset is remembered for `negative_ttl_ms`.
+- **A mapper outage does not stop playback of known assets.** An expired answer is served for up to `stale_if_error_ms` while the mapper is down. A location with an `expires_at` (a signed URL) is never served past that time. Unknown assets return `503` until the mapper recovers.
+- **A changed asset switches at once.** When the mapper returns a new version, the old one is dropped. Players holding old versioned URLs get `404` and refetch the playlist.
+- **Set `readiness_probe_interval_ms`** if you want `/ready` to report `503` while the mapper is unreachable, so a load balancer can hold new traffic. `/health` is unaffected.
+- **Startup does not depend on the mapper.** The process starts even if the mapper is down.
+
+### Remote media
+
+A mapper can return `http` locations, in which case the server reads the media from that origin with ranged requests. It reads only the headers and `moov` metadata to load an asset, then fetches segment bytes as they are requested. Because a mapper controls where the server connects, `[remote_media]` is a security boundary:
+
+- `allowed_hosts` must list every origin host; an empty list refuses all remote locations.
+- Locations must be `https` (`allow_insecure_http` is for development), carry no credentials, and are never redirected.
+- Names that resolve to loopback, private, link-local, shared, or multicast addresses are refused unless `allow_private_addresses = true`. Leave it off in production so a mapper cannot point the server at internal services.
+- The origin must support `Range` and send a strong `ETag` or a `Last-Modified`; reads are conditional on it, so a replaced object fails playback instead of mixing versions.
+- Signed URLs should outlive the longest segment request and carry an `expires_at` in the mapper answer.
+
+TLS uses the operating system's trusted roots (the container image carries a CA bundle).
+
+### Mapper and registry metrics
+
+| Metric | Type | Notes |
+| --- | --- | --- |
+| `vod_resolver_requests_total{outcome}` | counter | `ok`, `unchanged`, `not_found`, `unavailable`, `rejected` |
+| `vod_resolution_cache_events_total{event}` | counter | `hit`, `miss`, `revalidate`, `stale`, `negative_hit` |
+| `vod_asset_loads_total{outcome}` | counter | `ok` or `failed` |
+| `vod_asset_load_seconds_total` | counter | Divide by loads for the mean load time |
+| `vod_registry_coalesced_waiters_total` | counter | Requests that shared another request's resolve or load |
+| `vod_loaded_assets`, `vod_loaded_bytes` | gauge | What is in memory now |
+
+Alert on a rising `unavailable` or `rejected` count (mapper trouble or a bad answer), on `stale` events (the mapper is down and old data is being served), and on `failed` loads.
+
 ## Container image
 
 The `Dockerfile` is a four-stage build optimized for Rust:
@@ -82,4 +130,4 @@ docker run --rm -p 3000:3000 --read-only --cap-drop=ALL \
   -v "$PWD/vod.toml:/etc/vod/vod.toml:ro" -v "$PWD/media:/srv/vod:ro" vod-module-rs
 ```
 
-Set `server.listen = "0.0.0.0:3000"` and `storage.media_root = "/srv/vod"` in the mounted configuration. Use `docker stop --time` (or the orchestrator's termination grace period) above `shutdown_delay_ms + shutdown_grace_ms`. The image has no `HEALTHCHECK` because it contains no shell or HTTP client; probe `/health` and `/ready` from the orchestrator.
+Set `server.listen = "0.0.0.0:3000"` and `storage.media_root = "/srv/vod"` in the mounted configuration. The build stage installs `cmake` and a C toolchain because the TLS provider (`aws-lc-sys`) compiles C code. Use `docker stop --time` (or the orchestrator's termination grace period) above `shutdown_delay_ms + shutdown_grace_ms`. The image has no `HEALTHCHECK` because it contains no shell or HTTP client; probe `/health` and `/ready` from the orchestrator.

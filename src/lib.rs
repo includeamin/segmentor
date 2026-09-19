@@ -19,8 +19,12 @@ mod media;
 mod mp4;
 mod observability;
 mod protocol;
+mod registry;
+mod resolver;
 mod segment;
 mod source;
+#[cfg(test)]
+mod testutil;
 
 #[doc(hidden)]
 pub mod benchmarking;

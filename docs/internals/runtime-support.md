@@ -4,7 +4,7 @@ The modules that everything else depends on: configuration, errors, logging, met
 
 ## `config/` : configuration
 
-Files: `mod.rs` (`Config`, parsing, asset resolution, server, storage, packaging, and asset sections, tests), `limits.rs` (`LimitsConfig`), `cors.rs` (`CorsConfig`), `logging.rs` (`LoggingConfig`, `LogLevel`, `LogFormat`).
+Files: `mod.rs` (`Config`, parsing, asset resolution, server, storage, packaging, and asset sections, tests), `limits.rs` (`LimitsConfig`), `cors.rs` (`CorsConfig`), `logging.rs` (`LoggingConfig`, `LogLevel`, `LogFormat`), `resolver.rs` (resolver choice, mapper client, registry, and remote-media settings, plus the redacting `Secret`).
 
 `Config::load(path)` reads a TOML file and calls `Config::parse(contents, config_directory)`, which deserializes into the private `RawConfig`, validates, and returns the public `Config`. The split exists because the file format (relative paths, optional sections) differs from what the rest of the program wants (canonical absolute paths, defaults applied).
 
@@ -18,7 +18,10 @@ Every section uses `#[serde(deny_unknown_fields)]`, so a misspelled key is an er
 | `[logging]` | `LoggingConfig` | `level`, `format` (`json` or `compact`), `buffer_capacity` |
 | `[limits]` | `LimitsConfig` | Resource limits, all greater than zero (table below) |
 | `[cors]` | `CorsConfig` | See [TDD 0003](../technical-design/0003-production-grade-http-api.md#cors) |
-| `[assets.<id>]` | `AssetConfig` | `path` relative to `media_root` |
+| `[assets.<id>]` | `AssetConfig` | `path` relative to `media_root`; static resolver only |
+| `[resolver]`, `[resolver.http]` | `ResolverSettings`, `MapperConfig` | `type = "static"` (default) or `"http"`; the two forms are mutually exclusive with `[assets]` and are validated together |
+| `[registry]` | `RegistryConfig` | Resolution cache size, load queue timeout, and preload |
+| `[remote_media]` | `RemoteMediaConfig` | Host allow-list, address policy, and limits for `http` locations |
 
 **Asset resolution.** The media root is canonicalized and must be a directory. Each asset ID must be ASCII letters, digits, `-`, or `_` (`validate_asset_id`) and each path must be relative. The path is joined to the root and canonicalized (which resolves symlinks), and the result must still start with the root and be a regular file. This blocks `..` and symlink escapes. At least one asset is required, and the count is capped by `limits.max_assets`.
 
@@ -38,7 +41,7 @@ Every section uses `#[serde(deny_unknown_fields)]`, so a misspelled key is an er
 | `stream_chunk_bytes` | 256 KiB | `StreamJob` |
 | `max_request_header_bytes` | 16 KiB | `enforce_header_limit` |
 | `request_timeout_ms` | 30,000 | `TimeoutLayer` |
-| `max_startup_parses` | 4 | The `rayon` pool in `AppState::load` |
+| `max_startup_parses` | 4 | Concurrent asset loads in the registry (also bounds startup preload) |
 | `max_concurrent_requests` | 10,000 | `shed_load` |
 | `response_idle_timeout_ms` | 30,000 | `StreamJob::send` |
 | `max_index_bytes` | 4 GiB | `AppState::load` |
@@ -61,6 +64,8 @@ One `Error` enum built with `thiserror`, and a `Result<T>` alias.
 | `InvalidMedia(String)` | The file is malformed or inconsistent | `500` at request time, startup failure at load |
 | `Unsupported(&'static str)` | Valid but unsupported media (codec, edit list, encryption, ...) | Startup failure at load |
 | `NotFound(&'static str)` | A track or segment does not exist | `404` |
+| `Upstream(String)` | A remote origin or mapper misbehaved or was refused | `502` |
+| `UpstreamUnavailable(String)` | A remote origin timed out or is overloaded (retryable) | `503` |
 | `Io`, `Mp4`, `Toml` | Wrapped library errors | `500` |
 | `Configuration(String)` | Invalid configuration | Startup failure |
 | `Logging(String)` | Logger initialization failure | Startup failure |
