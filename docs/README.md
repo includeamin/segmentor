@@ -55,6 +55,7 @@ Architectural decision records (ADRs) capture durable choices, their context, an
 
 - [Operating the origin](operations.md) covers probes, shutdown, CORS, metrics, and limits for production deployments.
 - [Performance budgets](benchmarks.md) records how the budgets are measured and the current results.
+- [Releasing](releasing.md) explains the commit convention, automatic version tags, and the manual release workflow.
 - [Mapper API reference](mapper-api.md) specifies the service that resolves asset IDs to media locations.
 - [Protocol conformance](conformance.md) lists what the automated conformance suite checks and what still needs vendor validators.
 - [Architecture](architecture.md) records the current boundaries and should evolve with the crate.

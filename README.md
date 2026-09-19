@@ -77,6 +77,10 @@ Assets can also be resolved on demand from an external mapper service, including
 
 CORS, shutdown behavior, concurrency limits, and metrics are configurable in the same file; see [docs/operations.md](docs/operations.md) for production guidance.
 
+## Releases
+
+Merges to `main` are tagged automatically with a semantic version derived from [Conventional Commits](https://www.conventionalcommits.org), so use `feat:`, `fix:`, or `type(scope)!:` in commit and pull request titles. Publish a release, with a generated changelog and a `latest` or `preview` flag, from the **Release** workflow. See [docs/releasing.md](docs/releasing.md).
+
 ## Documentation
 
 The project handbook uses the same `mdBook` interface as the Rust Book. Install the pinned documentation tool and serve the book with live reload:
