@@ -6,14 +6,16 @@ use bytes::Bytes;
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
 use crate::media::{MediaIndex, Sample, Track, TrackKind};
+use crate::mp4::ParsedMedia;
 use crate::protocol::{Presentation, dash, hls};
 use crate::segment::SegmentPlan;
-use crate::source::{LocalMediaSource, MediaSource};
+use crate::source::{ByteRange, LocalMediaSource, MediaSourceKind};
 use crate::{fmp4, mp4, segment};
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub(crate) struct PackagedAsset {
-    pub(crate) source: LocalMediaSource,
+    source: MediaSourceKind,
     pub(crate) index: MediaIndex,
     pub(crate) plan: SegmentPlan,
     init_segments: HashMap<TrackKind, Bytes>,
@@ -31,24 +33,51 @@ struct RenderedManifests {
 }
 
 impl PackagedAsset {
-    pub(crate) fn load(
+    /// Opens a local file and loads it; a convenience for the CLI, tests, and benchmarks.
+    pub(crate) async fn load_local(
         path: impl AsRef<Path>,
         segment_duration_ms: u64,
         limits: &LimitsConfig,
     ) -> Result<Self> {
-        let source = LocalMediaSource::open(path)?;
-        let index = mp4::parse(&source, limits)?;
+        let source = MediaSourceKind::Local(Arc::new(LocalMediaSource::open(path)?));
+        Self::load(source, segment_duration_ms, limits).await
+    }
+
+    /// Fetches metadata from `source`, then plans, writes init segments, and renders playlists.
+    ///
+    /// Reads are async; the CPU-bound assembly runs on the blocking pool so it never stalls the
+    /// async workers.
+    pub(crate) async fn load(
+        source: MediaSourceKind,
+        segment_duration_ms: u64,
+        limits: &LimitsConfig,
+    ) -> Result<Self> {
+        let parsed = mp4::parse(&source, limits).await?;
+        let limits = limits.clone();
+        tokio::task::spawn_blocking(move || {
+            Self::assemble(source, parsed, segment_duration_ms, &limits)
+        })
+        .await
+        .map_err(|error| Error::Io(std::io::Error::other(error)))?
+    }
+
+    fn assemble(
+        source: MediaSourceKind,
+        parsed: ParsedMedia,
+        segment_duration_ms: u64,
+        limits: &LimitsConfig,
+    ) -> Result<Self> {
+        let ParsedMedia { index, metadata } = parsed;
         let plan = segment::plan(&index, segment_duration_ms, limits)?;
         let init_segments = index
             .tracks
             .iter()
             .map(|track| {
-                fmp4::write_init_segment(&source, track.id)
+                fmp4::write_init_segment(&metadata, track.id)
                     .map(Bytes::from)
                     .map(|bytes| (track.kind, bytes))
             })
             .collect::<Result<HashMap<_, _>>>()?;
-
         let version = version_of(&index);
         let rendered =
             RenderedManifests::render(Presentation::new(&index.tracks, &plan, &version))?;
@@ -121,8 +150,13 @@ impl PackagedAsset {
         fmp4::prepare_media_segment(track, track_segment, sequence_number, &self.limits)
     }
 
-    pub(crate) fn read_range(&self, range: crate::source::ByteRange) -> Result<Bytes> {
-        self.source.read_range(range)
+    /// Points a remote asset at a re-signed URL for the same object.
+    pub(crate) fn update_location(&self, url: &reqwest::Url) {
+        self.source.update_location(url);
+    }
+
+    pub(crate) async fn read_range(&self, range: ByteRange) -> Result<Bytes> {
+        self.source.read_range(range).await
     }
 
     pub(crate) fn version(&self) -> &str {

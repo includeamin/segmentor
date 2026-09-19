@@ -10,10 +10,14 @@ use crate::error::{Error, Result};
 mod cors;
 mod limits;
 mod logging;
+mod resolver;
 
 pub(crate) use cors::CorsConfig;
 pub(crate) use limits::LimitsConfig;
 pub(crate) use logging::{LogFormat, LoggingConfig};
+pub(crate) use resolver::{
+    MapperConfig, RegistryConfig, RemoteMediaConfig, ResolverSettings, Secret,
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
@@ -23,11 +27,39 @@ pub(crate) struct Config {
     pub(crate) cors: CorsConfig,
     pub(crate) segment_duration_ms: u64,
     pub(crate) assets: BTreeMap<String, PathBuf>,
+    pub(crate) media_root: PathBuf,
+    pub(crate) resolver: ResolverSettings,
+    pub(crate) registry: RegistryConfig,
+    pub(crate) remote_media: RemoteMediaConfig,
     pub(crate) logging: LoggingConfig,
     pub(crate) limits: LimitsConfig,
 }
 
 impl Config {
+    /// A static-catalog configuration assembled in code, for tests and benchmarks. Assets are
+    /// canonical absolute paths beneath `media_root`.
+    pub(crate) fn for_catalog(
+        media_root: PathBuf,
+        assets: BTreeMap<String, PathBuf>,
+        segment_duration_ms: u64,
+        limits: LimitsConfig,
+    ) -> Self {
+        Self {
+            listen: SocketAddr::from(([127, 0, 0, 1], 0)),
+            shutdown_delay_ms: 0,
+            shutdown_grace_ms: 1000,
+            cors: CorsConfig::default(),
+            segment_duration_ms,
+            assets,
+            media_root,
+            resolver: ResolverSettings::Static,
+            registry: RegistryConfig::default(),
+            remote_media: RemoteMediaConfig::default(),
+            logging: LoggingConfig::default(),
+            limits,
+        }
+    }
+
     pub(crate) fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let contents = fs::read_to_string(path)?;
@@ -36,6 +68,16 @@ impl Config {
     }
 
     fn parse(contents: &str, config_directory: &Path) -> Result<Self> {
+        Self::parse_with(contents, config_directory, &|name| std::env::var(name).ok())
+    }
+
+    /// Parses with an injectable environment so secrets can be tested without touching the
+    /// process environment.
+    fn parse_with(
+        contents: &str,
+        config_directory: &Path,
+        environment: &dyn Fn(&str) -> Option<String>,
+    ) -> Result<Self> {
         let raw: RawConfig = toml::from_str(contents)?;
         if raw.packaging.segment_duration_ms == 0 {
             return Err(Error::Configuration(
@@ -50,6 +92,8 @@ impl Config {
         raw.limits.validate()?;
         raw.server.validate()?;
         raw.cors.validate()?;
+        raw.registry.validate()?;
+        raw.remote_media.validate()?;
         if raw.assets.len() > raw.limits.max_assets {
             return Err(Error::Configuration(format!(
                 "asset count exceeds configured limit {}",
@@ -85,11 +129,34 @@ impl Config {
             }
             assets.insert(asset_id, source);
         }
-        if assets.is_empty() {
-            return Err(Error::Configuration(
-                "at least one asset must be configured".to_owned(),
-            ));
-        }
+        let resolver = match (raw.resolver.kind, raw.resolver.http) {
+            (resolver::ResolverKind::Static, None) => {
+                if assets.is_empty() {
+                    return Err(Error::Configuration(
+                        "at least one asset must be configured".to_owned(),
+                    ));
+                }
+                ResolverSettings::Static
+            }
+            (resolver::ResolverKind::Static, Some(_)) => {
+                return Err(Error::Configuration(
+                    "resolver.http requires resolver.type = \"http\"".to_owned(),
+                ));
+            }
+            (resolver::ResolverKind::Http, None) => {
+                return Err(Error::Configuration(
+                    "resolver.type = \"http\" requires a [resolver.http] table".to_owned(),
+                ));
+            }
+            (resolver::ResolverKind::Http, Some(mapper)) => {
+                if !assets.is_empty() {
+                    return Err(Error::Configuration(
+                        "[assets] cannot be combined with resolver.type = \"http\"".to_owned(),
+                    ));
+                }
+                ResolverSettings::Http(mapper.validate(environment)?)
+            }
+        };
 
         Ok(Self {
             listen: raw.server.listen,
@@ -98,10 +165,23 @@ impl Config {
             cors: raw.cors,
             segment_duration_ms: raw.packaging.segment_duration_ms,
             assets,
+            media_root,
+            resolver,
+            registry: raw.registry,
+            remote_media: raw.remote_media,
             logging: raw.logging,
             limits: raw.limits,
         })
     }
+}
+
+/// Whether `asset_id` is 1 to 128 ASCII letters, digits, `-`, or `_`.
+pub(crate) fn is_valid_asset_id(asset_id: &str) -> bool {
+    !asset_id.is_empty()
+        && asset_id.len() <= 128
+        && asset_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn validate_asset_id(asset_id: &str) -> Result<()> {
@@ -131,6 +211,13 @@ struct RawConfig {
     limits: LimitsConfig,
     #[serde(default)]
     cors: CorsConfig,
+    #[serde(default)]
+    resolver: resolver::RawResolver,
+    #[serde(default)]
+    registry: RegistryConfig,
+    #[serde(default)]
+    remote_media: RemoteMediaConfig,
+    #[serde(default)]
     assets: BTreeMap<String, AssetConfig>,
 }
 
@@ -356,5 +443,110 @@ mod tests {
     fn disabled_cors_skips_validation() {
         parse_with("[cors]\nenabled = false\nallowed_origins = []")
             .expect("disabled CORS should not be validated");
+    }
+
+    #[test]
+    fn parses_an_http_resolver_without_assets() {
+        let config = parse_with(
+            r#"
+            [resolver]
+            type = "http"
+            [resolver.http]
+            base_url = "https://mapper.example.net/"
+            "#,
+        );
+        // parse_with adds a static asset; the two forms are mutually exclusive.
+        assert!(config.is_err());
+
+        let config = Config::parse_with(
+            r#"
+                [server]
+                listen = "127.0.0.1:8080"
+                [storage]
+                media_root = "."
+                [resolver]
+                type = "http"
+                [resolver.http]
+                base_url = "https://mapper.example.net/"
+                bearer_token_env = "VOD_TOKEN"
+                [remote_media]
+                allowed_hosts = ["origin.example.net"]
+            "#,
+            &fixture_directory(),
+            &|name| (name == "VOD_TOKEN").then(|| "secret-value".to_owned()),
+        )
+        .expect("http resolver configuration should be valid");
+
+        let ResolverSettings::Http(mapper) = &config.resolver else {
+            panic!("expected the http resolver");
+        };
+        assert_eq!(mapper.base_url, "https://mapper.example.net");
+        assert_eq!(
+            mapper.bearer_token.as_ref().unwrap().expose(),
+            "secret-value"
+        );
+        assert!(
+            !format!("{mapper:?}").contains("secret-value"),
+            "tokens must be redacted"
+        );
+        assert!(config.assets.is_empty());
+        assert_eq!(config.remote_media.allowed_hosts, ["origin.example.net"]);
+    }
+
+    fn mapper_config(extra: &str) -> Result<Config> {
+        Config::parse_with(
+            &format!(
+                r#"
+                    [server]
+                    listen = "127.0.0.1:8080"
+                    [storage]
+                    media_root = "."
+                    [resolver]
+                    type = "http"
+                    [resolver.http]
+                    {extra}
+                "#
+            ),
+            &fixture_directory(),
+            &|_| None,
+        )
+    }
+
+    #[test]
+    fn rejects_invalid_mapper_settings() {
+        for extra in [
+            "",
+            "base_url = \"http://mapper.example.net\"",
+            "base_url = \"https://user:pw@mapper.example.net\"",
+            "base_url = \"https://mapper.example.net?x=1\"",
+            "base_url = \"https://m.example.net\"\nrequest_timeout_ms = 0",
+            "base_url = \"https://m.example.net\"\nmin_ttl_ms = 999999999",
+            "base_url = \"https://m.example.net\"\nbearer_token_env = \"UNSET_VARIABLE\"",
+        ] {
+            mapper_config(extra).expect_err(extra);
+        }
+        mapper_config("base_url = \"http://localhost:9\"\nallow_insecure_mapper = true")
+            .expect("insecure mapper is allowed when opted in");
+    }
+
+    #[test]
+    fn rejects_inconsistent_resolver_sections() {
+        parse_with(
+            "[resolver]\ntype = \"static\"\n[resolver.http]\nbase_url = \"https://m.example.net\"",
+        )
+        .expect_err("http table needs the http type");
+        Config::parse_with(
+            "[server]\nlisten = \"127.0.0.1:8080\"\n[storage]\nmedia_root = \".\"\n[resolver]\ntype = \"http\"",
+            &fixture_directory(),
+            &|_| None,
+        )
+        .expect_err("http type needs its table");
+    }
+
+    #[test]
+    fn rejects_invalid_remote_media_hosts() {
+        parse_with("[remote_media]\nallowed_hosts = [\"https://origin.example.net/path\"]")
+            .expect_err("hosts must be bare");
+        parse_with("[remote_media]\nmax_inflight_reads = 0").expect_err("limits must be positive");
     }
 }

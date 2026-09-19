@@ -4,11 +4,11 @@
 
 ## `asset.rs` : `PackagedAsset`
 
-A `PackagedAsset` is everything the server knows about one media file, built once by `PackagedAsset::load(path, segment_duration_ms, limits)`:
+A `PackagedAsset` is everything the server knows about one media file, built once by `PackagedAsset::load(source, segment_duration_ms, limits)` (async; `load_local(path, ..)` opens a file first, for the CLI, tests, and benchmarks):
 
 | Field | Meaning |
 | --- | --- |
-| `source` | The open `LocalMediaSource`, used for payload reads |
+| `source` | The open `MediaSourceKind` (local file or remote object), used for payload reads |
 | `index` | The `MediaIndex` from `mp4::parse` |
 | `plan` | The `SegmentPlan` from `segment::plan` |
 | `init_segments` | One cached init segment (`Bytes`) per `TrackKind` |
@@ -16,13 +16,13 @@ A `PackagedAsset` is everything the server knows about one media file, built onc
 | `version` | First 8 bytes of the `moov` SHA-256, as 16 hex characters |
 | `rendered` | Pre-rendered HLS master, HLS media playlists per track, and the DASH manifest |
 
-`load` runs the stages in order: open, parse, plan, build init segments, compute `version`, then render. Rendering takes a `Presentation` built from the index, plan, and version, not the asset, so the asset is constructed once with its rendered text already in place.
+`load` first awaits `mp4::parse` (async metadata fetch), then runs the CPU-bound rest, `assemble`, on the blocking pool: plan, build init segments from the parse's metadata, compute `version`, then render. Rendering takes a `Presentation` built from the index, plan, and version, not the asset, so the asset is constructed once with its rendered text already in place.
 
 Main methods:
 
 - `track(kind)` (delegates to `Presentation::track`), `init_segment(kind)`: look up a track or its init segment; a missing track is `Error::NotFound`, which the HTTP layer turns into `404`.
 - `prepare_media_segment(kind, segment_index)`: find the track's `TrackSegment` in the plan and call `fmp4::prepare_media_segment` with sequence number `segment_index + 1`. An out-of-range index is `Error::NotFound`. It is CPU-only metadata work.
-- `read_range(range)`: a blocking payload read from the source, called from the blocking pool.
+- `read_range(range)`: an async payload read from the source; the streaming task calls it once per chunk.
 - `hls_master_playlist()`, `hls_media_playlist(kind)`, `dash_manifest()`: clone the pre-rendered `Bytes`.
 - `presentation()`: returns the `Presentation` view over this asset.
 - `index_bytes()`: estimated resident memory (samples, init segments, rendered text), used for the startup memory budget.

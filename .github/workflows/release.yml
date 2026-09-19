@@ -1,0 +1,118 @@
+name: Release
+
+# Publishes a GitHub release for an existing version tag, with an automated changelog and a
+# Linux binary. Choose whether it is the latest release or a preview.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to release, for example v1.2.0. Leave empty for the newest tag."
+        required: false
+        default: ""
+      channel:
+        description: "latest marks it as the latest release; preview marks it as a pre-release."
+        type: choice
+        options:
+          - latest
+          - preview
+        default: latest
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || 'newest' }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish the release
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - name: Check out with full history and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The scripts are copied aside because the build checks out the tag, which may predate them.
+      - name: Keep a copy of the release scripts
+        run: cp -r .github/scripts "$RUNNER_TEMP/scripts"
+
+      - name: Resolve the tag and the previous version
+        id: tags
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tags="$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+          tag="${INPUT_TAG:-$(head -n 1 <<<"$tags")}"
+          if [[ -z "$tag" ]]; then
+            echo "::error::No version tag exists yet. Merge a feat or fix change to main first."
+            exit 1
+          fi
+          if ! grep -Fxq "$tag" <<<"$tags"; then
+            echo "::error::$tag is not an existing vX.Y.Z tag."
+            exit 1
+          fi
+          previous="$(grep -Fx -A 1 "$tag" <<<"$tags" | sed -n 2p || true)"
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          echo "previous=$previous" >>"$GITHUB_OUTPUT"
+
+      - name: Generate the changelog
+        env:
+          TAG: ${{ steps.tags.outputs.tag }}
+          PREVIOUS: ${{ steps.tags.outputs.previous }}
+        run: |
+          "$RUNNER_TEMP/scripts/changelog.sh" "$PREVIOUS" "$TAG" \
+            "${{ github.server_url }}/${{ github.repository }}" >"$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Check out the tag
+        env:
+          TAG: ${{ steps.tags.outputs.tag }}
+        run: git checkout --detach "$TAG"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the release binary
+        env:
+          TAG: ${{ steps.tags.outputs.tag }}
+        run: |
+          "$RUNNER_TEMP/scripts/stamp-version.sh" "${TAG#v}"
+          cargo build --release --locked --bin vod-module-rs
+
+      - name: Package
+        env:
+          TAG: ${{ steps.tags.outputs.tag }}
+        run: |
+          set -euo pipefail
+          name="vod-module-rs-${TAG}-${TARGET}"
+          mkdir -p "dist/$name"
+          cp target/release/vod-module-rs LICENSE README.md vod.example.toml "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")
+
+      - name: Publish the release
+        env:
+          TAG: ${{ steps.tags.outputs.tag }}
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          if [[ "$CHANNEL" == "preview" ]]; then
+            flags=(--prerelease --latest=false)
+            title="$TAG (preview)"
+          else
+            flags=(--prerelease=false --latest)
+            title="$TAG"
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$title" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"
+            gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
+          else
+            gh release create "$TAG" dist/*.tar.gz dist/*.sha256 \
+              --title "$title" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag "${flags[@]}"
+          fi

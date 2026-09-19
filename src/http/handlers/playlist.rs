@@ -16,7 +16,7 @@ pub(crate) async fn master_playlist(
     Path(asset_id): Path<String>,
     headers: HeaderMap,
 ) -> HttpResult<Response> {
-    let asset = state.asset(&asset_id)?;
+    let asset = state.asset(&asset_id).await?;
     let etag = entity_tag(&asset, "hls-master");
     if not_modified(&headers, &etag) {
         return not_modified_response(etag, "public, max-age=60");
@@ -29,7 +29,7 @@ pub(crate) async fn media_playlist(
     Path((asset_id, track)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> HttpResult<Response> {
-    let asset = state.asset(&asset_id)?;
+    let asset = state.asset(&asset_id).await?;
     let kind = parse_track(&track)?;
     let etag = entity_tag(&asset, &format!("hls-{track}-playlist"));
     if not_modified(&headers, &etag) {
@@ -43,7 +43,7 @@ pub(crate) async fn dash_manifest(
     Path(asset_id): Path<String>,
     headers: HeaderMap,
 ) -> HttpResult<Response> {
-    let asset = state.asset(&asset_id)?;
+    let asset = state.asset(&asset_id).await?;
     let etag = entity_tag(&asset, "dash-manifest");
     if not_modified(&headers, &etag) {
         return not_modified_response(etag, "public, max-age=60");

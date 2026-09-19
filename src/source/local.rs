@@ -1,14 +1,11 @@
 use std::fs::File;
-use std::io::{BufReader, Seek, SeekFrom};
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::Path;
 
 use bytes::Bytes;
 
-use super::{ByteRange, MediaSource, SourceIdentity};
+use super::{ByteRange, Origin, SourceIdentity};
 use crate::error::{Error, Result};
-
-const PARSER_BUFFER_BYTES: usize = 256 * 1024;
 
 #[derive(Debug)]
 pub(crate) struct LocalMediaSource {
@@ -22,36 +19,45 @@ impl LocalMediaSource {
         let file = File::open(&canonical_path)?;
         let metadata = file.metadata()?;
         let identity = SourceIdentity {
-            canonical_path,
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            origin: Origin::Local {
+                canonical_path,
+                device: metadata.dev(),
+                inode: metadata.ino(),
+                modified_seconds: metadata.mtime(),
+                modified_nanoseconds: metadata.mtime_nsec(),
+            },
             length: metadata.len(),
-            modified_seconds: metadata.mtime(),
-            modified_nanoseconds: metadata.mtime_nsec(),
             moov_sha256: None,
         };
 
         Ok(Self { file, identity })
     }
 
-    /// A buffered handle positioned at the start, for the `mp4` crate.
-    ///
-    /// The crate reads every sample-table entry with a separate `read`, so an unbuffered file
-    /// costs one system call per four bytes: seconds for an hour of media. The buffer turns
-    /// that into a handful of reads. Seeking past `mdat` simply discards it.
-    pub(crate) fn parser_file(&self) -> Result<BufReader<File>> {
-        let mut file = self.file.try_clone()?;
-        file.seek(SeekFrom::Start(0))?;
-        Ok(BufReader::with_capacity(PARSER_BUFFER_BYTES, file))
+    pub(crate) fn identity(&self) -> &SourceIdentity {
+        &self.identity
+    }
+
+    pub(crate) fn len(&self) -> u64 {
+        self.identity.length
     }
 
     pub(crate) fn verify_unchanged(&self) -> Result<()> {
         let metadata = self.file.metadata()?;
-        let unchanged = metadata.dev() == self.identity.device
-            && metadata.ino() == self.identity.inode
+        let Origin::Local {
+            device,
+            inode,
+            modified_seconds,
+            modified_nanoseconds,
+            ..
+        } = &self.identity.origin
+        else {
+            unreachable!("a local source always has a local origin");
+        };
+        let unchanged = metadata.dev() == *device
+            && metadata.ino() == *inode
             && metadata.len() == self.identity.length
-            && metadata.mtime() == self.identity.modified_seconds
-            && metadata.mtime_nsec() == self.identity.modified_nanoseconds;
+            && metadata.mtime() == *modified_seconds
+            && metadata.mtime_nsec() == *modified_nanoseconds;
         if unchanged {
             Ok(())
         } else {
@@ -60,18 +66,9 @@ impl LocalMediaSource {
             ))
         }
     }
-}
 
-impl MediaSource for LocalMediaSource {
-    fn identity(&self) -> &SourceIdentity {
-        &self.identity
-    }
-
-    fn len(&self) -> u64 {
-        self.identity.length
-    }
-
-    fn read_range(&self, range: ByteRange) -> Result<Bytes> {
+    /// Blocking positioned read; async callers go through `MediaSourceKind::read_range`.
+    pub(crate) fn read_range(&self, range: ByteRange) -> Result<Bytes> {
         let end = range.end().ok_or(Error::InvalidRange {
             offset: range.offset,
             length: range.length,

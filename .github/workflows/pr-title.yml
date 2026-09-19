@@ -1,0 +1,25 @@
+name: PR title
+
+# Releases are versioned from Conventional Commits. With squash merges the pull request title
+# becomes the commit subject, so it has to follow the convention.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  conventional-title:
+    name: Conventional Commit title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(feat|fix|perf|docs|refactor|test|build|ci|chore|style|revert)(\([a-z0-9._/-]+\))?!?: .+'
+          if [[ ! "$TITLE" =~ $pattern ]]; then
+            echo "::error title=Pull request title::'$TITLE' must look like 'type(scope): summary', for example 'feat(http): add a readiness probe'. Types: feat, fix, perf, docs, refactor, test, build, ci, chore, style, revert. Add '!' after the type for a breaking change."
+            exit 1
+          fi

@@ -34,20 +34,20 @@ It also reports, without a budget: full-segment transfer latency, throughput, re
 
 ## Results
 
-Recorded 2026-09-19 with `make bench` on a laptop: Intel Core i7-8550U (4 cores, 8 threads, 1.8 GHz base), 15 GiB RAM, Linux, warm page cache, four Tokio workers, one release build.
+Recorded 2026-09-20 with `make bench` on a laptop: Intel Core i7-8550U (4 cores, 8 threads, 1.8 GHz base), 15 GiB RAM, Linux, warm page cache, four Tokio workers, one release build.
 
 | Measurement | Budget | Result |
 | --- | --- | --- |
-| Warm load, 60-minute asset | p95 < 250 ms | p50 65 ms, p95 73 ms |
-| Cold first load | - | 101 ms |
+| Warm load, 60-minute asset | p95 < 250 ms | p50 85 ms, p95 121 ms |
+| Cold first load | - | 110 ms |
 | 6 s header generation | p95 < 10 ms | p95 0.006 ms |
-| HLS master / HLS media / DASH (loopback, includes client) | p95 < 2 ms | p95 0.073 / 0.087 / 0.076 ms |
-| Full 6 s segment over loopback | - | p50 1.9 ms, p95 2.1 ms |
+| HLS master / HLS media / DASH (loopback, includes client) | p95 < 2 ms | p95 0.071 / 0.075 / 0.073 ms |
+| Full 6 s segment over loopback | - | p50 2.4 ms, p95 3.0 ms |
 | Source bytes beyond payload | <= 256 KiB | 0 |
-| 1,000 sustained streams | < 0.1 % errors | 0 of 7,383 requests; 675 req/s, 131 MiB/s |
-| Extra memory per streaming connection | <= 512 KiB | 50 KiB (includes the benchmark's own client buffers) |
+| 1,000 sustained streams | < 0.1 % errors | 0 of 6,302 requests; 598 req/s, 116 MiB/s |
+| Extra memory per streaming connection | <= 512 KiB | 66 KiB (includes the benchmark's own client buffers) |
 
-The 60-minute asset has 600 segments and an index of 8.6 MiB (about 276,000 samples).
+The figures were refreshed after the async source and registry refactor; the load path now fetches metadata through `SparseFile` and assembles on the blocking pool, which costs a few tens of milliseconds more than the earlier synchronous path but stays well inside the budget. The 60-minute asset has 600 segments and an index of 8.6 MiB (about 276,000 samples).
 
 ## A finding the harness caught
 
