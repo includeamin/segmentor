@@ -32,7 +32,7 @@ Places where the implementation differs from the first draft of this document:
 | Address filter: private ranges refused "unless the host is explicitly allow-listed" | Hosts must always be allow-listed, so that clause could never apply. The rule is now an explicit `remote_media.allow_private_addresses` switch, defaulting to off |
 | `MediaSourceKind` with a `stream_range` method | Payload reads use `read_range` in chunks (`stream_chunk_bytes`), which the streaming task already does, so a separate streaming method was unnecessary |
 | Parse over a "virtual reader" to be confirmed by a spike | Confirmed: `mp4::Mp4Reader::read_header` runs over `SparseFile`, which holds only box headers plus `ftyp` and `moov`. The spike passed, so the raw-box-walk fallback was not needed. The same path is now used for local files too, which removed a second read of `moov` |
-| A changed `location` was not part of the cache key | A new location for the same version (a rotated signed URL) also drops the loaded copy, because the loaded asset keeps reading from the URL it was opened with |
+| A changed `location` was not part of the cache key | A new *object* for the same version drops the loaded copy. A URL that differs only in its query (a re-signed URL) instead rotates in place on the loaded asset, refreshes ahead of `expires_at`, and is re-fetched once when the origin rejects a read |
 | Startup preload was an open question | `registry.preload` (default on) loads the static catalog before serving so a bad file stops startup. It is a no-op for a mapper |
 | Reachability probe was optional | Implemented as `resolver.http.readiness_probe_interval_ms`; zero disables it |
 | A weak `ETag` | Refused as a validator, since `If-Range` requires a strong one. `Last-Modified` is the fallback |
@@ -459,4 +459,4 @@ Recorded from review of the first draft.
 
 - **Token rotation.** A single static bearer token is read from the environment at startup. Rotation without a restart (re-reading a file) is not implemented.
 - **Batch resolve.** The obvious first extension if per-request latency on cold assets matters; it would be a new `/v1` path.
-- **Signed-URL lifetime for in-flight streams.** A stream already reading from a signed URL keeps using it after the answer is rotated. Streams that outlive the URL fail; giving the loaded source a swappable location would remove that limit.
+- ~~Signed-URL lifetime for in-flight streams~~ is handled: URLs are refreshed ahead of expiry, rotated in place, and re-fetched once if the origin rejects a read.

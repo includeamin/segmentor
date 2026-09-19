@@ -5,8 +5,10 @@
 //! two versions. The client never follows redirects and resolves names through a filter that
 //! drops private and loopback addresses unless the operator allows them.
 
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use bytes::Bytes;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
@@ -65,7 +67,8 @@ impl RemoteReader {
         display.set_fragment(None);
         Ok(HttpMediaSource {
             reader: self.clone(),
-            url,
+            url: Mutex::new(url),
+            refresher: OnceLock::new(),
             validator: validator.clone(),
             identity: SourceIdentity {
                 origin: Origin::Remote {
@@ -100,11 +103,20 @@ impl RemoteReader {
     }
 }
 
+/// Obtains a fresh URL for a source whose current one the origin has rejected, typically a
+/// signed URL that expired or was revoked. Implemented by the registry, which re-asks the mapper.
+pub(crate) trait LocationRefresher: Send + Sync + std::fmt::Debug {
+    fn refresh(&self) -> Pin<Box<dyn Future<Output = Result<Url>> + Send + '_>>;
+}
+
 /// A remote object opened for ranged reads.
 #[derive(Debug)]
 pub(crate) struct HttpMediaSource {
     reader: RemoteReader,
-    url: Url,
+    /// The URL reads currently use. Replaced when a signed URL is rotated, so streams already
+    /// in flight pick up the new signature on their next read.
+    url: Mutex<Url>,
+    refresher: OnceLock<Arc<dyn LocationRefresher>>,
     validator: Validator,
     identity: SourceIdentity,
 }
@@ -112,6 +124,26 @@ pub(crate) struct HttpMediaSource {
 impl HttpMediaSource {
     pub(crate) fn identity(&self) -> &SourceIdentity {
         &self.identity
+    }
+
+    fn url(&self) -> Url {
+        self.url
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Points subsequent reads at `url`, for example a re-signed copy of the same object.
+    pub(crate) fn set_url(&self, url: Url) {
+        *self
+            .url
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = url;
+    }
+
+    /// Installs the hook used to recover from a rejected URL. Set once, after loading.
+    pub(crate) fn set_refresher(&self, refresher: Arc<dyn LocationRefresher>) {
+        let _ = self.refresher.set(refresher);
     }
 
     /// Reads exactly `range` with `If-Range`, retrying transient failures.
@@ -134,8 +166,18 @@ impl HttpMediaSource {
             .await
             .map_err(|_| Error::UpstreamUnavailable("remote reads are shut down".to_owned()))?;
         let mut attempt = 0;
+        let mut refreshed = false;
         loop {
             match self.fetch(range.offset, end - 1).await {
+                // The origin refused the URL (an expired or revoked signature). Ask for a fresh
+                // one once; a second rejection means the mapper cannot help.
+                Err(Error::LocationRejected(message)) => {
+                    let Some(hook) = self.refresher.get().filter(|_| !refreshed) else {
+                        return Err(Error::LocationRejected(message));
+                    };
+                    refreshed = true;
+                    self.set_url(hook.refresh().await?);
+                }
                 Err(error)
                     if RemoteReader::should_retry(&error)
                         && attempt < self.reader.settings.max_retries =>
@@ -152,7 +194,7 @@ impl HttpMediaSource {
         let mut response = self
             .reader
             .client
-            .get(self.url.clone())
+            .get(self.url())
             .header(RANGE, format!("bytes={first}-{last}"))
             .header(IF_RANGE, self.validator.value())
             .send()
@@ -165,6 +207,12 @@ impl HttpMediaSource {
                 return Err(Error::InvalidMedia(
                     "remote source changed while it was being read".to_owned(),
                 ));
+            }
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::GONE => {
+                return Err(Error::LocationRejected(format!(
+                    "{} while reading from the media origin",
+                    response.status()
+                )));
             }
             status => return Err(status_error(status, "reading from the media origin")),
         }
@@ -205,7 +253,7 @@ impl HttpMediaSource {
 
     /// Re-probes the origin and compares length and validator with what was opened.
     pub(crate) async fn verify_unchanged(&self) -> Result<()> {
-        let (validator, total) = self.reader.probe(&self.url).await?;
+        let (validator, total) = self.reader.probe(&self.url()).await?;
         if validator == self.validator && total == self.identity.length {
             Ok(())
         } else {

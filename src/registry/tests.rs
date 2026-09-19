@@ -32,6 +32,7 @@ fn mapper_settings(url: &str) -> MapperConfig {
         negative_ttl_ms: 60_000,
         error_ttl_ms: 100,
         stale_if_error_ms: 60_000,
+        refresh_margin_ms: 100,
         readiness_probe_interval_ms: 0,
     }
 }
@@ -883,4 +884,239 @@ async fn least_recently_used_assets_are_evicted_over_the_byte_budget() {
     );
     // The evicted asset reloads transparently.
     assert_eq!(status(&app, "/hls/a/master.m3u8").await, StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Signed URLs
+// ---------------------------------------------------------------------------------------------
+
+/// A remote asset whose URL carries a signature the origin insists on.
+async fn signed_harness(tune: impl FnOnce(&mut Config)) -> (Harness, MockOrigin) {
+    let origin = MockOrigin::start().await;
+    origin.add_fixture("h264-aac.mp4");
+    *origin.state.required_query.lock().unwrap() = Some("sig=1".to_owned());
+    let h = harness_with(tune).await;
+    h.mapper.state.always_full.store(true, Ordering::SeqCst);
+    (h, origin)
+}
+
+fn signed(origin: &MockOrigin, signature: &str) -> String {
+    format!("{}?sig={signature}", origin.url("h264-aac.mp4"))
+}
+
+fn short_ttl(mut answer: Answer) -> Answer {
+    answer.ttl_seconds = Some(0);
+    answer
+}
+
+#[tokio::test]
+async fn a_rotated_signature_is_applied_in_place_without_reloading() {
+    let (h, origin) = signed_harness(|_| {}).await;
+    h.mapper.state.set(
+        "movie",
+        short_ttl(Answer::http("v1", &signed(&origin, "1"))),
+    );
+    let (_, _, master) = fetch(&h.app, "/hls/movie/master.m3u8").await;
+    let version = version_in(&master);
+
+    // The mapper re-signs the same object and the old signature stops working.
+    *origin.state.required_query.lock().unwrap() = Some("sig=2".to_owned());
+    h.mapper.state.set(
+        "movie",
+        short_ttl(Answer::http("v1", &signed(&origin, "2"))),
+    );
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let before = origin.state.queries.lock().unwrap().len();
+
+    let (status_code, _, segment) = fetch(
+        &h.app,
+        &format!("/hls/movie/video/segments/0/media.m4s?v={version}"),
+    )
+    .await;
+
+    assert_eq!(status_code, StatusCode::OK);
+    assert!(!segment.is_empty());
+    let used = origin.state.queries.lock().unwrap()[before..].to_vec();
+    assert!(
+        !used.is_empty() && used.iter().all(|query| query == "sig=2"),
+        "the first read after rotation must already use the new signature, got {used:?}"
+    );
+    assert!(
+        metric(&h.state, "vod_asset_loads_total{outcome=\"ok\"} 1"),
+        "the asset must not reload"
+    );
+    assert!(metric(&h.state, "vod_location_rotations_total 1"));
+    assert_eq!(
+        origin.state.queries.lock().unwrap().last().unwrap(),
+        "sig=2"
+    );
+}
+
+#[tokio::test]
+async fn signed_locations_are_refreshed_before_they_expire() {
+    let (h, origin) = signed_harness(|config| {
+        let ResolverSettings::Http(settings) = &mut config.resolver else {
+            unreachable!()
+        };
+        settings.refresh_margin_ms = 1000;
+    })
+    .await;
+    let expiry = |millis: u64| {
+        (OffsetDateTime::now_utc() + Duration::from_millis(millis))
+            .format(&Rfc3339)
+            .unwrap()
+    };
+    let mut first = Answer::http("v1", &signed(&origin, "1"));
+    first.expires_at = Some(expiry(1500));
+    h.mapper.state.set("movie", first);
+    let (_, _, master) = fetch(&h.app, "/hls/movie/master.m3u8").await;
+    let version = version_in(&master);
+    assert_eq!(h.mapper.state.calls(), 1);
+
+    // Halfway to the deadline the next request asks for a fresh signature, while the old one
+    // still works.
+    let mut second = Answer::http("v1", &signed(&origin, "2"));
+    second.expires_at = Some(expiry(10_000));
+    h.mapper.state.set("movie", second);
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    *origin.state.required_query.lock().unwrap() = Some("sig=2".to_owned());
+
+    let status_code = status(
+        &h.app,
+        &format!("/hls/movie/video/segments/1/media.m4s?v={version}"),
+    )
+    .await;
+
+    assert_eq!(status_code, StatusCode::OK);
+    assert_eq!(
+        h.mapper.state.calls(),
+        2,
+        "refreshed ahead of the 1.5 s deadline"
+    );
+    assert!(metric(&h.state, "vod_location_rotations_total 1"));
+}
+
+#[tokio::test]
+async fn an_origin_rejection_triggers_one_refresh_and_the_read_succeeds() {
+    let (h, origin) = signed_harness(|_| {}).await;
+    h.mapper
+        .state
+        .set("movie", Answer::http("v1", &signed(&origin, "1")));
+    let (_, _, master) = fetch(&h.app, "/hls/movie/master.m3u8").await;
+    let version = version_in(&master);
+
+    // The signature is revoked well before the answer's TTL ends.
+    *origin.state.required_query.lock().unwrap() = Some("sig=2".to_owned());
+    h.mapper
+        .state
+        .set("movie", Answer::http("v1", &signed(&origin, "2")));
+    // The refresh is skipped for locations fetched moments ago, so let the answer age.
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+
+    let (status_code, _, segment) = fetch(
+        &h.app,
+        &format!("/hls/movie/video/segments/0/media.m4s?v={version}"),
+    )
+    .await;
+
+    assert_eq!(status_code, StatusCode::OK);
+    assert!(
+        !segment.is_empty(),
+        "the retried read must deliver the segment"
+    );
+    assert_eq!(h.mapper.state.calls(), 2, "exactly one refresh");
+    assert!(metric(&h.state, "vod_location_rotations_total 1"));
+}
+
+#[tokio::test]
+async fn concurrent_rejections_share_one_refresh() {
+    let (h, origin) = signed_harness(|_| {}).await;
+    h.mapper
+        .state
+        .set("movie", Answer::http("v1", &signed(&origin, "1")));
+    let (_, _, master) = fetch(&h.app, "/hls/movie/master.m3u8").await;
+    let version = version_in(&master);
+    *origin.state.required_query.lock().unwrap() = Some("sig=2".to_owned());
+    h.mapper
+        .state
+        .set("movie", Answer::http("v1", &signed(&origin, "2")));
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+
+    let mut tasks = tokio::task::JoinSet::new();
+    for index in 0..3 {
+        let app = h.app.clone();
+        let uri = format!("/hls/movie/video/segments/{index}/media.m4s?v={version}");
+        tasks.spawn(async move { status(&app, &uri).await });
+    }
+    while let Some(result) = tasks.join_next().await {
+        assert_eq!(result.unwrap(), StatusCode::OK);
+    }
+
+    assert_eq!(
+        h.mapper.state.calls(),
+        2,
+        "one initial lookup and one shared refresh"
+    );
+}
+
+#[tokio::test]
+async fn a_location_the_mapper_cannot_fix_fails_after_one_refresh() {
+    let (h, origin) = signed_harness(|_| {}).await;
+    h.mapper
+        .state
+        .set("movie", Answer::http("v1", &signed(&origin, "1")));
+    let (_, _, master) = fetch(&h.app, "/hls/movie/master.m3u8").await;
+    let version = version_in(&master);
+
+    // The origin now refuses every signature the mapper can produce.
+    *origin.state.required_query.lock().unwrap() = Some("sig=never".to_owned());
+    tokio::time::sleep(Duration::from_millis(2100)).await;
+    let response = h
+        .app
+        .clone()
+        .oneshot(
+            Request::get(format!("/hls/movie/video/segments/0/media.m4s?v={version}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(response.into_body(), usize::MAX).await;
+
+    assert!(body.is_err(), "the stream must end in an error, not loop");
+    assert!(
+        h.mapper.state.calls() <= 3,
+        "one refresh at most, then give up"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_location_while_loading_is_a_bad_gateway() {
+    let (h, origin) = signed_harness(|_| {}).await;
+    // The very first signature is already refused.
+    h.mapper
+        .state
+        .set("movie", Answer::http("v1", &signed(&origin, "expired")));
+
+    assert_eq!(
+        status(&h.app, "/hls/movie/master.m3u8").await,
+        StatusCode::BAD_GATEWAY
+    );
+    assert_eq!(h.mapper.state.calls(), 1, "no refresh loop during a load");
+}
+
+#[test]
+fn locations_that_differ_only_in_their_query_are_the_same_object() {
+    use crate::resolver::AssetLocation::{File, Http};
+    let url = |value: &str| Http(reqwest::Url::parse(value).unwrap());
+
+    assert!(
+        url("https://o.example/a.mp4?sig=1").same_object(&url("https://o.example/a.mp4?sig=2"))
+    );
+    assert!(url("https://o.example/a.mp4").same_object(&url("https://o.example:443/a.mp4?x=1")));
+    assert!(!url("https://o.example/a.mp4").same_object(&url("https://o.example/b.mp4")));
+    assert!(!url("https://o.example/a.mp4").same_object(&url("https://p.example/a.mp4")));
+    assert!(!url("https://o.example/a.mp4").same_object(&url("http://o.example/a.mp4")));
+    assert!(File("a.mp4".into()).same_object(&File("a.mp4".into())));
+    assert!(!File("a.mp4".into()).same_object(&url("https://o.example/a.mp4")));
 }

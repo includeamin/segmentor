@@ -27,6 +27,25 @@ pub(crate) enum AssetLocation {
     Http(Url),
 }
 
+impl AssetLocation {
+    /// Whether both locations name the same object, ignoring a URL's query string and fragment.
+    ///
+    /// A signed URL is re-signed by changing its query, so two answers that differ only there
+    /// still point at one object.
+    pub(crate) fn same_object(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::File(a), Self::File(b)) => a == b,
+            (Self::Http(a), Self::Http(b)) => {
+                a.scheme() == b.scheme()
+                    && a.host_str() == b.host_str()
+                    && a.port_or_known_default() == b.port_or_known_default()
+                    && a.path() == b.path()
+            }
+            _ => false,
+        }
+    }
+}
+
 /// A resolver's answer for one asset.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedAsset {
@@ -61,7 +80,7 @@ pub(crate) enum Resolution {
 #[derive(Debug)]
 pub(crate) enum AssetResolver {
     Static(StaticResolver),
-    Http(HttpResolver),
+    Http(Box<HttpResolver>),
 }
 
 impl AssetResolver {

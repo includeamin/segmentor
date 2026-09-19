@@ -65,6 +65,7 @@ path = "h264-aac.mp4"
 # negative_ttl_ms = 5000                  # how long "no such asset" is remembered
 # error_ttl_ms = 2000                     # how long a failed lookup or load is remembered
 # stale_if_error_ms = 60000               # serve an expired answer this long if the mapper is down
+# refresh_margin_ms = 30000               # refresh signed locations this long before expires_at
 # readiness_probe_interval_ms = 0         # >0: /ready reports 503 while the mapper is unreachable
 #
 # [registry]

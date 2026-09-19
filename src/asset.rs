@@ -150,6 +150,11 @@ impl PackagedAsset {
         fmp4::prepare_media_segment(track, track_segment, sequence_number, &self.limits)
     }
 
+    /// Points a remote asset at a re-signed URL for the same object.
+    pub(crate) fn update_location(&self, url: &reqwest::Url) {
+        self.source.update_location(url);
+    }
+
     pub(crate) async fn read_range(&self, range: ByteRange) -> Result<Bytes> {
         self.source.read_range(range).await
     }

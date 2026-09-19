@@ -70,13 +70,21 @@ flowchart LR
 `ensure_resolved`:
 
 - A fresh resolution is used as is. A stale one is revalidated with its version as `If-None-Match` (only if its location has not hit `hard_expiry`).
-- `Resolved` replaces the entry. If the version **or the location** changed, every loaded copy of the asset is dropped first, with no grace period.
+- `Resolved` replaces the entry. If the version or the object (`AssetLocation::same_object`: scheme, host, port, and path) changed, every loaded copy of the asset is dropped first, with no grace period. If only the URL's query changed (a re-signed URL), the loaded asset is kept and `PackagedAsset::update_location` points its remote source at the new URL (**in-place rotation**).
 - `Unchanged` extends `valid_until`, never beyond `hard_expiry`.
 - `NotFound` records a negative entry and evicts loaded copies.
 - `Unavailable` serves the previous answer if it is still inside `stale_if_error` and its location is not hard-expired, and sets a short backoff so the mapper is not asked again for every request. Otherwise the failure is cached for `error_ttl` and returned as `503`.
 - `Rejected` becomes `BadUpstream` (`502`) and is cached briefly.
 
 `load` opens the location through `SourceOpener`, acquires a slot from the load semaphore (`max_startup_parses`, waiting at most `load_queue_timeout`, else `503`), runs `PackagedAsset::load`, and inserts the result. A failed load is cached briefly so a broken file is not reparsed on every request. `SourceOpener` confines `file` locations: join to the media root, canonicalize (resolving symlinks), require a regular file, and require the result to still be under the root.
+
+### Signed URLs
+
+Three mechanisms keep a remote asset readable as its signed URL changes:
+
+1. **Refresh ahead** (`mapper.rs::interpret`): for an answer with `expires_at`, `valid_until` is set to `max(remaining - refresh_margin, remaining / 2)` from now, so the next request after that point revalidates while the old URL still works.
+2. **In-place rotation** (`store_resolution`): described above. `HttpMediaSource` keeps its URL in a mutex, so `set_url` takes effect on the next `fetch`.
+3. **Recovery on rejection**: `HttpMediaSource::read_range` maps origin `401`/`403`/`410` to `Error::LocationRejected`. If the source has a `LocationRefresher`, it calls it once (`refreshed` guards against loops), swaps the URL, and retries. The registry supplies `AssetRefresher`, which holds a `Weak<AssetRegistry>` (no reference cycle) and calls `AssetRegistry::refresh_location`. That takes the asset's single-flight lock, reuses a location fetched within the last two seconds (so a burst of rejections causes one mapper call), and otherwise asks the mapper unconditionally. The refresher is **disarmed while the asset is loading**, because the loading task already holds the flight lock and waiting on it would deadlock.
 
 ### Caches
 

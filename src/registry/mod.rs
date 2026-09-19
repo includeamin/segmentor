@@ -16,6 +16,12 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Weak;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use reqwest::Url;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, Semaphore};
 use tokio::time::{Duration, timeout};
 
@@ -23,7 +29,8 @@ use crate::asset::PackagedAsset;
 use crate::config::{Config, LimitsConfig, is_valid_asset_id};
 use crate::error::{Error, Result};
 use crate::observability::metrics::{CacheEvent, Metrics, ResolverOutcome};
-use crate::resolver::{AssetResolver, Resolution, ResolveError, ResolvedAsset};
+use crate::resolver::{AssetLocation, AssetResolver, Resolution, ResolveError, ResolvedAsset};
+use crate::source::LocationRefresher;
 use cache::LoadedCache;
 pub(crate) use opener::SourceOpener;
 
@@ -59,6 +66,8 @@ pub(crate) struct RegistrySettings {
 enum Slot {
     Found {
         resolved: ResolvedAsset,
+        /// When the mapper last answered, used to avoid refreshing a location twice in a burst.
+        fetched_at: Instant,
         /// While set and in the future, a stale answer is served without asking the mapper.
         backoff_until: Option<Instant>,
     },
@@ -178,6 +187,75 @@ impl AssetRegistry {
         .map_err(|error| RegistryError::LoadFailed(format!("asset task failed: {error}")))?
     }
 
+    /// Re-asks the mapper for `asset_id`'s location after the origin rejected the current URL.
+    ///
+    /// Concurrent callers share one lookup; a location fetched moments ago is reused instead of
+    /// asking again. Fails if the asset changed underneath the caller.
+    pub(crate) async fn refresh_location(
+        self: &Arc<Self>,
+        asset_id: &str,
+    ) -> std::result::Result<Url, RegistryError> {
+        let flight = self.enter_flight(asset_id).await;
+        let registry = Arc::clone(self);
+        let id = asset_id.to_owned();
+        tokio::spawn(async move {
+            let _flight = flight;
+            registry.refresh_inner(&id).await
+        })
+        .await
+        .map_err(|error| RegistryError::LoadFailed(format!("refresh task failed: {error}")))?
+    }
+
+    async fn refresh_inner(&self, asset_id: &str) -> std::result::Result<Url, RegistryError> {
+        const RECENT: Duration = Duration::from_secs(2);
+        let (old, fetched_at) = match lock(&self.inner).resolutions.get(asset_id) {
+            Some(Slot::Found {
+                resolved,
+                fetched_at,
+                ..
+            }) => (resolved.clone(), *fetched_at),
+            _ => return Err(RegistryError::NotFound),
+        };
+        if fetched_at.elapsed() < RECENT
+            && let AssetLocation::Http(url) = &old.location
+        {
+            return Ok(url.clone());
+        }
+        // No known version: the mapper must send a full answer with a new signature.
+        match self.resolver.resolve(asset_id, None).await {
+            Ok(Resolution::Resolved(new)) => {
+                self.metrics.resolver_result(ResolverOutcome::Ok);
+                self.store_resolution(asset_id, &new, Some(&old));
+                match new.location {
+                    AssetLocation::Http(url)
+                        if new.version == old.version
+                            && old.location.same_object(&AssetLocation::Http(url.clone())) =>
+                    {
+                        Ok(url)
+                    }
+                    _ => Err(RegistryError::BadUpstream(
+                        "asset changed while it was being read".to_owned(),
+                    )),
+                }
+            }
+            Ok(Resolution::Unchanged { .. }) => Err(RegistryError::BadUpstream(
+                "mapper answered unchanged to an unconditional request".to_owned(),
+            )),
+            Err(ResolveError::NotFound) => {
+                self.metrics.resolver_result(ResolverOutcome::NotFound);
+                Err(RegistryError::NotFound)
+            }
+            Err(ResolveError::Unavailable(message)) => {
+                self.metrics.resolver_result(ResolverOutcome::Unavailable);
+                Err(RegistryError::Unavailable(message))
+            }
+            Err(ResolveError::Rejected(message)) => {
+                self.metrics.resolver_result(ResolverOutcome::Rejected);
+                Err(RegistryError::BadUpstream(message))
+            }
+        }
+    }
+
     /// Whether the resolver's backend is reachable, for readiness reporting.
     pub(crate) async fn resolver_healthy(&self) -> bool {
         self.resolver.healthy().await
@@ -264,6 +342,7 @@ impl AssetRegistry {
                 Some(Slot::Found {
                     resolved,
                     backoff_until,
+                    ..
                 }) => {
                     let fresh = now < resolved.valid_until;
                     let serving_stale = !fresh
@@ -299,7 +378,7 @@ impl AssetRegistry {
     }
 
     async fn resolve_and_load(
-        &self,
+        self: &Arc<Self>,
         asset_id: &str,
     ) -> std::result::Result<Arc<PackagedAsset>, RegistryError> {
         let resolved = self.ensure_resolved(asset_id).await?;
@@ -351,6 +430,7 @@ impl AssetRegistry {
                     asset_id,
                     Slot::Found {
                         resolved: resolved.clone(),
+                        fetched_at: Instant::now(),
                         backoff_until: None,
                     },
                 );
@@ -381,6 +461,9 @@ impl AssetRegistry {
                         asset_id,
                         Slot::Found {
                             resolved: resolved.clone(),
+                            // The mapper did not answer, so the entry counts as old: a refresh
+                            // triggered by an origin rejection must really ask.
+                            fetched_at: now.checked_sub(Duration::from_secs(60)).unwrap_or(now),
                             backoff_until: Some(Instant::now() + self.settings.error_ttl),
                         },
                     );
@@ -400,18 +483,29 @@ impl AssetRegistry {
     }
 
     fn store_resolution(&self, asset_id: &str, new: &ResolvedAsset, old: Option<&ResolvedAsset>) {
-        // A new version, or a new location for the same version (rotated signed URL), must not
-        // keep serving from the previous source. There is no grace period for old versions.
-        let changed =
-            old.is_some_and(|old| old.version != new.version || old.location != new.location);
-        if changed {
-            lock(&self.loaded).retain_only(asset_id, None);
-            self.publish_loaded();
+        if let Some(old) = old {
+            if old.version != new.version || !old.location.same_object(&new.location) {
+                // A different version or object: the loaded copy is stale. There is no grace
+                // period for old versions.
+                lock(&self.loaded).retain_only(asset_id, None);
+                self.publish_loaded();
+            } else if let (AssetLocation::Http(url), true) =
+                (&new.location, old.location != new.location)
+            {
+                // The same object under a fresh signature: keep the loaded asset and point it at
+                // the new URL, so nothing is reparsed and streams in flight simply carry on.
+                if let Some(asset) = lock(&self.loaded).get(asset_id, &new.version) {
+                    asset.update_location(url);
+                    self.metrics.location_rotated();
+                    tracing::debug!(event = "location_rotated", asset.id = asset_id);
+                }
+            }
         }
         self.put_slot(
             asset_id,
             Slot::Found {
                 resolved: new.clone(),
+                fetched_at: Instant::now(),
                 backoff_until: None,
             },
         );
@@ -452,7 +546,7 @@ impl AssetRegistry {
     }
 
     async fn load(
-        &self,
+        self: &Arc<Self>,
         asset_id: &str,
         resolved: &ResolvedAsset,
     ) -> std::result::Result<Arc<PackagedAsset>, RegistryError> {
@@ -465,11 +559,27 @@ impl AssetRegistry {
             .map_err(|_| RegistryError::Unavailable("asset loading is shut down".to_owned()))?;
 
         let started = Instant::now();
+        // Disarmed while loading: the load holds this asset's flight lock, which a refresh would
+        // need, and a URL that was just issued should not be rejected.
+        let refresher = Arc::new(AssetRefresher {
+            registry: Arc::downgrade(self),
+            asset_id: asset_id.to_owned(),
+            armed: AtomicBool::new(false),
+        });
         let result = async {
-            let source = self.opener.open(&resolved.location).await?;
+            let source = self
+                .opener
+                .open(
+                    &resolved.location,
+                    Arc::clone(&refresher) as Arc<dyn LocationRefresher>,
+                )
+                .await?;
             PackagedAsset::load(source, self.settings.segment_duration_ms, &self.limits).await
         }
         .await;
+        if result.is_ok() {
+            refresher.armed.store(true, Ordering::Relaxed);
+        }
         self.metrics.asset_load(result.is_ok(), started.elapsed());
         match result {
             Ok(asset) => {
@@ -506,7 +616,9 @@ impl AssetRegistry {
 fn map_load_error(error: Error) -> RegistryError {
     match error {
         Error::UpstreamUnavailable(message) => RegistryError::Unavailable(message),
-        Error::Upstream(message) => RegistryError::BadUpstream(message),
+        Error::Upstream(message) | Error::LocationRejected(message) => {
+            RegistryError::BadUpstream(message)
+        }
         other => RegistryError::LoadFailed(other.to_string()),
     }
 }
@@ -517,5 +629,37 @@ fn describe(error: &RegistryError) -> String {
         RegistryError::Unavailable(message)
         | RegistryError::BadUpstream(message)
         | RegistryError::LoadFailed(message) => message.clone(),
+    }
+}
+
+/// Lets a loaded remote asset ask the registry for a fresh signed URL.
+#[derive(Debug)]
+struct AssetRefresher {
+    registry: Weak<AssetRegistry>,
+    asset_id: String,
+    /// Enabled once the asset has loaded; see `AssetRegistry::load`.
+    armed: AtomicBool,
+}
+
+impl LocationRefresher for AssetRefresher {
+    fn refresh(&self) -> Pin<Box<dyn Future<Output = Result<Url>> + Send + '_>> {
+        Box::pin(async move {
+            if !self.armed.load(Ordering::Relaxed) {
+                return Err(Error::Upstream(
+                    "media origin rejected the location while the asset was loading".to_owned(),
+                ));
+            }
+            let registry = self
+                .registry
+                .upgrade()
+                .ok_or_else(|| Error::Upstream("the asset registry has shut down".to_owned()))?;
+            registry
+                .refresh_location(&self.asset_id)
+                .await
+                .map_err(|error| match error {
+                    RegistryError::Unavailable(message) => Error::UpstreamUnavailable(message),
+                    other => Error::Upstream(describe(&other)),
+                })
+        })
     }
 }

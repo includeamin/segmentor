@@ -33,6 +33,7 @@ pub(crate) struct Metrics {
     loads_failed: AtomicU64,
     load_micros: AtomicU64,
     coalesced_waiters: AtomicU64,
+    location_rotations: AtomicU64,
     loaded_assets: AtomicU64,
     loaded_bytes: AtomicU64,
     connections_rejected: AtomicU64,
@@ -68,6 +69,7 @@ impl Metrics {
             loads_failed: AtomicU64::new(0),
             load_micros: AtomicU64::new(0),
             coalesced_waiters: AtomicU64::new(0),
+            location_rotations: AtomicU64::new(0),
             loaded_assets: AtomicU64::new(0),
             loaded_bytes: AtomicU64::new(0),
             connections_rejected: AtomicU64::new(0),
@@ -201,6 +203,11 @@ impl Metrics {
     /// A request that waited on another request's in-flight resolve or load.
     pub(crate) fn coalesced_waiter(&self) {
         self.coalesced_waiters.fetch_add(1, Relaxed);
+    }
+
+    /// A loaded asset's signed URL was replaced in place, without reloading it.
+    pub(crate) fn location_rotated(&self) {
+        self.location_rotations.fetch_add(1, Relaxed);
     }
 
     pub(crate) fn set_loaded(&self, assets: usize, bytes: u64) {
@@ -391,11 +398,12 @@ impl Metrics {
         }
         let _ = writeln!(
             out,
-            "# HELP vod_asset_loads_total Asset loads by outcome.\n# TYPE vod_asset_loads_total counter\nvod_asset_loads_total{{outcome=\"ok\"}} {}\nvod_asset_loads_total{{outcome=\"failed\"}} {}\n# HELP vod_asset_load_seconds_total Time spent loading assets.\n# TYPE vod_asset_load_seconds_total counter\nvod_asset_load_seconds_total {}\n# HELP vod_registry_coalesced_waiters_total Requests that shared another request's resolve or load.\n# TYPE vod_registry_coalesced_waiters_total counter\nvod_registry_coalesced_waiters_total {}\n# HELP vod_loaded_assets Assets currently held in memory.\n# TYPE vod_loaded_assets gauge\nvod_loaded_assets {}\n# HELP vod_loaded_bytes Estimated bytes held by loaded assets.\n# TYPE vod_loaded_bytes gauge\nvod_loaded_bytes {}",
+            "# HELP vod_asset_loads_total Asset loads by outcome.\n# TYPE vod_asset_loads_total counter\nvod_asset_loads_total{{outcome=\"ok\"}} {}\nvod_asset_loads_total{{outcome=\"failed\"}} {}\n# HELP vod_asset_load_seconds_total Time spent loading assets.\n# TYPE vod_asset_load_seconds_total counter\nvod_asset_load_seconds_total {}\n# HELP vod_registry_coalesced_waiters_total Requests that shared another request's resolve or load.\n# TYPE vod_registry_coalesced_waiters_total counter\nvod_registry_coalesced_waiters_total {}\n# HELP vod_location_rotations_total Signed URLs replaced in place on loaded assets.\n# TYPE vod_location_rotations_total counter\nvod_location_rotations_total {}\n# HELP vod_loaded_assets Assets currently held in memory.\n# TYPE vod_loaded_assets gauge\nvod_loaded_assets {}\n# HELP vod_loaded_bytes Estimated bytes held by loaded assets.\n# TYPE vod_loaded_bytes gauge\nvod_loaded_bytes {}",
             self.loads_ok.load(Relaxed),
             self.loads_failed.load(Relaxed),
             Duration::from_micros(self.load_micros.load(Relaxed)).as_secs_f64(),
             self.coalesced_waiters.load(Relaxed),
+            self.location_rotations.load(Relaxed),
             self.loaded_assets.load(Relaxed),
             self.loaded_bytes.load(Relaxed),
         );

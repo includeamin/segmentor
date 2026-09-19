@@ -68,6 +68,7 @@ pub(super) struct RawMapper {
     negative_ttl_ms: u64,
     error_ttl_ms: u64,
     stale_if_error_ms: u64,
+    refresh_margin_ms: u64,
     readiness_probe_interval_ms: u64,
     allow_insecure_mapper: bool,
 }
@@ -87,6 +88,7 @@ impl Default for RawMapper {
             negative_ttl_ms: 5000,
             error_ttl_ms: 2000,
             stale_if_error_ms: 60_000,
+            refresh_margin_ms: 30_000,
             readiness_probe_interval_ms: 0,
             allow_insecure_mapper: false,
         }
@@ -108,6 +110,10 @@ pub(crate) struct MapperConfig {
     pub(crate) negative_ttl_ms: u64,
     pub(crate) error_ttl_ms: u64,
     pub(crate) stale_if_error_ms: u64,
+    /// How long before a location's `expires_at` the answer is refreshed, so a signed URL is
+    /// replaced while the old one still works. Refresh never happens before half the remaining
+    /// lifetime has passed, so very short-lived URLs do not thrash.
+    pub(crate) refresh_margin_ms: u64,
     /// Zero disables the background reachability probe.
     pub(crate) readiness_probe_interval_ms: u64,
 }
@@ -141,6 +147,7 @@ impl RawMapper {
             || self.max_ttl_ms == 0
             || self.negative_ttl_ms == 0
             || self.error_ttl_ms == 0
+            || self.refresh_margin_ms == 0
         {
             return fail("resolver.http timeouts, sizes, and TTLs must be greater than zero");
         }
@@ -172,6 +179,7 @@ impl RawMapper {
             negative_ttl_ms: self.negative_ttl_ms,
             error_ttl_ms: self.error_ttl_ms,
             stale_if_error_ms: self.stale_if_error_ms,
+            refresh_margin_ms: self.refresh_margin_ms,
             readiness_probe_interval_ms: self.readiness_probe_interval_ms,
         })
     }

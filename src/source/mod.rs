@@ -15,7 +15,9 @@ use bytes::Bytes;
 
 use crate::error::{Error, Result};
 
-pub(crate) use http::{HttpMediaSource, RemoteReader, RemoteSettings, is_public_address};
+pub(crate) use http::{
+    HttpMediaSource, LocationRefresher, RemoteReader, RemoteSettings, is_public_address,
+};
 pub(crate) use local::LocalMediaSource;
 pub(crate) use sparse::SparseFile;
 
@@ -89,6 +91,13 @@ impl MediaSourceKind {
                     .map_err(|error| Error::Io(std::io::Error::other(error)))?
             }
             Self::Http(source) => source.read_range(range).await,
+        }
+    }
+
+    /// Points a remote source at a re-signed URL for the same object. A no-op for local files.
+    pub(crate) fn update_location(&self, url: &reqwest::Url) {
+        if let Self::Http(source) = self {
+            source.set_url(url.clone());
         }
     }
 
