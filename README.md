@@ -77,6 +77,17 @@ Assets can also be resolved on demand from an external mapper service, including
 
 CORS, shutdown behavior, concurrency limits, and metrics are configurable in the same file; see [docs/operations.md](docs/operations.md) for production guidance.
 
+## Web player demo
+
+`demo/index.html` is a single-file player (hls.js and dash.js, loaded from a CDN) that plays an asset over HLS or DASH and shows live server metrics parsed from `/metrics` next to it: request rate, throughput, per-route latency, errors, and resolver and cache events. It also shows player-side stats such as buffer, bandwidth, and dropped frames.
+
+```sh
+make serve   # terminal 1: the origin on :3000
+make demo    # terminal 2: the player on http://127.0.0.1:8080
+```
+
+The page reads `/metrics` cross-origin, so keep `[cors]` enabled in the config, as in `vod.example.toml`.
+
 ## Releases
 
 Merges to `main` are tagged automatically with a semantic version derived from [Conventional Commits](https://www.conventionalcommits.org), so use `feat:`, `fix:`, or `type(scope)!:` in commit and pull request titles. Publish a release, with a generated changelog and a `latest` or `preview` flag, from the **Release** workflow. See [docs/releasing.md](docs/releasing.md).
