@@ -62,7 +62,7 @@ One `Error` enum built with `thiserror`, and a `Result<T>` alias.
 | --- | --- | --- |
 | `InvalidRange` | A byte range fell outside a source | `500` |
 | `InvalidMedia(String)` | The file is malformed or inconsistent | `500` at request time, startup failure at load |
-| `Unsupported(&'static str)` | Valid but unsupported media (codec, edit list, encryption, ...) | Startup failure at load |
+| `Unsupported(String)` | Valid but unsupported media (codec, edit list, encryption, ...) | Startup failure at load |
 | `NotFound(&'static str)` | A track or segment does not exist | `404` |
 | `Upstream(String)` | A remote origin or mapper misbehaved or was refused | `502` |
 | `UpstreamUnavailable(String)` | A remote origin timed out or is overloaded (retryable) | `503` |

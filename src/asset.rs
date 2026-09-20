@@ -5,7 +5,7 @@ use bytes::Bytes;
 
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
-use crate::media::{MediaIndex, Sample, Track, TrackKind};
+use crate::media::{MediaIndex, Sample, Track, TrackKey};
 use crate::mp4::ParsedMedia;
 use crate::protocol::{Presentation, dash, hls};
 use crate::segment::SegmentPlan;
@@ -18,7 +18,7 @@ pub(crate) struct PackagedAsset {
     source: MediaSourceKind,
     pub(crate) index: MediaIndex,
     pub(crate) plan: SegmentPlan,
-    init_segments: HashMap<TrackKind, Bytes>,
+    init_segments: HashMap<TrackKey, Bytes>,
     limits: LimitsConfig,
     version: String,
     rendered: RenderedManifests,
@@ -28,7 +28,7 @@ pub(crate) struct PackagedAsset {
 #[derive(Debug, Default)]
 struct RenderedManifests {
     hls_master: Bytes,
-    hls_media: HashMap<TrackKind, Bytes>,
+    hls_media: HashMap<TrackKey, Bytes>,
     dash: Bytes,
 }
 
@@ -75,7 +75,7 @@ impl PackagedAsset {
             .map(|track| {
                 fmp4::write_init_segment(&metadata, track.id)
                     .map(Bytes::from)
-                    .map(|bytes| (track.kind, bytes))
+                    .map(|bytes| (track.key, bytes))
             })
             .collect::<Result<HashMap<_, _>>>()?;
         let version = version_of(&index);
@@ -92,8 +92,8 @@ impl PackagedAsset {
         })
     }
 
-    pub(crate) fn track(&self, kind: TrackKind) -> Result<&Track> {
-        self.presentation().track(kind)
+    pub(crate) fn track(&self, key: TrackKey) -> Result<&Track> {
+        self.presentation().track(key)
     }
 
     /// The read-only view renderers work from.
@@ -101,9 +101,9 @@ impl PackagedAsset {
         Presentation::new(&self.index.tracks, &self.plan, &self.version)
     }
 
-    pub(crate) fn init_segment(&self, kind: TrackKind) -> Result<Bytes> {
+    pub(crate) fn init_segment(&self, key: TrackKey) -> Result<Bytes> {
         self.init_segments
-            .get(&kind)
+            .get(&key)
             .cloned()
             .ok_or(Error::NotFound("track does not exist"))
     }
@@ -112,10 +112,10 @@ impl PackagedAsset {
         self.rendered.hls_master.clone()
     }
 
-    pub(crate) fn hls_media_playlist(&self, kind: TrackKind) -> Result<Bytes> {
+    pub(crate) fn hls_media_playlist(&self, key: TrackKey) -> Result<Bytes> {
         self.rendered
             .hls_media
-            .get(&kind)
+            .get(&key)
             .cloned()
             .ok_or(Error::NotFound("track does not exist"))
     }
@@ -126,10 +126,10 @@ impl PackagedAsset {
 
     pub(crate) fn prepare_media_segment(
         &self,
-        kind: TrackKind,
+        key: TrackKey,
         segment_index: u32,
     ) -> Result<fmp4::PreparedSegment> {
-        let track = self.track(kind)?;
+        let track = self.track(key)?;
         let segment = self
             .plan
             .segments
@@ -148,6 +148,35 @@ impl PackagedAsset {
             .ok_or_else(|| Error::InvalidMedia("sequence number overflow".to_owned()))?;
 
         fmp4::prepare_media_segment(track, track_segment, sequence_number, &self.limits)
+    }
+
+    /// Logs what packaging left out or adjusted, so an operator can see why a file behaves as it
+    /// does without inspecting it.
+    pub(crate) fn log_load_details(&self, asset_id: &str) {
+        for skipped in &self.index.skipped_tracks {
+            tracing::info!(
+                event = "track_skipped",
+                asset.id = asset_id,
+                track.id = skipped.id,
+                track.handler = %skipped.handler,
+                reason = skipped.reason,
+            );
+        }
+        for track in self
+            .index
+            .tracks
+            .iter()
+            .filter(|track| track.timeline_shift > 0)
+        {
+            tracing::info!(
+                event = "edit_list_applied",
+                asset.id = asset_id,
+                track.id = track.id,
+                track.key = %track.key,
+                timeline_shift_ticks = track.timeline_shift,
+                track.timescale = track.timescale,
+            );
+        }
     }
 
     /// Points a remote asset at a re-signed URL for the same object.
@@ -192,8 +221,8 @@ impl RenderedManifests {
             .tracks()
             .iter()
             .map(|track| {
-                hls::media_playlist(presentation, track.kind)
-                    .map(|playlist| (track.kind, Bytes::from(playlist)))
+                hls::media_playlist(presentation, track.key)
+                    .map(|playlist| (track.key, Bytes::from(playlist)))
             })
             .collect::<Result<HashMap<_, _>>>()?;
         Ok(Self {

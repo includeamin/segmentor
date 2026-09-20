@@ -30,7 +30,7 @@ pub(crate) enum Error {
     Logging(String),
 
     #[error("unsupported media: {0}")]
-    Unsupported(&'static str),
+    Unsupported(String),
 
     #[error("not found: {0}")]
     NotFound(&'static str),

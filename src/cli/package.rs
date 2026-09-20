@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
-use crate::media::{CodecConfig, TrackKind};
+use crate::media::CodecConfig;
 use crate::mp4::ParsedMedia;
 use crate::source::{LocalMediaSource, MediaSourceKind, Origin};
 use crate::{fmp4, mp4, segment};
@@ -71,10 +71,7 @@ async fn package(options: &PackageOptions) -> Result<()> {
     std::fs::create_dir_all(&options.output)?;
 
     for track in &index.tracks {
-        let label = match track.kind {
-            TrackKind::Audio => "audio",
-            TrackKind::Video => "video",
-        };
+        let label = track.key.to_string();
         let init = fmp4::write_init_segment(&metadata, track.id)?;
         std::fs::write(options.output.join(format!("{label}-init.mp4")), init)?;
 

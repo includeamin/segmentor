@@ -47,16 +47,16 @@ pub(crate) async fn init_segment(
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
     version.require(&asset)?;
-    let kind = parse_track(&track)?;
+    let key = parse_track(&track)?;
     let etag = entity_tag(&asset, &format!("{track}-init"));
     if not_modified(&headers, &etag) {
         return not_modified_response(etag, "public, max-age=31536000, immutable");
     }
-    let bytes = asset.init_segment(kind)?;
+    let bytes = asset.init_segment(key)?;
     let Ok(range) = requested_range(&headers, bytes.len() as u64, &etag) else {
         return range_not_satisfiable(bytes.len() as u64);
     };
-    media_response(&bytes, kind, etag, range)
+    media_response(&bytes, key.kind, etag, range)
 }
 
 pub(crate) async fn media_segment(
@@ -68,7 +68,7 @@ pub(crate) async fn media_segment(
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
     version.require(&asset)?;
-    let kind = parse_track(&track)?;
+    let key = parse_track(&track)?;
     let etag = entity_tag(&asset, &format!("{track}-segment-{segment_index}"));
     if not_modified(&headers, &etag) {
         return not_modified_response(etag, "public, max-age=31536000, immutable");
@@ -78,7 +78,7 @@ pub(crate) async fn media_segment(
     // the blocking pool rather than an async worker.
     let prepared = {
         let asset = Arc::clone(&asset);
-        tokio::task::spawn_blocking(move || asset.prepare_media_segment(kind, segment_index))
+        tokio::task::spawn_blocking(move || asset.prepare_media_segment(key, segment_index))
             .await
             .map_err(|error| HttpError::internal(error.to_string()))??
     };
@@ -97,7 +97,7 @@ pub(crate) async fn media_segment(
             total_length,
             requested_interval,
             etag,
-            segment_content_type(kind),
+            segment_content_type(key.kind),
         )
         .body(Body::empty())
         .map_err(|error| HttpError::internal(error.to_string()));
@@ -132,7 +132,7 @@ pub(crate) async fn media_segment(
         total_length,
         requested_interval,
         etag,
-        segment_content_type(kind),
+        segment_content_type(key.kind),
     )
     .body(Body::from_stream(ReceiverStream::new(receiver)))
     .map_err(|error| HttpError::internal(error.to_string()))

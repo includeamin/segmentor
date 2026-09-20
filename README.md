@@ -62,7 +62,7 @@ Each configured asset exposes:
 ```text
 /hls/{asset}/master.m3u8
 /hls/{asset}/video/index.m3u8
-/hls/{asset}/audio/index.m3u8
+/hls/{asset}/audio-{n}/index.m3u8   (one per audio track, numbered from 1)
 /hls/{asset}/{track}/init.mp4
 /hls/{asset}/{track}/segments/{index}/media.m4s
 /dash/{asset}/manifest.mpd

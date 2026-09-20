@@ -87,6 +87,7 @@ doc-open: ## Build and open rustdoc documentation
 
 fixtures: ## Regenerate media test fixtures with FFmpeg
 	sh tests/fixtures/generate.sh
+	sh tests/fixtures/generate-variants.sh
 
 site: book doc ## Build mdBook with rustdoc under /api
 	rm -rf target/book/api

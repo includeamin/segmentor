@@ -125,9 +125,13 @@ async fn serves_master_playlist_and_media_objects() {
 
 #[tokio::test]
 async fn serves_audio_media_with_an_audio_content_type() {
-    let init = get(&app(), &versioned("/hls/sample/audio/init.mp4")).await;
+    let init = get(&app(), &versioned("/hls/sample/audio-1/init.mp4")).await;
     assert_eq!(init.headers()[CONTENT_TYPE], "audio/mp4");
-    let segment = get(&app(), &versioned("/hls/sample/audio/segments/0/media.m4s")).await;
+    let segment = get(
+        &app(),
+        &versioned("/hls/sample/audio-1/segments/0/media.m4s"),
+    )
+    .await;
     assert_eq!(segment.headers()[CONTENT_TYPE], "audio/mp4");
 }
 
@@ -146,12 +150,33 @@ async fn playlist_urls_carry_the_real_version_that_media_routes_accept() {
 }
 
 #[tokio::test]
+async fn only_the_canonical_track_names_exist() {
+    for uri in [
+        "/hls/sample/audio/index.m3u8",
+        "/hls/sample/audio-0/index.m3u8",
+        "/hls/sample/audio-01/index.m3u8",
+        "/hls/sample/audio-2/index.m3u8",
+        "/hls/sample/Video/index.m3u8",
+    ] {
+        let response = get(&app(), uri).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+    for uri in [
+        "/hls/sample/video/index.m3u8",
+        "/hls/sample/audio-1/index.m3u8",
+    ] {
+        let response = get(&app(), uri).await;
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    }
+}
+
+#[tokio::test]
 async fn rejects_media_urls_with_a_missing_or_stale_version() {
     for uri in [
         "/hls/sample/video/init.mp4",
         "/hls/sample/video/init.mp4?v=0000000000000000",
         "/hls/sample/video/segments/0/media.m4s",
-        "/dash/sample/audio/segments/0/media.m4s?v=stale",
+        "/dash/sample/audio-1/segments/0/media.m4s?v=stale",
     ] {
         let response = get(&app(), uri).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");

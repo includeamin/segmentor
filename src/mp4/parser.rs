@@ -1,11 +1,12 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use ::mp4::{MediaType, Mp4Reader, Mp4Track, TrackType};
 use sha2::{Digest, Sha256};
 
+use super::edit::{self, ElstEntry, TrackEdit};
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
-use crate::media::{CodecConfig, MediaIndex, Sample, Track, TrackKind};
+use crate::media::{CodecConfig, MediaIndex, Sample, SkippedTrack, Track, TrackKey, TrackKind};
 use crate::source::{MediaSourceKind, SourceIdentity, SparseFile};
 
 /// A parsed file: the sample index plus the metadata regions it was built from, which the init
@@ -22,7 +23,9 @@ pub(crate) struct ParsedMedia {
 /// object. The CPU-bound table expansion runs on the blocking pool.
 pub(crate) async fn parse(source: &MediaSourceKind, limits: &LimitsConfig) -> Result<ParsedMedia> {
     if source.len() > limits.max_source_bytes {
-        return Err(Error::Unsupported("source exceeds configured size limit"));
+        return Err(Error::Unsupported(
+            "source exceeds configured size limit".to_owned(),
+        ));
     }
     let metadata = SparseFile::fetch(source, limits.max_metadata_bytes).await?;
     let identity = source.identity().clone();
@@ -53,54 +56,125 @@ fn parse_metadata(
     limits: &LimitsConfig,
 ) -> Result<MediaIndex> {
     let moov_bytes = metadata.moov_bytes();
-    validate_raw_moov(moov_bytes)?;
+    let raw = validate_raw_moov(moov_bytes)?;
     let moov_sha256: [u8; 32] = Sha256::digest(moov_bytes).into();
     let reader = Mp4Reader::read_header(metadata.reader(), metadata.len())?;
 
     if reader.is_fragmented() {
-        return Err(Error::Unsupported("fragmented MP4 input"));
+        return Err(fragmented());
     }
     if reader.moov.traks.len() > limits.max_tracks {
-        return Err(Error::Unsupported("track count exceeds configured limit"));
-    }
-    if reader.moov.traks.iter().any(|track| {
-        track
-            .edts
-            .as_ref()
-            .and_then(|edts| edts.elst.as_ref())
-            .is_some()
-    }) {
-        return Err(Error::Unsupported("edit lists are not supported"));
+        return Err(Error::Unsupported(format!(
+            "track count {} exceeds configured limit {}",
+            reader.moov.traks.len(),
+            limits.max_tracks
+        )));
     }
 
-    let mut tracks = reader
-        .tracks()
-        .values()
-        .map(|track| parse_track(track, metadata.len(), limits))
-        .collect::<Result<Vec<_>>>()?;
-    tracks.sort_unstable_by_key(|track| track.id);
+    let movie_timescale = reader.moov.mvhd.timescale;
+    let mut tracks = Vec::new();
+    let mut edits = Vec::new();
+    let mut skipped_tracks = Vec::new();
+    let mut ids = reader.tracks().keys().copied().collect::<Vec<_>>();
+    ids.sort_unstable();
+    for id in ids {
+        let track = &reader.tracks()[&id];
+        if let Some(RawTrack {
+            disposition: Disposition::Skip(reason),
+            handler,
+        }) = raw.get(&id)
+        {
+            skipped_tracks.push(SkippedTrack {
+                id,
+                handler: fourcc(*handler),
+                reason,
+            });
+        } else {
+            edits.push(track_edit(track, movie_timescale)?);
+            tracks.push(parse_track(track, metadata.len(), limits)?);
+        }
+    }
+
+    let timescales = edits
+        .iter()
+        .zip(&tracks)
+        .map(|(edit, track)| (*edit, track.timescale))
+        .collect::<Vec<_>>();
+    let shifts = edit::timeline_shifts(&timescales, movie_timescale)?;
+    for ((track, edit), shift) in tracks.iter_mut().zip(edits).zip(shifts) {
+        edit::apply(track, edit, shift)?;
+    }
+    assign_keys(&mut tracks);
     identity.moov_sha256 = Some(moov_sha256);
 
     Ok(MediaIndex {
         source: identity,
-        movie_timescale: reader.moov.mvhd.timescale,
+        movie_timescale,
         duration: reader.moov.mvhd.duration,
         tracks,
+        skipped_tracks,
     })
+}
+
+fn track_edit(track: &Mp4Track, movie_timescale: u32) -> Result<TrackEdit> {
+    let Some(elst) = track.trak.edts.as_ref().and_then(|edts| edts.elst.as_ref()) else {
+        return Ok(TrackEdit::NONE);
+    };
+    let entries = elst
+        .entries
+        .iter()
+        .map(|entry| ElstEntry {
+            segment_duration: entry.segment_duration,
+            media_time: entry.media_time,
+            media_rate: entry.media_rate,
+            media_rate_fraction: entry.media_rate_fraction,
+        })
+        .collect::<Vec<_>>();
+    edit::parse_edit_list(
+        track.track_id(),
+        elst.version,
+        &entries,
+        movie_timescale,
+        track.timescale(),
+    )
+}
+
+/// Names the tracks the way URLs will: one video, then audio numbered in file order.
+fn assign_keys(tracks: &mut [Track]) {
+    let mut audio = 0u16;
+    for track in tracks {
+        track.key = match track.kind {
+            TrackKind::Video => TrackKey::VIDEO,
+            TrackKind::Audio => {
+                audio = audio.saturating_add(1);
+                TrackKey::audio(audio)
+            }
+        };
+    }
 }
 
 fn parse_track(track: &Mp4Track, source_len: u64, limits: &LimitsConfig) -> Result<Track> {
     let kind = match track.track_type()? {
         TrackType::Audio => TrackKind::Audio,
         TrackType::Video => TrackKind::Video,
-        TrackType::Subtitle => return Err(Error::Unsupported("subtitle track")),
+        TrackType::Subtitle => {
+            return Err(Error::Unsupported(format!(
+                "track {}: subtitle tracks are not supported",
+                track.track_id()
+            )));
+        }
     };
     let codec = parse_codec(track)?;
     let samples = parse_samples(track, source_len, limits)?;
 
+    let mdia = &track.trak.mdia;
     Ok(Track {
         id: track.track_id(),
+        // Replaced once every track is known; see `assign_keys`.
+        key: TrackKey::VIDEO,
         kind,
+        language: mdia.mdhd.language.clone(),
+        timeline_shift: 0,
         timescale: track.timescale(),
         duration: track.trak.mdia.mdhd.duration,
         codec,
@@ -113,23 +187,22 @@ fn parse_codec(track: &Mp4Track) -> Result<CodecConfig> {
 
     match track.media_type()? {
         MediaType::H264 => {
-            let avc = sample_table
-                .stsd
-                .avc1
-                .as_ref()
-                .ok_or(Error::Unsupported("H.264 without avc1 sample entry"))?;
+            let avc =
+                sample_table.stsd.avc1.as_ref().ok_or_else(|| {
+                    Error::Unsupported("H.264 without avc1 sample entry".to_owned())
+                })?;
             let sequence_parameter_set = avc
                 .avcc
                 .sequence_parameter_sets
                 .first()
-                .ok_or(Error::Unsupported("H.264 without SPS"))?
+                .ok_or_else(|| Error::Unsupported("H.264 without SPS".to_owned()))?
                 .bytes
                 .clone();
             let picture_parameter_set = avc
                 .avcc
                 .picture_parameter_sets
                 .first()
-                .ok_or(Error::Unsupported("H.264 without PPS"))?
+                .ok_or_else(|| Error::Unsupported("H.264 without PPS".to_owned()))?
                 .bytes
                 .clone();
 
@@ -144,14 +217,17 @@ fn parse_codec(track: &Mp4Track) -> Result<CodecConfig> {
             })
         }
         MediaType::AAC => {
-            let aac = sample_table
-                .stsd
-                .mp4a
-                .as_ref()
-                .ok_or(Error::Unsupported("AAC without mp4a sample entry"))?;
+            let aac =
+                sample_table.stsd.mp4a.as_ref().ok_or_else(|| {
+                    Error::Unsupported("AAC without mp4a sample entry".to_owned())
+                })?;
 
             if track.audio_profile()? != ::mp4::AudioObjectType::AacLowComplexity {
-                return Err(Error::Unsupported("AAC profile other than AAC-LC"));
+                return Err(Error::Unsupported(format!(
+                    "track {}: AAC profile {:?} is not supported, only AAC-LC is",
+                    track.track_id(),
+                    track.audio_profile()?
+                )));
             }
 
             Ok(CodecConfig::Aac {
@@ -159,7 +235,10 @@ fn parse_codec(track: &Mp4Track) -> Result<CodecConfig> {
                 channels: aac.channelcount,
             })
         }
-        _ => Err(Error::Unsupported("codec other than H.264 or AAC")),
+        other => Err(Error::Unsupported(format!(
+            "track {}: codec {other} is not supported, only H.264 and AAC-LC are",
+            track.track_id()
+        ))),
     }
 }
 
@@ -209,22 +288,98 @@ fn parse_samples(track: &Mp4Track, source_len: u64, limits: &LimitsConfig) -> Re
     Ok(samples)
 }
 
-fn validate_raw_moov(moov: &[u8]) -> Result<()> {
+/// What preflight learned about one `trak`, before the `mp4` crate sees it.
+#[derive(Debug)]
+struct RawTrack {
+    handler: [u8; 4],
+    disposition: Disposition,
+}
+
+#[derive(Debug)]
+enum Disposition {
+    Package,
+    Skip(&'static str),
+}
+
+fn fragmented() -> Error {
+    Error::Unsupported(
+        "fragmented MP4 input is not supported; re-mux it to a regular MP4 with `ffmpeg -i in.mp4 -c copy out.mp4`"
+            .to_owned(),
+    )
+}
+
+/// Checks the raw `moov` structure and decides, per track, whether it is packaged.
+///
+/// Runs before the `mp4` crate so that unsupported constructs fail with a specific message and
+/// tracks that are not audio or video never reach the crate at all.
+fn validate_raw_moov(moov: &[u8]) -> Result<HashMap<u32, RawTrack>> {
     let root = box_payload(moov, 0)?;
     if root.name != *b"moov" {
         return Err(invalid_media("metadata range is not a moov box"));
     }
-    for track in child_boxes(root.payload)?
-        .into_iter()
-        .filter(|child| child.name == *b"trak")
-    {
-        let media = required_child(track.payload, *b"mdia")?;
-        let media_info = required_child(media.payload, *b"minf")?;
-        validate_data_reference(media_info.payload)?;
-        let sample_table = required_child(media_info.payload, *b"stbl")?;
-        validate_sample_description(sample_table.payload)?;
+    let children = child_boxes(root.payload)?;
+    if children.iter().any(|child| child.name == *b"mvex") {
+        return Err(fragmented());
     }
-    Ok(())
+    let mut tracks = HashMap::new();
+    for track in children.into_iter().filter(|child| child.name == *b"trak") {
+        let header = required_child(track.payload, *b"tkhd")?;
+        let id = track_id(header.payload)?;
+        let media = required_child(track.payload, *b"mdia")?;
+        let handler = handler_type(required_child(media.payload, *b"hdlr")?.payload)?;
+        let disposition = if handler == *b"vide" || handler == *b"soun" {
+            let media_info = required_child(media.payload, *b"minf")?;
+            validate_data_reference(media_info.payload)?;
+            let sample_table = required_child(media_info.payload, *b"stbl")?;
+            classify_sample_description(id, handler, sample_table.payload)?
+        } else {
+            // Timecode, timed metadata, chapters, and hint tracks: nothing to package.
+            Disposition::Skip("not an audio or video track")
+        };
+        if tracks
+            .insert(
+                id,
+                RawTrack {
+                    handler,
+                    disposition,
+                },
+            )
+            .is_some()
+        {
+            return Err(invalid_media("two tracks share one track ID"));
+        }
+    }
+    Ok(tracks)
+}
+
+fn track_id(tkhd: &[u8]) -> Result<u32> {
+    let offset = match tkhd.first() {
+        Some(1) => 20,
+        Some(_) => 12,
+        None => return Err(invalid_media("tkhd payload is truncated")),
+    };
+    tkhd.get(offset..offset + 4)
+        .ok_or_else(|| invalid_media("tkhd payload is truncated"))
+        .and_then(read_u32)
+}
+
+fn handler_type(hdlr: &[u8]) -> Result<[u8; 4]> {
+    hdlr.get(8..12)
+        .map(|bytes| bytes.try_into().expect("slice is four bytes"))
+        .ok_or_else(|| invalid_media("hdlr payload is truncated"))
+}
+
+/// A printable spelling of a four-character code for error messages and logs.
+fn fourcc(code: [u8; 4]) -> String {
+    code.iter()
+        .map(|byte| {
+            if byte.is_ascii_graphic() || *byte == b' ' {
+                char::from(*byte)
+            } else {
+                '?'
+            }
+        })
+        .collect()
 }
 
 fn validate_data_reference(media_info: &[u8]) -> Result<()> {
@@ -236,7 +391,7 @@ fn validate_data_reference(media_info: &[u8]) -> Result<()> {
     let entry_count = read_u32(&data_reference.payload[4..8])?;
     if entry_count != 1 {
         return Err(Error::Unsupported(
-            "exactly one self-contained data reference is required",
+            "exactly one self-contained data reference is required".to_owned(),
         ));
     }
     let entries = child_boxes(&data_reference.payload[8..])?;
@@ -245,38 +400,60 @@ fn validate_data_reference(media_info: &[u8]) -> Result<()> {
         .ok_or_else(|| invalid_media("dref entry is missing"))?;
     if entry.name != *b"url " || entry.payload.len() < 4 {
         return Err(Error::Unsupported(
-            "external data references are not supported",
+            "external data references are not supported".to_owned(),
         ));
     }
     let flags = read_u32(&[0, entry.payload[1], entry.payload[2], entry.payload[3]])?;
     if flags & 1 == 0 {
         return Err(Error::Unsupported(
-            "external data references are not supported",
+            "external data references are not supported".to_owned(),
         ));
     }
     Ok(())
 }
 
-fn validate_sample_description(sample_table: &[u8]) -> Result<()> {
+fn classify_sample_description(
+    track_id: u32,
+    handler: [u8; 4],
+    sample_table: &[u8],
+) -> Result<Disposition> {
     let description = required_child(sample_table, *b"stsd")?;
     if description.payload.len() < 8 {
         return Err(invalid_media("stsd payload is truncated"));
     }
     let entry_count = read_u32(&description.payload[4..8])?;
     if entry_count != 1 {
-        return Err(Error::Unsupported(
-            "exactly one sample description per track is required",
-        ));
+        return Err(Error::Unsupported(format!(
+            "track {track_id}: {entry_count} sample descriptions; exactly one is required"
+        )));
     }
     let entries = child_boxes(&description.payload[8..])?;
     let entry = entries
         .first()
         .ok_or_else(|| invalid_media("stsd entry is missing"))?;
     match &entry.name {
-        b"avc1" | b"mp4a" => Ok(()),
-        b"encv" | b"enca" => Err(Error::Unsupported("encrypted media is not supported")),
-        _ => Err(Error::Unsupported("sample description is not supported")),
+        b"avc1" | b"mp4a" => Ok(Disposition::Package),
+        b"encv" | b"enca" => Err(Error::Unsupported(format!(
+            "track {track_id}: encrypted media is not supported"
+        ))),
+        _ if handler == *b"vide" && sample_count(sample_table)? <= 1 => {
+            // A single still picture, such as cover art stored as a track.
+            Ok(Disposition::Skip("single still image"))
+        }
+        name => Err(Error::Unsupported(format!(
+            "track {track_id}: sample description `{}` is not supported",
+            fourcc(*name)
+        ))),
     }
+}
+
+fn sample_count(sample_table: &[u8]) -> Result<u32> {
+    let sizes = required_child(sample_table, *b"stsz")?;
+    sizes
+        .payload
+        .get(8..12)
+        .ok_or_else(|| invalid_media("stsz payload is truncated"))
+        .and_then(read_u32)
 }
 
 #[derive(Clone, Copy)]
@@ -539,14 +716,122 @@ mod tests {
         assert_eq!(index.tracks.len(), 2);
     }
 
+    /// Parses a fixture that must be rejected, without printing its whole index on failure.
+    fn parse_error(name: &str) -> Error {
+        let source = open_kind(fixture(name)).expect("fixture should open");
+        match parse_index(&source, &LimitsConfig::default()) {
+            Err(error) => error,
+            Ok(_) => panic!("{name} should have been rejected"),
+        }
+    }
+
+    fn parse_fixture(name: &str) -> MediaIndex {
+        let source = open_kind(fixture(name)).expect("fixture should open");
+        parse_index(&source, &LimitsConfig::default()).expect("fixture should parse")
+    }
+
+    fn track_of(index: &MediaIndex, key: TrackKey) -> &Track {
+        index
+            .tracks
+            .iter()
+            .find(|track| track.key == key)
+            .expect("track should exist")
+    }
+
     #[test]
-    fn rejects_edit_lists() {
-        let source = open_kind(fixture("h264-aac-edit-list.mp4")).expect("fixture should open");
+    fn applies_the_edit_lists_ffmpeg_writes_by_default() {
+        // Video: 1024 ticks of 15360 (66.7 ms) of B-frame delay. Audio: 1024 ticks of priming.
+        let index = parse_fixture("h264-aac-default-edits.mp4");
+        let video = track_of(&index, TrackKey::VIDEO);
+        let audio = track_of(&index, TrackKey::audio(1));
 
-        let error = parse_index(&source, &LimitsConfig::default())
-            .expect_err("edit-list MP4 should be rejected");
+        assert_eq!(video.timeline_shift, 0);
+        assert_eq!(audio.timeline_shift, 2176);
+        assert_eq!(audio.samples.len(), 141, "the priming frame is dropped");
+        // The first frame and the first kept audio sample present at the same instant:
+        // 1024 / 15360 s == 3200 / 48000 s.
+        let video_start = video.samples[0].decode_time
+            + u64::try_from(video.samples[0].composition_offset).unwrap();
+        assert_eq!(video_start * 48_000, audio.samples[0].decode_time * 15_360);
+    }
 
-        assert!(error.to_string().contains("edit lists"));
+    #[test]
+    fn a_leading_empty_edit_delays_audio_by_exactly_that_much() {
+        let index = parse_fixture("h264-aac-audio-delay.mp4");
+        let video = track_of(&index, TrackKey::VIDEO);
+        let audio = track_of(&index, TrackKey::audio(1));
+
+        assert_eq!(video.timeline_shift, 0);
+        assert_eq!(audio.timeline_shift, 26_176);
+        // The gap between the tracks is the empty edit: 22976 ticks of 48000.
+        let video_start = video.samples[0].decode_time
+            + u64::try_from(video.samples[0].composition_offset).unwrap();
+        let gap = audio.samples[0].decode_time * 15_360 - video_start * 48_000;
+        assert_eq!(gap, 22_976 * 15_360);
+    }
+
+    #[test]
+    fn a_file_without_edit_lists_keeps_its_timestamps() {
+        let index = parse_fixture("h264-aac.mp4");
+
+        assert!(index.tracks.iter().all(|track| track.timeline_shift == 0));
+        assert_eq!(index.tracks[1].samples[0].decode_time, 0);
+        assert_eq!(index.tracks[1].samples.len(), 141 + 1);
+    }
+
+    #[test]
+    fn fragmented_input_is_rejected_with_a_specific_message() {
+        let error = parse_error("h264-aac-fragmented.mp4");
+
+        assert!(matches!(error, Error::Unsupported(_)), "{error}");
+        assert!(
+            error.to_string().contains("fragmented MP4 input"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_unsupported_codec_is_named_in_the_error() {
+        let error = parse_error("hevc-aac.mp4");
+
+        assert!(matches!(error, Error::Unsupported(_)), "{error}");
+        assert!(error.to_string().contains("track 1"), "{error}");
+        assert!(error.to_string().contains("`hvc1`"), "{error}");
+    }
+
+    #[test]
+    fn skips_tracks_that_are_not_audio_or_video() {
+        let index = parse_fixture("h264-aac-timecode.mp4");
+
+        assert_eq!(index.tracks.len(), 2);
+        assert_eq!(index.skipped_tracks.len(), 1);
+        assert_eq!(index.skipped_tracks[0].handler, "tmcd");
+        assert_eq!(index.skipped_tracks[0].id, 3);
+    }
+
+    #[test]
+    fn numbers_audio_tracks_in_file_order_and_reads_their_languages() {
+        let index = parse_fixture("h264-aac-two-audio.mp4");
+
+        let keys = index
+            .tracks
+            .iter()
+            .map(|track| track.key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            keys,
+            [TrackKey::VIDEO, TrackKey::audio(1), TrackKey::audio(2)]
+        );
+        assert_eq!(index.tracks[1].language, "eng");
+        assert_eq!(index.tracks[2].language, "spa");
+    }
+
+    #[test]
+    fn a_single_audio_track_is_still_numbered() {
+        let index = parse_fixture("h264-aac.mp4");
+
+        assert_eq!(index.tracks[1].key, TrackKey::audio(1));
+        assert_eq!(index.tracks[1].language, "und");
     }
 
     #[test]
@@ -660,7 +945,10 @@ mod tests {
 
         let error = validate_raw_moov(&moov).expect_err("multiple descriptions should fail");
 
-        assert!(error.to_string().contains("exactly one sample description"));
+        assert!(
+            error.to_string().contains("2 sample descriptions"),
+            "{error}"
+        );
     }
 
     #[test]

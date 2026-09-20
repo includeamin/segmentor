@@ -9,6 +9,7 @@ Technical design documents explain a proposed subsystem before or during impleme
 | [0001](0001-on-demand-mp4-packaging-core.md) | On-demand MP4 packaging core | Accepted; verification pending |
 | [0002](0002-asset-map-interface.md) | Asset mapper interface | Accepted; implemented |
 | [0003](0003-production-grade-http-api.md) | Production-grade HTTP API | Accepted; implemented |
+| [0004](0004-broader-mp4-input-support.md) | Broader MP4 input support | Accepted; Phase 1 implemented |
 
 ## Workflow
 

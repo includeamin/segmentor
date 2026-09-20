@@ -14,6 +14,7 @@
   - [On-demand MP4 packaging core](technical-design/0001-on-demand-mp4-packaging-core.md)
   - [Asset mapper interface](technical-design/0002-asset-map-interface.md)
   - [Production-grade HTTP API](technical-design/0003-production-grade-http-api.md)
+  - [Broader MP4 input support](technical-design/0004-broader-mp4-input-support.md)
   - [Technical design template](technical-design/template.md)
 
 # Implementation
