@@ -63,6 +63,14 @@ fn parse_metadata(
     let moov_bytes = metadata.moov_bytes();
     let moov = validate_raw_moov(moov_bytes)?;
     let moov_sha256: [u8; 32] = Sha256::digest(moov_bytes).into();
+    // Everything the index is built from. With no fragments this is the hash of `moov` alone.
+    let mut metadata_hash = Sha256::new();
+    metadata_hash.update(moov_bytes);
+    for fragment in metadata.fragments() {
+        metadata_hash.update(fragment.offset.to_be_bytes());
+        metadata_hash.update(&fragment.bytes);
+    }
+    let metadata_sha256: [u8; 32] = metadata_hash.finalize().into();
     if moov.tracks.len() > limits.max_tracks {
         return Err(Error::Unsupported(format!(
             "track count {} exceeds configured limit {}",
@@ -117,6 +125,7 @@ fn parse_metadata(
     }
     assign_keys(&mut tracks);
     identity.moov_sha256 = Some(moov_sha256);
+    identity.metadata_sha256 = Some(metadata_sha256);
 
     let duration = if moov.movie_duration == 0 {
         movie_duration(&tracks, moov.movie_timescale)

@@ -77,6 +77,7 @@ impl RemoteReader {
                 },
                 length: total,
                 moov_sha256: None,
+                metadata_sha256: None,
             },
         })
     }

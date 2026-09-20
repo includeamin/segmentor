@@ -241,7 +241,8 @@ impl RenderedManifests {
 /// revision into the version gives such a build new URLs instead.
 const FORMAT_REVISION: u32 = 1;
 
-/// The `v` value in media URLs: a hash of the source's `moov` box and [`FORMAT_REVISION`].
+/// The `v` value in media URLs: a hash of everything the index was built from (`moov`, and every
+/// `moof` of a fragmented file) and [`FORMAT_REVISION`].
 fn version_of(index: &MediaIndex) -> String {
     use std::fmt::Write;
 
@@ -251,8 +252,8 @@ fn version_of(index: &MediaIndex) -> String {
     hasher.update(
         index
             .source
-            .moov_sha256
-            .expect("parsed assets always have a moov hash"),
+            .metadata_sha256
+            .expect("parsed assets always have a metadata hash"),
     );
     hasher.update(FORMAT_REVISION.to_be_bytes());
     hasher
@@ -296,5 +297,31 @@ mod tests {
             asset.version(),
             "and it is stable"
         );
+    }
+
+    #[tokio::test]
+    async fn fragmented_files_with_the_same_moov_but_different_content_get_different_versions() {
+        // The two files differ only in the `tfdt` values inside their `moof` boxes, so their
+        // `moov` boxes are identical. A version taken from `moov` alone would be the same, and a
+        // CDN would serve one file's immutable segments for the other.
+        let load = |name: &'static str| async move {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(name);
+            PackagedAsset::load_local(path, 1000, &LimitsConfig::default())
+                .await
+                .expect("fixture should load")
+        };
+
+        let plain = load("h264-aac-fragmented.mp4").await;
+        let shifted = load("h264-aac-fragmented-offset.mp4").await;
+
+        assert_eq!(
+            plain.index.source.moov_sha256, shifted.index.source.moov_sha256,
+            "the premise: the moov boxes are the same"
+        );
+        assert_ne!(plain.version(), shifted.version());
+        let again = load("h264-aac-fragmented.mp4").await;
+        assert_eq!(plain.version(), again.version(), "and a version is stable");
     }
 }
