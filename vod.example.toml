@@ -17,7 +17,8 @@ buffer_capacity = 8192
 [limits]
 max_assets = 1000
 max_source_bytes = 1099511627776
-max_metadata_bytes = 67108864
+max_metadata_bytes = 67108864   # `moov` plus every `moof` of a fragmented file
+max_fragments = 20000            # `moof` boxes in one fragmented file; remote sources cost a request each
 max_tracks = 8
 max_samples_per_track = 2000000
 max_samples_per_segment = 100000

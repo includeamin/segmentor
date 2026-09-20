@@ -28,6 +28,7 @@ impl LocalMediaSource {
             },
             length: metadata.len(),
             moov_sha256: None,
+            metadata_sha256: None,
         };
 
         Ok(Self { file, identity })

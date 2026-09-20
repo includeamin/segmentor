@@ -15,8 +15,8 @@ fn packages_fixture_into_separate_fragmented_tracks() {
     run_packager(&root, &output);
     run_packager(&root, &repeated_output);
     assert_top_level_box(&output.join("video-init.mp4"), *b"ftyp");
-    assert_top_level_box(&output.join("audio-init.mp4"), *b"ftyp");
-    for track in ["video", "audio"] {
+    assert_top_level_box(&output.join("audio-1-init.mp4"), *b"ftyp");
+    for track in ["video", "audio-1"] {
         for segment in 0..3 {
             let name = format!("{track}-{segment}.m4s");
             assert_top_level_box(&output.join(&name), *b"moof");
@@ -28,7 +28,7 @@ fn packages_fixture_into_separate_fragmented_tracks() {
             );
         }
     }
-    for name in ["video-init.mp4", "audio-init.mp4"] {
+    for name in ["video-init.mp4", "audio-1-init.mp4"] {
         assert_eq!(
             fs::read(output.join(name)).expect("first init should be readable"),
             fs::read(repeated_output.join(name)).expect("repeated init should be readable"),

@@ -84,13 +84,14 @@ Behavior worth knowing before you run it:
 - **Memory is bounded by bytes.** Loaded assets are kept in a least-recently-used cache limited by `limits.max_index_bytes` (about 40 bytes per sample). An evicted asset reloads transparently.
 - **Mapper answers are cached** for their TTL (clamped by `min_ttl_ms` and `max_ttl_ms`), revalidated with `If-None-Match`, and a missing asset is remembered for `negative_ttl_ms`.
 - **A mapper outage does not stop playback of known assets.** An expired answer is served for up to `stale_if_error_ms` while the mapper is down. A location with an `expires_at` (a signed URL) is never served past that time. Unknown assets return `503` until the mapper recovers.
+- **An upgrade can change URLs.** The `v` in a media URL hashes everything the index was built from (`moov`, and every `moof` of a fragmented file) together with a format revision that is bumped whenever a build changes the bytes it serves for an unchanged file (init segment layout, timeline mapping, playlist format). A CDN or browser holding immutable objects from the old build therefore never receives different bytes under an old URL: players fetch the playlist again and get new URLs.
 - **A changed asset switches at once.** When the mapper returns a new version, the old one is dropped. Players holding old versioned URLs get `404` and refetch the playlist.
 - **Set `readiness_probe_interval_ms`** if you want `/ready` to report `503` while the mapper is unreachable, so a load balancer can hold new traffic. `/health` is unaffected.
 - **Startup does not depend on the mapper.** The process starts even if the mapper is down.
 
 ### Remote media
 
-A mapper can return `http` locations, in which case the server reads the media from that origin with ranged requests. It reads only the headers and `moov` metadata to load an asset, then fetches segment bytes as they are requested. Because a mapper controls where the server connects, `[remote_media]` is a security boundary:
+A mapper can return `http` locations, in which case the server reads the media from that origin with ranged requests. It reads only the headers and metadata to load an asset (`moov`, plus every `moof` of a fragmented file), then fetches segment bytes as they are requested. A fragmented file costs about one request per fragment, one after another, because each box's offset comes from the one before it; `limits.max_fragments` (default 20,000) bounds that, and a file that exceeds it fails to load with a message naming the limit. Lower it for slow remote origins. Because a mapper controls where the server connects, `[remote_media]` is a security boundary:
 
 - `allowed_hosts` must list every origin host; an empty list refuses all remote locations.
 - Locations must be `https` (`allow_insecure_http` is for development), carry no credentials, and are never redirected.

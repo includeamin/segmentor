@@ -4,9 +4,9 @@ The service's HLS and DASH output is checked by an automated black-box suite, an
 
 ## The automated suite
 
-`tests/conformance.rs` starts the real binary against five fixtures and audits what a player would fetch. Run it with `make conformance` (it also runs under `make test` and in CI).
+`tests/conformance.rs` starts the real binary against every fixture below and audits what a player would fetch. Run it with `make conformance` (it also runs under `make test` and in CI).
 
-Fixtures: the main H.264/AAC file, the same with `moov` after `mdat`, video only, 44.1 kHz stereo audio, and variable frame timing.
+Fixtures: the main H.264/AAC file, the same with `moov` after `mdat`, video only, 44.1 kHz stereo audio, and variable frame timing; FFmpeg's default edit lists and a delayed audio track; two audio tracks; non-square pixels with tagged colour; a QuickTime file; HEVC, VP9, AV1; AC-3, E-AC-3, Opus, and FLAC audio; and audio-only files with one and two tracks. Every reassembled track is decoded by FFmpeg without errors and its packet count compared with the source.
 
 ### HLS (RFC 8216)
 

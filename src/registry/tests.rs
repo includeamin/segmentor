@@ -507,10 +507,10 @@ async fn unsupported_media_is_a_load_failure_not_a_gateway_error() {
     let h = harness().await;
     h.mapper
         .state
-        .set("edited", Answer::file("v1", "h264-aac-edit-list.mp4"));
+        .set("modern", Answer::file("v1", "h264-mp3.mp4"));
 
     assert_eq!(
-        status(&h.app, "/hls/edited/master.m3u8").await,
+        status(&h.app, "/hls/modern/master.m3u8").await,
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert!(metric(
@@ -519,7 +519,7 @@ async fn unsupported_media_is_a_load_failure_not_a_gateway_error() {
     ));
     // The failure is cached briefly rather than reparsed on every request.
     assert_eq!(
-        status(&h.app, "/hls/edited/master.m3u8").await,
+        status(&h.app, "/hls/modern/master.m3u8").await,
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert!(metric(
@@ -550,6 +550,50 @@ async fn remote_harness(origin: &MockOrigin) -> Harness {
         .state
         .set("remote", Answer::http("v1", &origin.url("h264-aac.mp4")));
     h
+}
+
+#[tokio::test]
+async fn a_remote_fragmented_file_is_indexed_like_the_local_one_from_a_few_requests() {
+    let origin = MockOrigin::start().await;
+    origin.add_fixture("h264-aac-fragmented.mp4");
+    let h = harness().await;
+    h.mapper.state.set(
+        "remote",
+        Answer::http("v1", &origin.url("h264-aac-fragmented.mp4")),
+    );
+    h.mapper
+        .state
+        .set("local", Answer::file("v1", "h264-aac-fragmented.mp4"));
+
+    let (status_code, _, remote_master) = fetch(&h.app, "/hls/remote/master.m3u8").await;
+    assert_eq!(status_code, StatusCode::OK);
+    let (_, _, local_master) = fetch(&h.app, "/hls/local/master.m3u8").await;
+    assert_eq!(remote_master, local_master);
+    let version = version_in(&remote_master);
+
+    // Three fragments should cost about one request each, plus the probe, `moov`, and the
+    // check that the file did not change: not one request per top-level box header.
+    let requests = origin.state.requests.load(Ordering::SeqCst);
+    assert!(requests <= 3 + 6, "loading made {requests} requests");
+    let file_len = std::fs::metadata(fixture("h264-aac-fragmented.mp4"))
+        .unwrap()
+        .len();
+    let served = origin.state.bytes_served.load(Ordering::SeqCst);
+    assert!(
+        served < file_len / 2,
+        "loading read {served} of {file_len} bytes; only metadata should be needed"
+    );
+
+    for path in [
+        format!("video/init.mp4?v={version}"),
+        format!("audio-1/init.mp4?v={version}"),
+        format!("video/segments/1/media.m4s?v={version}"),
+        format!("audio-1/segments/2/media.m4s?v={version}"),
+    ] {
+        let (_, _, remote) = fetch(&h.app, &format!("/hls/remote/{path}")).await;
+        let (_, _, local) = fetch(&h.app, &format!("/hls/local/{path}")).await;
+        assert_eq!(remote, local, "{path}");
+    }
 }
 
 #[tokio::test]
@@ -585,10 +629,10 @@ async fn remote_media_is_served_byte_for_byte_like_local_media() {
 
     for path in [
         format!("video/init.mp4?v={version}"),
-        format!("audio/init.mp4?v={version}"),
+        format!("audio-1/init.mp4?v={version}"),
         format!("video/segments/0/media.m4s?v={version}"),
         format!("video/segments/2/media.m4s?v={version}"),
-        format!("audio/segments/1/media.m4s?v={version}"),
+        format!("audio-1/segments/1/media.m4s?v={version}"),
     ] {
         let (remote_status, _, remote) = fetch(&h.app, &format!("/hls/remote/{path}")).await;
         let (_, _, local) = fetch(&h.app, &format!("/hls/local/{path}")).await;

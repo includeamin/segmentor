@@ -28,18 +28,55 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-const FIXTURES: [(&str, &str); 5] = [
-    ("aac", "h264-aac.mp4"),
-    ("moovlast", "h264-aac-moov-last.mp4"),
-    ("videoonly", "h264-video-only.mp4"),
-    ("stereo44", "h264-aac-44100-stereo.mp4"),
-    ("variable", "h264-variable-timing.mp4"),
+/// Asset ID, fixture file, and how many audio packets packaging drops from it. Only files with
+/// an edit list lose any: the encoder-padding frame before the edit starts.
+const FIXTURES: [(&str, &str, u64); 24] = [
+    ("aac", "h264-aac.mp4", 0),
+    ("moovlast", "h264-aac-moov-last.mp4", 0),
+    ("videoonly", "h264-video-only.mp4", 0),
+    ("stereo44", "h264-aac-44100-stereo.mp4", 0),
+    ("variable", "h264-variable-timing.mp4", 0),
+    ("edits", "h264-aac-default-edits.mp4", 1),
+    ("delay", "h264-aac-audio-delay.mp4", 0),
+    ("twoaudio", "h264-aac-two-audio.mp4", 0),
+    ("anamorphic", "h264-aac-anamorphic.mp4", 0),
+    ("quicktime", "h264-aac-quicktime.mov", 0),
+    ("hevc", "hevc-aac.mp4", 0),
+    ("vp9opus", "vp9-opus.mp4", 0),
+    ("av1", "av1-aac.mp4", 0),
+    ("ac3", "h264-ac3.mp4", 0),
+    ("eac3", "h264-eac3.mp4", 0),
+    ("flac", "h264-flac.mp4", 0),
+    ("audioonly", "aac-only.m4a", 1),
+    ("audiotwo", "aac-two-tracks-only.m4a", 0),
+    ("frag", "h264-aac-fragmented.mp4", 0),
+    ("fraglegacy", "h264-aac-fragmented-legacy.mp4", 0),
+    ("fragcmaf", "h264-aac-fragmented-cmaf.mp4", 0),
+    ("fragsidx", "h264-aac-fragmented-sidx.mp4", 0),
+    ("fragoffset", "h264-aac-fragmented-offset.mp4", 0),
+    ("fragneg", "h264-aac-fragmented-negative-cts.mp4", 0),
 ];
+
+/// The video codec prefix and audio codec each fixture's master playlist must declare; `None`
+/// means the fixture has no such track.
+fn expected_codecs(asset: &str) -> (Option<&'static str>, Option<&'static str>) {
+    match asset {
+        "hevc" => (Some("hvc1."), Some("mp4a.40.2")),
+        "vp9opus" => (Some("vp09."), Some("opus")),
+        "av1" => (Some("av01."), Some("mp4a.40.2")),
+        "ac3" => (Some("avc1."), Some("ac-3")),
+        "eac3" => (Some("avc1."), Some("ec-3")),
+        "flac" => (Some("avc1."), Some("fLaC")),
+        "audioonly" | "audiotwo" => (None, Some("mp4a.40.2")),
+        "videoonly" | "variable" => (Some("avc1."), None),
+        _ => (Some("avc1."), Some("mp4a.40.2")),
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Server harness
@@ -48,10 +85,24 @@ const FIXTURES: [(&str, &str); 5] = [
 struct Server {
     child: Child,
     address: SocketAddr,
+    log: PathBuf,
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
+        // A test that fails while talking to the server needs to know what the server saw:
+        // a reset connection says only that the server went away.
+        if std::thread::panicking() {
+            let alive = self.child.try_wait().ok().flatten();
+            let log = fs::read_to_string(&self.log).unwrap_or_default();
+            let tail = log.lines().rev().take(15).collect::<Vec<_>>();
+            eprintln!(
+                "--- server at {} (exit status so far: {alive:?}), last log lines from {}:\n{}",
+                self.address,
+                self.log.display(),
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            );
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -62,38 +113,77 @@ fn root() -> PathBuf {
 }
 
 fn start_server() -> Server {
-    let address = TcpListener::bind("127.0.0.1:0")
-        .expect("an ephemeral port should be available")
-        .local_addr()
-        .unwrap();
     let directory = root().join("target/conformance");
     fs::create_dir_all(&directory).unwrap();
+    // The server picks its own port and says which. Choosing one here and handing it over would
+    // leave a gap in which another test, or anything else on the machine, could take it, and a
+    // connect check would then be answered by the wrong server.
     let mut config = format!(
-        "[server]\nlisten = \"{address}\"\n[storage]\nmedia_root = \"{}\"\n[packaging]\nsegment_duration_ms = 1000\n[logging]\nlevel = \"warn\"\n",
+        "[server]\nlisten = \"127.0.0.1:0\"\n[storage]\nmedia_root = \"{}\"\n[packaging]\nsegment_duration_ms = 1000\n[logging]\nlevel = \"info\"\nformat = \"compact\"\n",
         root().join("tests/fixtures").display()
     );
-    for (id, file) in FIXTURES {
+    for (id, file, _) in FIXTURES {
         config.push_str(&format!("[assets.{id}]\npath = \"{file}\"\n"));
     }
-    let config_path = directory.join(format!("vod-{}.toml", address.port()));
+    let name = format!(
+        "{}-{}",
+        std::process::id(),
+        std::thread::current()
+            .name()
+            .unwrap_or("test")
+            .replace("::", "-")
+    );
+    let config_path = directory.join(format!("vod-{name}.toml"));
     fs::write(&config_path, config).unwrap();
+    let log_path = directory.join(format!("server-{name}.log"));
 
-    let child = Command::new(env!("CARGO_BIN_EXE_segmentor"))
+    // The server writes its log to stdout and its fatal errors to stderr; keep both.
+    let log = fs::File::create(&log_path).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_segmentor"))
         .args(["serve", "--config"])
         .arg(&config_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
         .spawn()
         .expect("server should start");
-    let server = Server { child, address };
-    let deadline = Instant::now() + Duration::from_secs(10);
+
+    // The server logs `service_ready` with its address once assets are loaded and the port is
+    // bound, so seeing it means this process, and not another, owns the address.
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
-        if TcpStream::connect(address).is_ok() {
-            return server;
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!(
+                "server exited with {status} before it was ready:\n{}",
+                fs::read_to_string(&log_path).unwrap_or_default()
+            );
+        }
+        let log = fs::read_to_string(&log_path).unwrap_or_default();
+        if let Some(address) = ready_address(&log) {
+            return Server {
+                child,
+                address,
+                log: log_path,
+            };
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("server did not become ready");
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!(
+        "server did not become ready:\n{}",
+        fs::read_to_string(&log_path).unwrap_or_default()
+    );
+}
+
+/// The address in the `service_ready` log line, if the server has logged it.
+fn ready_address(log: &str) -> Option<SocketAddr> {
+    let line = log.lines().find(|line| line.contains("service_ready"))?;
+    let start = line.find("listen.address=")? + "listen.address=".len();
+    line[start..]
+        .split(|c: char| c.is_whitespace() || c == '"')
+        .find(|part| !part.is_empty())?
+        .parse()
+        .ok()
 }
 
 struct Response {
@@ -367,6 +457,9 @@ fn parse_fragment(data: &[u8]) -> Fragment {
 struct Audited {
     init: Vec<u8>,
     segments: Vec<Vec<u8>>,
+    /// Where the first segment starts, in track ticks; zero unless the file had an edit list.
+    start_ticks: u64,
+    /// The sum of the segment durations, not counting `start_ticks`.
     total_ticks: u64,
     timescale: u32,
 }
@@ -377,10 +470,20 @@ fn audit_track(
     kind: &str,
     init: &[u8],
     segments: Vec<Vec<u8>>,
+    declared_start: Option<u64>,
     declared_ticks: impl Fn(usize, u32) -> u64,
 ) -> Audited {
     let init_info = parse_init(init);
-    let mut expected_start = 0u64;
+    // A track may start after zero when its file has an edit list. A manifest that states the
+    // start (DASH) is checked against it; one that does not (HLS) is taken from the first segment.
+    let start_ticks = declared_start
+        .or_else(|| {
+            segments
+                .first()
+                .map(|first| parse_fragment(first).decode_time)
+        })
+        .unwrap_or(0);
+    let mut expected_start = start_ticks;
     for (index, bytes) in segments.iter().enumerate() {
         let fragment = parse_fragment(bytes);
         assert_eq!(
@@ -415,7 +518,8 @@ fn audit_track(
     Audited {
         init: init.to_vec(),
         segments,
-        total_ticks: expected_start,
+        start_ticks,
+        total_ticks: expected_start - start_ticks,
         timescale: init_info.timescale,
     }
 }
@@ -484,28 +588,61 @@ fn audit_hls(server: &Server, asset: &str) -> HashMap<String, Audited> {
         bandwidth >= average,
         "BANDWIDTH is a peak and must not be below the average"
     );
-    assert!(
-        stream_attributes["CODECS"].starts_with("avc1."),
-        "video codec string"
-    );
-    assert!(stream_attributes["RESOLUTION"].contains('x'));
+    let (video_codec, audio_codec) = expected_codecs(asset);
+    let codecs = &stream_attributes["CODECS"];
+    match video_codec {
+        Some(prefix) => {
+            assert!(
+                codecs.starts_with(prefix),
+                "{asset}: video codec string in {codecs}"
+            );
+            assert!(stream_attributes["RESOLUTION"].contains('x'));
+        }
+        None => assert!(
+            !stream_attributes.contains_key("RESOLUTION"),
+            "{asset}: audio-only variants have no resolution"
+        ),
+    }
+    if let Some(audio) = audio_codec {
+        assert!(
+            codecs.contains(audio),
+            "{asset}: {audio} missing from {codecs}"
+        );
+    }
 
-    let mut targets = vec![("video".to_owned(), lines[stream + 1].to_owned())];
+    // The variant's own URI names its track: `video`, or the audio track of an audio-only asset.
+    let variant = lines[stream + 1];
+    let mut targets = vec![(
+        variant.split('/').next().unwrap().to_owned(),
+        variant.to_owned(),
+    )];
     let media_lines = lines
         .iter()
         .filter(|line| line.starts_with("#EXT-X-MEDIA"))
         .collect::<Vec<_>>();
     match stream_attributes.get("AUDIO") {
         Some(group) => {
-            assert!(stream_attributes["CODECS"].contains("mp4a.40.2"));
-            assert_eq!(media_lines.len(), 1, "one audio rendition expected");
-            let media = attributes(media_lines[0]);
-            assert_eq!(
-                &media["GROUP-ID"], group,
-                "AUDIO group must reference an EXT-X-MEDIA"
+            assert!(
+                !media_lines.is_empty(),
+                "AUDIO names a group with no renditions"
             );
-            assert_eq!(media["TYPE"], "AUDIO");
-            targets.push(("audio".to_owned(), media["URI"].clone()));
+            let mut defaults = 0;
+            for line in &media_lines {
+                let media = attributes(line);
+                assert_eq!(
+                    &media["GROUP-ID"], group,
+                    "AUDIO group must reference an EXT-X-MEDIA"
+                );
+                assert_eq!(media["TYPE"], "AUDIO");
+                defaults += usize::from(media["DEFAULT"] == "YES");
+                // The track's name in its URL is also its DASH Representation ID.
+                let name = media["URI"].split('/').next().unwrap().to_owned();
+                // An audio-only variant may point at its default rendition's own playlist.
+                if !targets.iter().any(|(existing, _)| *existing == name) {
+                    targets.push((name, media["URI"].clone()));
+                }
+            }
+            assert_eq!(defaults, 1, "exactly one rendition is the default");
         }
         None => assert!(
             media_lines.is_empty(),
@@ -560,7 +697,7 @@ fn audit_hls(server: &Server, asset: &str) -> HashMap<String, Audited> {
             .iter()
             .map(|url| get_ok(server, url).body)
             .collect::<Vec<_>>();
-        let audit = audit_track(&kind, &init, segments, |index, timescale| {
+        let audit = audit_track(&kind, &init, segments, None, |index, timescale| {
             (extinf[index] * f64::from(timescale)).round() as u64
         });
         audited.insert(kind, audit);
@@ -642,18 +779,31 @@ fn audit_dash(server: &Server, asset: &str) -> HashMap<String, Audited> {
         if tag.name == "Representation" {
             representation = Some(tag);
             assert!(tag.attributes["bandwidth"].parse::<u64>().unwrap() > 0);
-            assert!(tag.attributes["codecs"].len() > 4);
+            assert!(!tag.attributes["codecs"].is_empty());
         }
         if tag.name == "SegmentTemplate" {
             let rep = representation.expect("SegmentTemplate must sit inside a Representation");
             let id = rep.attributes["id"].clone();
             let start_number = tag.attributes["startNumber"].parse::<usize>().unwrap();
-            let durations = all[index + 1..]
+            let entries = all[index + 1..]
                 .iter()
                 .take_while(|candidate| candidate.name != "Representation")
                 .filter(|candidate| candidate.name == "S")
+                .collect::<Vec<_>>();
+            let durations = entries
+                .iter()
                 .map(|candidate| candidate.attributes["d"].parse::<u64>().unwrap())
                 .collect::<Vec<_>>();
+            assert!(
+                entries[1..]
+                    .iter()
+                    .all(|entry| !entry.attributes.contains_key("t")),
+                "only the first S may state t; the rest follow on"
+            );
+            let declared_start = entries[0]
+                .attributes
+                .get("t")
+                .map(|t| t.parse::<u64>().unwrap());
             assert!(!durations.is_empty(), "SegmentTimeline must list segments");
 
             let init_url = resolve(
@@ -669,8 +819,11 @@ fn audit_dash(server: &Server, asset: &str) -> HashMap<String, Audited> {
                     get_ok(server, &resolve(&manifest_url, &media)).body
                 })
                 .collect::<Vec<_>>();
-            let audit = audit_track(&id, &init, segments, |segment, _| durations[segment]);
-            let seconds = audit.total_ticks as f64 / f64::from(audit.timescale);
+            let audit = audit_track(&id, &init, segments, declared_start, |segment, _| {
+                durations[segment]
+            });
+            let seconds =
+                (audit.start_ticks + audit.total_ticks) as f64 / f64::from(audit.timescale);
             assert!(
                 seconds <= presentation + 0.002,
                 "{id} timeline ({seconds}s) exceeds mediaPresentationDuration ({presentation}s)"
@@ -681,7 +834,7 @@ fn audit_dash(server: &Server, asset: &str) -> HashMap<String, Audited> {
     }
     let longest = audited
         .values()
-        .map(|track| track.total_ticks as f64 / f64::from(track.timescale))
+        .map(|track| (track.start_ticks + track.total_ticks) as f64 / f64::from(track.timescale))
         .fold(0.0, f64::max);
     assert!(
         (longest - presentation).abs() < 0.002,
@@ -697,7 +850,7 @@ fn audit_dash(server: &Server, asset: &str) -> HashMap<String, Audited> {
 #[test]
 fn hls_and_dash_conform_and_agree_for_every_fixture() {
     let server = start_server();
-    for (asset, _) in FIXTURES {
+    for (asset, _, _) in FIXTURES {
         let hls = audit_hls(&server, asset);
         let dash = audit_dash(&server, asset);
         assert_eq!(
@@ -774,7 +927,7 @@ fn reassembled_tracks_decode_with_the_source_frame_counts() {
     let directory = root().join("target/conformance/reassembled");
     fs::create_dir_all(&directory).unwrap();
 
-    for (asset, file) in FIXTURES {
+    for (asset, file, dropped) in FIXTURES {
         let tracks = audit_hls(&server, asset);
         for (kind, track) in tracks {
             let path = directory.join(format!("{asset}-{kind}.mp4"));
@@ -784,12 +937,30 @@ fn reassembled_tracks_decode_with_the_source_frame_counts() {
             }
             fs::write(&path, bytes).unwrap();
 
-            let decoded = probe_frames(&path, &kind);
-            let source = probe_frames(&root().join("tests/fixtures").join(file), &kind);
+            // A reassembled file holds one stream; the source holds them all, in file order.
+            let decoded = probe_frames(&path, if kind == "video" { "v:0" } else { "a:0" });
+            let source = probe_frames(
+                &root().join("tests/fixtures").join(file),
+                &source_selector(&kind),
+            );
+            let expected = source
+                - if kind.starts_with("audio") {
+                    dropped
+                } else {
+                    0
+                };
             assert_eq!(
-                decoded, source,
+                decoded, expected,
                 "{asset}/{kind}: frame count after repackaging"
             );
+
+            if kind == "video" {
+                assert_eq!(
+                    video_properties(&path),
+                    video_properties(&root().join("tests/fixtures").join(file)),
+                    "{asset}: aspect ratio and colour must survive repackaging"
+                );
+            }
 
             let errors = Command::new("ffmpeg")
                 .args(["-v", "error", "-i"])
@@ -807,8 +978,35 @@ fn reassembled_tracks_decode_with_the_source_frame_counts() {
     }
 }
 
-fn probe_frames(path: &Path, kind: &str) -> u64 {
-    let selector = if kind == "video" { "v:0" } else { "a:0" };
+/// The properties a player needs to render the picture correctly, as FFprobe reports them.
+fn video_properties(path: &Path) -> String {
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0"])
+        .args([
+            "-show_entries",
+            "stream=sample_aspect_ratio,color_space,color_transfer,color_primaries",
+        ])
+        .args(["-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .expect("ffprobe should run");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+/// The FFprobe stream selector for a track named `video` or `audio-N` in the source file.
+fn source_selector(kind: &str) -> String {
+    match kind.strip_prefix("audio-") {
+        Some(number) => format!("a:{}", number.parse::<usize>().unwrap() - 1),
+        None => "v:0".to_owned(),
+    }
+}
+
+fn probe_frames(path: &Path, selector: &str) -> u64 {
     let output = Command::new("ffprobe")
         .args(["-v", "error", "-count_packets", "-select_streams", selector])
         .args(["-show_entries", "stream=nb_read_packets", "-of", "csv=p=0"])
@@ -820,8 +1018,91 @@ fn probe_frames(path: &Path, kind: &str) -> u64 {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // Some codecs (AC-3) make FFprobe append an empty field after the count.
     String::from_utf8_lossy(&output.stdout)
         .trim()
+        .split(',')
+        .next()
+        .unwrap_or_default()
         .parse()
         .unwrap_or_else(|_| panic!("unexpected ffprobe output for {}", path.display()))
+}
+
+/// The stream start times FFprobe reports for `input`, as `(video, audio)` in seconds.
+fn start_times(input: &str) -> (f64, f64) {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,start_time",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(input)
+        .output()
+        .expect("ffprobe should run");
+    assert!(
+        output.status.success(),
+        "{input}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut video = None;
+    let mut audio = None;
+    // FFprobe separates programs with a blank line, and adds a third field for some inputs.
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let mut fields = line.split(',');
+        let (kind, start) = (
+            fields.next().unwrap(),
+            fields.next().expect("codec_type,start_time"),
+        );
+        let start = start.parse::<f64>().unwrap();
+        match kind {
+            "video" => video = video.or(Some(start)),
+            "audio" => audio = audio.or(Some(start)),
+            _ => {}
+        }
+    }
+    (
+        video.expect("a video stream"),
+        audio.expect("an audio stream"),
+    )
+}
+
+/// The gap between audio and video is what an edit list encodes, so it must survive packaging
+/// exactly, even though both tracks move forward by the same small amount.
+#[test]
+fn audio_and_video_stay_in_sync_through_edit_lists() {
+    if Command::new("ffprobe").arg("-version").output().is_err() {
+        eprintln!("skipping: ffprobe is not installed");
+        return;
+    }
+    let server = start_server();
+    for (asset, file, _) in FIXTURES {
+        if ["videoonly", "variable", "twoaudio", "audioonly", "audiotwo"].contains(&asset) {
+            continue;
+        }
+        let (source_video, source_audio) = start_times(
+            &root()
+                .join("tests/fixtures")
+                .join(file)
+                .display()
+                .to_string(),
+        );
+        let gap_in_source = source_audio - source_video;
+        for protocol in ["hls/{}/master.m3u8", "dash/{}/manifest.mpd"] {
+            let url = format!(
+                "http://{}/{}",
+                server.address,
+                protocol.replace("{}", asset)
+            );
+            let (video, audio) = start_times(&url);
+            assert!(
+                ((audio - video) - gap_in_source).abs() < 0.001,
+                "{asset} over {protocol}: audio leads video by {:.4}s, the source by {gap_in_source:.4}s",
+                audio - video
+            );
+        }
+    }
 }

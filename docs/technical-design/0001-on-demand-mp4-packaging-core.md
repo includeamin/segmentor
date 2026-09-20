@@ -25,7 +25,7 @@ This design is accepted, but not every capability is implemented. Status terms i
 | Direct bounded HTTP range streaming | Implemented | Header plus coalesced source ranges; 256 KiB default chunks |
 | Enforceable parser/resource limits | Implemented | Validated TOML limits cover source, metadata, tracks, samples, segments, queues, and headers |
 | Source mutation detection | Implemented | Filesystem identity plus pre/post parse `moov` SHA-256 |
-| Explicit edit-list/encryption rejection | Implemented | Raw preflight also rejects external references and multiple descriptions |
+| Explicit encryption rejection | Implemented | Raw preflight also rejects external references and multiple descriptions. Edit lists are applied since [TDD 0004](0004-broader-mp4-input-support.md) |
 | Runtime cache invalidation/reload | Implemented for mapper-resolved assets | See [TDD 0002](0002-asset-map-interface.md). Static catalog assets are still immutable for the process lifetime |
 | Remote HTTP sources and asset mapping service | Implemented | See [TDD 0002](0002-asset-map-interface.md) and the [mapper API](../mapper-api.md) |
 | DASH VOD | Implemented | Static MPD reuses separate-track fMP4 artifacts |
@@ -91,14 +91,15 @@ Files with unsupported edit lists, malformed timing tables, external data refere
 
 | Input condition | Required behavior | Status |
 | --- | --- | --- |
-| Fragmented MP4 input | Reject as unsupported input | Implemented |
+| Fragmented MP4 input | Index from the `moof` boxes | Implemented ([TDD 0005](0005-fragmented-mp4-input.md)) |
 | Codec other than H.264/AAC-LC | Reject as unsupported media | Implemented |
 | Missing H.264 SPS/PPS | Reject as unsupported media | Implemented |
-| More than one video or audio track | Reject during segment planning | Implemented |
-| Subtitle track | Reject as unsupported media | Implemented |
+| More than one video track | Reject during segment planning | Implemented. Several audio tracks are supported since [TDD 0004](0004-broader-mp4-input-support.md) |
+| Subtitle track | Reject as unsupported media | Implemented. Tracks that are not audio or video (timecode, timed metadata) are skipped since [TDD 0004](0004-broader-mp4-input-support.md) |
 | Missing/inconsistent sample tables | Reject as invalid media | Implemented for parsed tables |
 | Sample byte range outside source | Reject as invalid media | Implemented |
-| Any edit list | Reject until edit semantics are implemented | Implemented |
+| Edit list of one edit, optionally after an empty edit | Apply it to the sample timeline | Implemented ([TDD 0004](0004-broader-mp4-input-support.md)) |
+| Any other edit list shape | Reject as unsupported media | Implemented ([TDD 0004](0004-broader-mp4-input-support.md)) |
 | Encrypted `encv`/`enca` sample entry | Reject | Implemented |
 | External data reference | Reject | Implemented |
 | More than one sample description per selected track | Reject | Implemented |
@@ -224,7 +225,7 @@ The implemented HLS routes are:
 | `GET`, `HEAD` | `/hls/{asset}/{track}/init.mp4?v={version}` | `video/mp4` or `audio/mp4` by track | `public, max-age=31536000, immutable` |
 | `GET`, `HEAD` | `/hls/{asset}/{track}/segments/{index}/media.m4s?v={version}` | `video/mp4` or `audio/mp4` by track | `public, max-age=31536000, immutable` |
 
-`{track}` is `video` or `audio`. Asset identifiers contain only ASCII letters, digits, hyphens, and underscores. Relative URLs in each playlist resolve beneath that asset's route and never expose a filesystem path. Init and media URLs require the `v` query parameter that the playlists emit; a missing or non-matching value is `404`, so an immutable URL can never return different bytes. Cross-origin access is governed by the `[cors]` configuration. `HEAD` on a media segment answers from metadata and reads no source bytes.
+`{track}` is `video` or `audio-{n}`, with audio tracks numbered from 1 in file order. Asset identifiers contain only ASCII letters, digits, hyphens, and underscores. Relative URLs in each playlist resolve beneath that asset's route and never expose a filesystem path. Init and media URLs require the `v` query parameter that the playlists emit; a missing or non-matching value is `404`, so an immutable URL can never return different bytes. Cross-origin access is governed by the `[cors]` configuration. `HEAD` on a media segment answers from metadata and reads no source bytes.
 
 Current and required status behavior:
 

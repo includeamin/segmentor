@@ -10,6 +10,7 @@ pub(crate) struct LimitsConfig {
     pub(crate) max_assets: usize,
     pub(crate) max_source_bytes: u64,
     pub(crate) max_metadata_bytes: u64,
+    pub(crate) max_fragments: usize,
     pub(crate) max_tracks: usize,
     pub(crate) max_samples_per_track: usize,
     pub(crate) max_samples_per_segment: usize,
@@ -32,6 +33,7 @@ impl LimitsConfig {
         if self.max_assets == 0
             || self.max_source_bytes == 0
             || self.max_metadata_bytes == 0
+            || self.max_fragments == 0
             || self.max_tracks == 0
             || self.max_samples_per_track == 0
             || self.max_samples_per_segment == 0
@@ -62,6 +64,7 @@ impl Default for LimitsConfig {
             max_assets: 1000,
             max_source_bytes: 1024 * 1024 * 1024 * 1024,
             max_metadata_bytes: 64 * 1024 * 1024,
+            max_fragments: 20_000,
             max_tracks: 8,
             max_samples_per_track: 2_000_000,
             max_samples_per_segment: 100_000,

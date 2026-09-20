@@ -17,7 +17,7 @@ use tokio::time::Duration;
 use crate::asset::PackagedAsset;
 use crate::config::{Config, LimitsConfig};
 use crate::http::{AppState, ConnectionLimits, router, serve_connections};
-use crate::media::TrackKind;
+use crate::media::TrackKey;
 use crate::observability::metrics::Metrics;
 
 /// A loaded asset, for timing parsing, planning, and segment preparation in isolation.
@@ -57,7 +57,7 @@ impl BenchAsset {
     /// Returns the failure message if the segment does not exist.
     pub fn prepare_video_segment(&self, index: u32) -> Result<u64, String> {
         self.0
-            .prepare_media_segment(TrackKind::Video, index)
+            .prepare_media_segment(TrackKey::VIDEO, index)
             .map(|prepared| prepared.content_length)
             .map_err(|error| error.to_string())
     }

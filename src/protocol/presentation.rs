@@ -4,7 +4,7 @@
 //! this view instead of the whole loaded asset keeps `protocol` independent of `asset`.
 
 use crate::error::{Error, Result};
-use crate::media::{Sample, Track, TrackKind};
+use crate::media::{Sample, Track, TrackKey, TrackKind};
 use crate::segment::{SegmentPlan, TrackSegment};
 
 /// Bits per second for one track, in the terms HLS and DASH declare them.
@@ -39,11 +39,25 @@ impl<'a> Presentation<'a> {
         self.version
     }
 
-    pub(crate) fn track(&self, kind: TrackKind) -> Result<&'a Track> {
+    pub(crate) fn track(&self, key: TrackKey) -> Result<&'a Track> {
         self.tracks
             .iter()
-            .find(|track| track.kind == kind)
+            .find(|track| track.key == key)
             .ok_or(Error::NotFound("track does not exist"))
+    }
+
+    /// The video track, absent in an audio-only asset.
+    pub(crate) fn video(&self) -> Option<&'a Track> {
+        self.tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
+    }
+
+    /// Audio tracks in file order; the first is the default rendition.
+    pub(crate) fn audio_tracks(&self) -> impl Iterator<Item = &'a Track> + use<'a> {
+        self.tracks
+            .iter()
+            .filter(|track| track.kind == TrackKind::Audio)
     }
 
     /// One track's segments in playback order.
@@ -110,8 +124,13 @@ pub(crate) mod fixtures {
 
     impl Loaded {
         pub(crate) fn h264_aac() -> Self {
-            let path =
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/h264-aac.mp4");
+            Self::fixture("h264-aac.mp4")
+        }
+
+        pub(crate) fn fixture(name: &str) -> Self {
+            let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(name);
             let limits = LimitsConfig::default();
             let source = MediaSourceKind::Local(std::sync::Arc::new(
                 LocalMediaSource::open(path).expect("fixture should open"),

@@ -6,7 +6,7 @@
 
 mod http;
 mod local;
-mod sparse;
+mod metadata;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ pub(crate) use http::{
     HttpMediaSource, LocationRefresher, RemoteReader, RemoteSettings, is_public_address,
 };
 pub(crate) use local::LocalMediaSource;
-pub(crate) use sparse::SparseFile;
+pub(crate) use metadata::{Fragment, Metadata};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ByteRange {
@@ -59,7 +59,12 @@ pub(crate) enum Origin {
 pub(crate) struct SourceIdentity {
     pub(crate) origin: Origin,
     pub(crate) length: u64,
+    /// A hash of `moov` alone, re-checked after parsing to catch a change mid-parse.
     pub(crate) moov_sha256: Option<[u8; 32]>,
+    /// A hash of `moov` and every `moof`: everything the index is built from. For a progressive
+    /// file it equals `moov_sha256`. A fragmented file's `moov` is nearly the same across
+    /// recordings from one encoder, so only this hash tells such files apart.
+    pub(crate) metadata_sha256: Option<[u8; 32]>,
 }
 
 /// A local file or a remote object.
