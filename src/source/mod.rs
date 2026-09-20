@@ -59,7 +59,12 @@ pub(crate) enum Origin {
 pub(crate) struct SourceIdentity {
     pub(crate) origin: Origin,
     pub(crate) length: u64,
+    /// A hash of `moov` alone, re-checked after parsing to catch a change mid-parse.
     pub(crate) moov_sha256: Option<[u8; 32]>,
+    /// A hash of `moov` and every `moof`: everything the index is built from. For a progressive
+    /// file it equals `moov_sha256`. A fragmented file's `moov` is nearly the same across
+    /// recordings from one encoder, so only this hash tells such files apart.
+    pub(crate) metadata_sha256: Option<[u8; 32]>,
 }
 
 /// A local file or a remote object.
