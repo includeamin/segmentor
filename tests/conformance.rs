@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 
 /// Asset ID, fixture file, and how many audio packets packaging drops from it. Only files with
 /// an edit list lose any: the encoder-padding frame before the edit starts.
-const FIXTURES: [(&str, &str, u64); 18] = [
+const FIXTURES: [(&str, &str, u64); 24] = [
     ("aac", "h264-aac.mp4", 0),
     ("moovlast", "h264-aac-moov-last.mp4", 0),
     ("videoonly", "h264-video-only.mp4", 0),
@@ -54,6 +54,12 @@ const FIXTURES: [(&str, &str, u64); 18] = [
     ("flac", "h264-flac.mp4", 0),
     ("audioonly", "aac-only.m4a", 1),
     ("audiotwo", "aac-two-tracks-only.m4a", 0),
+    ("frag", "h264-aac-fragmented.mp4", 0),
+    ("fraglegacy", "h264-aac-fragmented-legacy.mp4", 0),
+    ("fragcmaf", "h264-aac-fragmented-cmaf.mp4", 0),
+    ("fragsidx", "h264-aac-fragmented-sidx.mp4", 0),
+    ("fragoffset", "h264-aac-fragmented-offset.mp4", 0),
+    ("fragneg", "h264-aac-fragmented-negative-cts.mp4", 0),
 ];
 
 /// The video codec prefix and audio codec each fixture's master playlist must declare; `None`

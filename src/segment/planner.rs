@@ -85,7 +85,9 @@ pub(crate) fn plan(
             first_sample,
             end_sample,
             decode_time,
-            duration: end_time - decode_time,
+            duration: end_time
+                .checked_sub(decode_time)
+                .ok_or_else(|| Error::InvalidMedia("samples are not in decode order".to_owned()))?,
         }];
 
         for audio in &followers {
