@@ -41,7 +41,7 @@ fn packages_fixture_into_separate_fragmented_tracks() {
 }
 
 fn run_packager(root: &Path, output: &Path) {
-    let result = Command::new(env!("CARGO_BIN_EXE_vod-module-rs"))
+    let result = Command::new(env!("CARGO_BIN_EXE_segmentor"))
         .args([
             "package",
             "--input",

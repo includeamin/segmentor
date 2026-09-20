@@ -69,7 +69,7 @@ pub(crate) fn init(config: &LoggingConfig) -> Result<LoggingGuard> {
                         DROPPED_LOG_LINES.store(current, Ordering::Relaxed);
                         if current > reported {
                             eprintln!(
-                                "vod-module-rs: non-blocking logger dropped {} additional records ({} total)",
+                                "segmentor: non-blocking logger dropped {} additional records ({} total)",
                                 current - reported,
                                 current
                             );

@@ -1,6 +1,6 @@
 # Operating the origin
 
-This guide covers what an operator needs to run `vod-module-rs serve` behind a load balancer or CDN. Every setting named here is documented in `vod.example.toml`.
+This guide covers what an operator needs to run `segmentor serve` behind a load balancer or CDN. Every setting named here is documented in `vod.example.toml`.
 
 ## Deployment shape
 
@@ -126,9 +126,9 @@ The `Dockerfile` is a four-stage build optimized for Rust:
 - **Build context.** `.dockerignore` admits only the manifests and `src/`, so unrelated changes do not invalidate layers.
 
 ```sh
-docker build -t vod-module-rs --build-arg VERSION=0.1.0 --build-arg REVISION=$(git rev-parse HEAD) .
+docker build -t segmentor --build-arg VERSION=0.1.0 --build-arg REVISION=$(git rev-parse HEAD) .
 docker run --rm -p 3000:3000 --read-only --cap-drop=ALL \
-  -v "$PWD/vod.toml:/etc/vod/vod.toml:ro" -v "$PWD/media:/srv/vod:ro" vod-module-rs
+  -v "$PWD/vod.toml:/etc/vod/vod.toml:ro" -v "$PWD/media:/srv/vod:ro" segmentor
 ```
 
 Set `server.listen = "0.0.0.0:3000"` and `storage.media_root = "/srv/vod"` in the mounted configuration. The build stage installs `cmake` and a C toolchain because the TLS provider (`aws-lc-sys`) compiles C code. Use `docker stop --time` (or the orchestrator's termination grace period) above `shutdown_delay_ms + shutdown_grace_ms`. The image has no `HEALTHCHECK` because it contains no shell or HTTP client; probe `/health` and `/ready` from the orchestrator.

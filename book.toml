@@ -2,7 +2,7 @@
 authors = ["Amin Jamal"]
 language = "en"
 src = "docs"
-title = "vod-module-rs"
+title = "segmentor"
 
 [build]
 build-dir = "target/book"
@@ -11,9 +11,9 @@ create-missing = false
 [output.html]
 default-theme = "rust"
 preferred-dark-theme = "ayu"
-git-repository-url = "https://github.com/includeamin/vod-module-rs"
-edit-url-template = "https://github.com/includeamin/vod-module-rs/edit/main/{path}"
-site-url = "/vod-module-rs/"
+git-repository-url = "https://github.com/includeamin/segmentor"
+edit-url-template = "https://github.com/includeamin/segmentor/edit/main/{path}"
+site-url = "/segmentor/"
 additional-js = ["docs/assets/js/mermaid.min.js", "docs/assets/js/mermaid-init.js"]
 
 [output.html.search]

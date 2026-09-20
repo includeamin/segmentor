@@ -83,16 +83,16 @@ jobs:
           TAG: ${{ steps.tags.outputs.tag }}
         run: |
           "$RUNNER_TEMP/scripts/stamp-version.sh" "${TAG#v}"
-          cargo build --release --locked --bin vod-module-rs
+          cargo build --release --locked --bin segmentor
 
       - name: Package
         env:
           TAG: ${{ steps.tags.outputs.tag }}
         run: |
           set -euo pipefail
-          name="vod-module-rs-${TAG}-${TARGET}"
+          name="segmentor-${TAG}-${TARGET}"
           mkdir -p "dist/$name"
-          cp target/release/vod-module-rs LICENSE README.md vod.example.toml "dist/$name/"
+          cp target/release/segmentor LICENSE README.md vod.example.toml "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")
 

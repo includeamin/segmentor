@@ -53,8 +53,8 @@ Run **Actions → Release → Run workflow** and choose:
 The workflow then:
 
 1. builds the changelog for that tag from the commits since the previous version tag, grouped into Breaking changes, Features, Bug fixes, Performance, Documentation, Refactoring, Build and CI, Tests, and Other changes, with links to each commit and to the full comparison;
-2. checks out the tag, stamps its version into `Cargo.toml` and `Cargo.lock` for the build only, and builds `vod-module-rs` in release mode with `--locked`;
-3. packages `vod-module-rs-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` (the binary, `LICENSE`, `README.md`, and `vod.example.toml`) with a SHA-256 file;
+2. checks out the tag, stamps its version into `Cargo.toml` and `Cargo.lock` for the build only, and builds `segmentor` in release mode with `--locked`;
+3. packages `segmentor-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` (the binary, `LICENSE`, `README.md`, and `vod.example.toml`) with a SHA-256 file;
 4. creates the GitHub release, or **updates it if it already exists** (notes, title, and channel), and uploads the assets.
 
 Running it again for the same tag is safe, so a preview can be promoted to latest by re-running with `channel = latest`. A preview release is titled `vX.Y.Z (preview)`.

@@ -78,7 +78,7 @@ fn start_server() -> Server {
     let config_path = directory.join(format!("vod-{}.toml", address.port()));
     fs::write(&config_path, config).unwrap();
 
-    let child = Command::new(env!("CARGO_BIN_EXE_vod-module-rs"))
+    let child = Command::new(env!("CARGO_BIN_EXE_segmentor"))
         .args(["serve", "--config"])
         .arg(&config_path)
         .stdout(Stdio::null())

@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use vod_module_rs::benchmarking::{BenchAsset, BenchServer, ServerOptions};
+use segmentor::benchmarking::{BenchAsset, BenchServer, ServerOptions};
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -522,7 +522,7 @@ fn main() {
         .build()
         .unwrap();
 
-    println!("vod-module-rs performance budgets");
+    println!("segmentor performance budgets");
     println!(
         "host: {} logical CPUs, {workers} Tokio workers",
         std::thread::available_parallelism().map_or(0, |n| n.get())

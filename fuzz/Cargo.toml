@@ -1,5 +1,5 @@
 [package]
-name = "vod-module-rs-fuzz"
+name = "segmentor-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
@@ -10,7 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 tempfile = "3"
-vod-module-rs = { path = ".." }
+segmentor = { path = ".." }
 
 [[bin]]
 name = "media-pipeline"
