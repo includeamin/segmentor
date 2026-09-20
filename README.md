@@ -2,6 +2,8 @@
 
 A video-on-demand application built with Rust.
 
+> **Work in progress.** This project is under active development. APIs, configuration, and behavior may change without notice, and it is not yet ready for production use.
+
 ## Development
 
 The repository uses stable Rust with `rustfmt` and Clippy. Run the complete local validation suite with:
