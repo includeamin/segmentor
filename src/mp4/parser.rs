@@ -1,25 +1,27 @@
-use std::collections::{HashMap, HashSet};
-
-use ::mp4::{MediaType, Mp4Reader, Mp4Track, TrackType};
 use sha2::{Digest, Sha256};
 
+use super::boxes::{
+    RawBox, Reader, child_boxes, fourcc, invalid_media, optional_child, required_child,
+};
+use super::codec;
 use super::edit::{self, ElstEntry, TrackEdit};
+use super::tables::{expand_samples, parse_sample_tables};
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
-use crate::media::{CodecConfig, MediaIndex, Sample, SkippedTrack, Track, TrackKey, TrackKind};
-use crate::source::{MediaSourceKind, SourceIdentity, SparseFile};
+use crate::media::{MediaIndex, SkippedTrack, Track, TrackKey, TrackKind};
+use crate::source::{MediaSourceKind, Metadata, SourceIdentity};
 
-/// A parsed file: the sample index plus the metadata regions it was built from, which the init
+/// A parsed file: the sample index plus the `moov` box it was built from, which the init
 /// segment writer reuses so the file is not read again.
 #[derive(Debug)]
 pub(crate) struct ParsedMedia {
     pub(crate) index: MediaIndex,
-    pub(crate) metadata: SparseFile,
+    pub(crate) metadata: Metadata,
 }
 
 /// Fetches a file's metadata, builds its sample index, and confirms the source did not change.
 ///
-/// Only box headers, `ftyp`, and `moov` are read, whether the source is a local file or a remote
+/// Only box headers and `moov` are read, whether the source is a local file or a remote
 /// object. The CPU-bound table expansion runs on the blocking pool.
 pub(crate) async fn parse(source: &MediaSourceKind, limits: &LimitsConfig) -> Result<ParsedMedia> {
     if source.len() > limits.max_source_bytes {
@@ -27,7 +29,7 @@ pub(crate) async fn parse(source: &MediaSourceKind, limits: &LimitsConfig) -> Re
             "source exceeds configured size limit".to_owned(),
         ));
     }
-    let metadata = SparseFile::fetch(source, limits.max_metadata_bytes).await?;
+    let metadata = Metadata::fetch(source, limits.max_metadata_bytes).await?;
     let identity = source.identity().clone();
     let limits_for_parse = limits.clone();
     let (metadata, index) = tokio::task::spawn_blocking(move || {
@@ -51,47 +53,35 @@ pub(crate) async fn parse(source: &MediaSourceKind, limits: &LimitsConfig) -> Re
 
 /// The synchronous, CPU-bound half of parsing: validation, table expansion, and limits.
 fn parse_metadata(
-    metadata: &SparseFile,
+    metadata: &Metadata,
     mut identity: SourceIdentity,
     limits: &LimitsConfig,
 ) -> Result<MediaIndex> {
     let moov_bytes = metadata.moov_bytes();
-    let raw = validate_raw_moov(moov_bytes)?;
+    let moov = validate_raw_moov(moov_bytes)?;
     let moov_sha256: [u8; 32] = Sha256::digest(moov_bytes).into();
-    let reader = Mp4Reader::read_header(metadata.reader(), metadata.len())?;
-
-    if reader.is_fragmented() {
-        return Err(fragmented());
-    }
-    if reader.moov.traks.len() > limits.max_tracks {
+    if moov.tracks.len() > limits.max_tracks {
         return Err(Error::Unsupported(format!(
             "track count {} exceeds configured limit {}",
-            reader.moov.traks.len(),
+            moov.tracks.len(),
             limits.max_tracks
         )));
     }
 
-    let movie_timescale = reader.moov.mvhd.timescale;
     let mut tracks = Vec::new();
     let mut edits = Vec::new();
     let mut skipped_tracks = Vec::new();
-    let mut ids = reader.tracks().keys().copied().collect::<Vec<_>>();
-    ids.sort_unstable();
-    for id in ids {
-        let track = &reader.tracks()[&id];
-        if let Some(RawTrack {
-            disposition: Disposition::Skip(reason),
-            handler,
-        }) = raw.get(&id)
-        {
+    for raw in &moov.tracks {
+        if let Disposition::Skip(reason) = raw.disposition {
             skipped_tracks.push(SkippedTrack {
-                id,
-                handler: fourcc(*handler),
+                id: raw.id,
+                handler: fourcc(raw.handler),
                 reason,
             });
         } else {
-            edits.push(track_edit(track, movie_timescale)?);
-            tracks.push(parse_track(track, metadata.len(), limits)?);
+            let (track, edit) = parse_track(raw, moov.movie_timescale, metadata.len(), limits)?;
+            tracks.push(track);
+            edits.push(edit);
         }
     }
 
@@ -100,7 +90,7 @@ fn parse_metadata(
         .zip(&tracks)
         .map(|(edit, track)| (*edit, track.timescale))
         .collect::<Vec<_>>();
-    let shifts = edit::timeline_shifts(&timescales, movie_timescale)?;
+    let shifts = edit::timeline_shifts(&timescales, moov.movie_timescale)?;
     for ((track, edit), shift) in tracks.iter_mut().zip(edits).zip(shifts) {
         edit::apply(track, edit, shift)?;
     }
@@ -109,34 +99,11 @@ fn parse_metadata(
 
     Ok(MediaIndex {
         source: identity,
-        movie_timescale,
-        duration: reader.moov.mvhd.duration,
+        movie_timescale: moov.movie_timescale,
+        duration: moov.movie_duration,
         tracks,
         skipped_tracks,
     })
-}
-
-fn track_edit(track: &Mp4Track, movie_timescale: u32) -> Result<TrackEdit> {
-    let Some(elst) = track.trak.edts.as_ref().and_then(|edts| edts.elst.as_ref()) else {
-        return Ok(TrackEdit::NONE);
-    };
-    let entries = elst
-        .entries
-        .iter()
-        .map(|entry| ElstEntry {
-            segment_duration: entry.segment_duration,
-            media_time: entry.media_time,
-            media_rate: entry.media_rate,
-            media_rate_fraction: entry.media_rate_fraction,
-        })
-        .collect::<Vec<_>>();
-    edit::parse_edit_list(
-        track.track_id(),
-        elst.version,
-        &entries,
-        movie_timescale,
-        track.timescale(),
-    )
 }
 
 /// Names the tracks the way URLs will: one video, then audio numbered in file order.
@@ -153,149 +120,140 @@ fn assign_keys(tracks: &mut [Track]) {
     }
 }
 
-fn parse_track(track: &Mp4Track, source_len: u64, limits: &LimitsConfig) -> Result<Track> {
-    let kind = match track.track_type()? {
-        TrackType::Audio => TrackKind::Audio,
-        TrackType::Video => TrackKind::Video,
-        TrackType::Subtitle => {
+fn parse_track(
+    raw: &RawTrack<'_>,
+    movie_timescale: u32,
+    source_len: u64,
+    limits: &LimitsConfig,
+) -> Result<(Track, TrackEdit)> {
+    let kind = if raw.handler == *b"vide" {
+        TrackKind::Video
+    } else {
+        TrackKind::Audio
+    };
+    let media = required_child(raw.trak, *b"mdia")?;
+    let header = parse_media_header(required_child(media.payload, *b"mdhd")?.payload, raw.id)?;
+    let stbl = required_child(required_child(media.payload, *b"minf")?.payload, *b"stbl")?;
+    let entry = sample_entry(stbl.payload)?;
+    let codec = match (&entry.name, kind) {
+        (b"avc1", TrackKind::Video) => codec::parse_avc(entry.payload)?,
+        (b"mp4a", TrackKind::Audio) => codec::parse_aac(entry.payload, raw.id)?,
+        (name, _) => {
             return Err(Error::Unsupported(format!(
-                "track {}: subtitle tracks are not supported",
-                track.track_id()
+                "track {}: sample description `{}` does not belong in a {} track",
+                raw.id,
+                fourcc(*name),
+                fourcc(raw.handler)
             )));
         }
     };
-    let codec = parse_codec(track)?;
-    let samples = parse_samples(track, source_len, limits)?;
+    let samples = expand_samples(&parse_sample_tables(stbl.payload)?, source_len, limits)?;
+    let edit = track_edit(raw, movie_timescale, header.timescale)?;
 
-    let mdia = &track.trak.mdia;
-    Ok(Track {
-        id: track.track_id(),
-        // Replaced once every track is known; see `assign_keys`.
-        key: TrackKey::VIDEO,
-        kind,
-        language: mdia.mdhd.language.clone(),
-        timeline_shift: 0,
-        timescale: track.timescale(),
-        duration: track.trak.mdia.mdhd.duration,
-        codec,
-        samples,
+    Ok((
+        Track {
+            id: raw.id,
+            // Replaced once every track is known; see `assign_keys`.
+            key: TrackKey::VIDEO,
+            kind,
+            language: header.language,
+            timeline_shift: 0,
+            timescale: header.timescale,
+            duration: header.duration,
+            codec,
+            samples,
+        },
+        edit,
+    ))
+}
+
+/// What `mdhd` says about a track's media.
+struct MediaHeader {
+    timescale: u32,
+    duration: u64,
+    language: String,
+}
+
+fn parse_media_header(payload: &[u8], track_id: u32) -> Result<MediaHeader> {
+    let mut reader = Reader::new(payload);
+    let version = reader.full_box()?;
+    let (timescale, duration) = read_timescale_and_duration(&mut reader, version)?;
+    if timescale == 0 {
+        return Err(invalid_media(&format!(
+            "track {track_id}: timescale is zero"
+        )));
+    }
+    // Three five-bit letters, each stored as an offset from 0x60, after a padding bit.
+    let packed = reader.u16()?;
+    let language = [10, 5, 0]
+        .into_iter()
+        .map(|shift| char::from(u8::try_from((packed >> shift) & 0x1f).unwrap_or(0) + 0x60))
+        .collect();
+    Ok(MediaHeader {
+        timescale,
+        duration,
+        language,
     })
 }
 
-fn parse_codec(track: &Mp4Track) -> Result<CodecConfig> {
-    let sample_table = &track.trak.mdia.minf.stbl;
-
-    match track.media_type()? {
-        MediaType::H264 => {
-            let avc =
-                sample_table.stsd.avc1.as_ref().ok_or_else(|| {
-                    Error::Unsupported("H.264 without avc1 sample entry".to_owned())
-                })?;
-            let sequence_parameter_set = avc
-                .avcc
-                .sequence_parameter_sets
-                .first()
-                .ok_or_else(|| Error::Unsupported("H.264 without SPS".to_owned()))?
-                .bytes
-                .clone();
-            let picture_parameter_set = avc
-                .avcc
-                .picture_parameter_sets
-                .first()
-                .ok_or_else(|| Error::Unsupported("H.264 without PPS".to_owned()))?
-                .bytes
-                .clone();
-
-            Ok(CodecConfig::Avc {
-                width: avc.width,
-                height: avc.height,
-                profile: avc.avcc.avc_profile_indication,
-                compatibility: avc.avcc.profile_compatibility,
-                level: avc.avcc.avc_level_indication,
-                sequence_parameter_set,
-                picture_parameter_set,
-            })
-        }
-        MediaType::AAC => {
-            let aac =
-                sample_table.stsd.mp4a.as_ref().ok_or_else(|| {
-                    Error::Unsupported("AAC without mp4a sample entry".to_owned())
-                })?;
-
-            if track.audio_profile()? != ::mp4::AudioObjectType::AacLowComplexity {
-                return Err(Error::Unsupported(format!(
-                    "track {}: AAC profile {:?} is not supported, only AAC-LC is",
-                    track.track_id(),
-                    track.audio_profile()?
-                )));
-            }
-
-            Ok(CodecConfig::Aac {
-                sample_rate: u32::from(aac.samplerate.value()),
-                channels: aac.channelcount,
-            })
-        }
-        other => Err(Error::Unsupported(format!(
-            "track {}: codec {other} is not supported, only H.264 and AAC-LC are",
-            track.track_id()
-        ))),
+/// The creation and modification times are skipped; version 1 widens every time field.
+fn read_timescale_and_duration(reader: &mut Reader<'_>, version: u8) -> Result<(u32, u64)> {
+    if version == 1 {
+        reader.skip(16)?;
+        Ok((reader.u32()?, reader.u64()?))
+    } else {
+        reader.skip(8)?;
+        Ok((reader.u32()?, u64::from(reader.u32()?)))
     }
 }
 
-fn parse_samples(track: &Mp4Track, source_len: u64, limits: &LimitsConfig) -> Result<Vec<Sample>> {
-    let sample_table = &track.trak.mdia.minf.stbl;
-    let sample_count = usize::try_from(sample_table.stsz.sample_count)
-        .map_err(|_| invalid_media("sample count does not fit in memory"))?;
-    if sample_count > limits.max_samples_per_track {
-        return Err(invalid_media("sample count exceeds configured limit"));
-    }
-    let sizes = sample_sizes(track, sample_count)?;
-    let byte_offsets = sample_offsets(track, &sizes, sample_count)?;
-    let times = sample_times(track, sample_count)?;
-    let composition_offsets = composition_offsets(track, sample_count)?;
-    let sync_samples = sample_table
-        .stss
-        .as_ref()
-        .map(|stss| stss.entries.iter().copied().collect::<HashSet<_>>());
-
-    let mut samples = Vec::with_capacity(sample_count);
-    for index in 0..sample_count {
-        let sample_number = u32::try_from(index)
-            .ok()
-            .and_then(|number| number.checked_add(1))
-            .ok_or_else(|| invalid_media("sample number overflow"))?;
-        let offset = byte_offsets[index];
-        let size = sizes[index];
-        let end = offset
-            .checked_add(u64::from(size))
-            .ok_or_else(|| invalid_media("sample byte range overflow"))?;
-        if end > source_len {
-            return Err(invalid_media("sample byte range exceeds source length"));
-        }
-
-        samples.push(Sample {
-            offset,
-            size,
-            decode_time: times[index].0,
-            duration: times[index].1,
-            composition_offset: composition_offsets[index],
-            is_sync: sync_samples
-                .as_ref()
-                .is_none_or(|samples| samples.contains(&sample_number)),
-        });
-    }
-
-    Ok(samples)
+/// The track's edit list, or the identity edit when it has none.
+fn track_edit(raw: &RawTrack<'_>, movie_timescale: u32, track_timescale: u32) -> Result<TrackEdit> {
+    let Some(edts) = optional_child(raw.trak, *b"edts")? else {
+        return Ok(TrackEdit::NONE);
+    };
+    let Some(elst) = optional_child(edts.payload, *b"elst")? else {
+        return Ok(TrackEdit::NONE);
+    };
+    let mut reader = Reader::new(elst.payload);
+    let version = reader.full_box()?;
+    let count = reader.entry_count(if version == 1 { 20 } else { 12 })?;
+    let entries = (0..count)
+        .map(|_| {
+            let (segment_duration, media_time) = if version == 1 {
+                (reader.u64()?, reader.u64()?)
+            } else {
+                (u64::from(reader.u32()?), u64::from(reader.u32()?))
+            };
+            Ok(ElstEntry {
+                segment_duration,
+                media_time,
+                media_rate: reader.u16()?,
+                media_rate_fraction: reader.u16()?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    edit::parse_edit_list(raw.id, version, &entries, movie_timescale, track_timescale)
 }
 
-/// What preflight learned about one `trak`, before the `mp4` crate sees it.
+/// What preflight learned about one `trak`.
 #[derive(Debug)]
-struct RawTrack {
+struct RawMoov<'a> {
+    movie_timescale: u32,
+    movie_duration: u64,
+    tracks: Vec<RawTrack<'a>>,
+}
+
+#[derive(Debug)]
+struct RawTrack<'a> {
+    id: u32,
     handler: [u8; 4],
     disposition: Disposition,
+    /// The `trak` payload, for the detailed parse of tracks that are packaged.
+    trak: &'a [u8],
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum Disposition {
     Package,
     Skip(&'static str),
@@ -310,10 +268,10 @@ fn fragmented() -> Error {
 
 /// Checks the raw `moov` structure and decides, per track, whether it is packaged.
 ///
-/// Runs before the `mp4` crate so that unsupported constructs fail with a specific message and
-/// tracks that are not audio or video never reach the crate at all.
-fn validate_raw_moov(moov: &[u8]) -> Result<HashMap<u32, RawTrack>> {
-    let root = box_payload(moov, 0)?;
+/// Unsupported constructs fail here with a specific message, and tracks that are not audio or
+/// video are set aside without their tables ever being read.
+fn validate_raw_moov(moov: &[u8]) -> Result<RawMoov<'_>> {
+    let root = super::boxes::box_payload(moov, 0)?;
     if root.name != *b"moov" {
         return Err(invalid_media("metadata range is not a moov box"));
     }
@@ -321,10 +279,20 @@ fn validate_raw_moov(moov: &[u8]) -> Result<HashMap<u32, RawTrack>> {
     if children.iter().any(|child| child.name == *b"mvex") {
         return Err(fragmented());
     }
-    let mut tracks = HashMap::new();
+    let header = children
+        .iter()
+        .find(|child| child.name == *b"mvhd")
+        .ok_or_else(|| invalid_media("required MP4 box `mvhd` is missing"))?;
+    let mut header = Reader::new(header.payload);
+    let version = header.full_box()?;
+    let (movie_timescale, movie_duration) = read_timescale_and_duration(&mut header, version)?;
+    if movie_timescale == 0 {
+        return Err(invalid_media("movie timescale is zero"));
+    }
+
+    let mut tracks: Vec<RawTrack<'_>> = Vec::new();
     for track in children.into_iter().filter(|child| child.name == *b"trak") {
-        let header = required_child(track.payload, *b"tkhd")?;
-        let id = track_id(header.payload)?;
+        let id = track_id(required_child(track.payload, *b"tkhd")?.payload)?;
         let media = required_child(track.payload, *b"mdia")?;
         let handler = handler_type(required_child(media.payload, *b"hdlr")?.payload)?;
         let disposition = if handler == *b"vide" || handler == *b"soun" {
@@ -333,34 +301,32 @@ fn validate_raw_moov(moov: &[u8]) -> Result<HashMap<u32, RawTrack>> {
             let sample_table = required_child(media_info.payload, *b"stbl")?;
             classify_sample_description(id, handler, sample_table.payload)?
         } else {
-            // Timecode, timed metadata, chapters, and hint tracks: nothing to package.
+            // Timecode, timed metadata, chapters, subtitles, and hint tracks: nothing to package.
             Disposition::Skip("not an audio or video track")
         };
-        if tracks
-            .insert(
-                id,
-                RawTrack {
-                    handler,
-                    disposition,
-                },
-            )
-            .is_some()
-        {
+        if tracks.iter().any(|existing| existing.id == id) {
             return Err(invalid_media("two tracks share one track ID"));
         }
+        tracks.push(RawTrack {
+            id,
+            handler,
+            disposition,
+            trak: track.payload,
+        });
     }
-    Ok(tracks)
+    Ok(RawMoov {
+        movie_timescale,
+        movie_duration,
+        tracks,
+    })
 }
 
 fn track_id(tkhd: &[u8]) -> Result<u32> {
-    let offset = match tkhd.first() {
-        Some(1) => 20,
-        Some(_) => 12,
-        None => return Err(invalid_media("tkhd payload is truncated")),
-    };
-    tkhd.get(offset..offset + 4)
-        .ok_or_else(|| invalid_media("tkhd payload is truncated"))
-        .and_then(read_u32)
+    let mut reader = Reader::new(tkhd);
+    let version = reader.full_box()?;
+    // Creation and modification times come first; version 1 widens both.
+    reader.skip(if version == 1 { 16 } else { 8 })?;
+    reader.u32()
 }
 
 fn handler_type(hdlr: &[u8]) -> Result<[u8; 4]> {
@@ -369,47 +335,47 @@ fn handler_type(hdlr: &[u8]) -> Result<[u8; 4]> {
         .ok_or_else(|| invalid_media("hdlr payload is truncated"))
 }
 
-/// A printable spelling of a four-character code for error messages and logs.
-fn fourcc(code: [u8; 4]) -> String {
-    code.iter()
-        .map(|byte| {
-            if byte.is_ascii_graphic() || *byte == b' ' {
-                char::from(*byte)
-            } else {
-                '?'
-            }
-        })
-        .collect()
-}
-
 fn validate_data_reference(media_info: &[u8]) -> Result<()> {
     let data_info = required_child(media_info, *b"dinf")?;
     let data_reference = required_child(data_info.payload, *b"dref")?;
-    if data_reference.payload.len() < 8 {
-        return Err(invalid_media("dref payload is truncated"));
-    }
-    let entry_count = read_u32(&data_reference.payload[4..8])?;
+    let mut reader = Reader::new(data_reference.payload);
+    reader.full_box()?;
+    let entry_count = reader.u32()?;
     if entry_count != 1 {
         return Err(Error::Unsupported(
             "exactly one self-contained data reference is required".to_owned(),
         ));
     }
-    let entries = child_boxes(&data_reference.payload[8..])?;
+    let entries = child_boxes(reader.rest())?;
     let entry = entries
         .first()
         .ok_or_else(|| invalid_media("dref entry is missing"))?;
-    if entry.name != *b"url " || entry.payload.len() < 4 {
-        return Err(Error::Unsupported(
-            "external data references are not supported".to_owned(),
-        ));
-    }
-    let flags = read_u32(&[0, entry.payload[1], entry.payload[2], entry.payload[3]])?;
-    if flags & 1 == 0 {
+    // The low flag bit of a `url ` entry means "the media is in this file".
+    let self_contained =
+        entry.name == *b"url " && entry.payload.get(3).is_some_and(|flags| flags & 1 != 0);
+    if !self_contained {
         return Err(Error::Unsupported(
             "external data references are not supported".to_owned(),
         ));
     }
     Ok(())
+}
+
+/// The track's one sample entry.
+fn sample_entry(sample_table: &[u8]) -> Result<RawBox<'_>> {
+    let description = required_child(sample_table, *b"stsd")?;
+    let mut reader = Reader::new(description.payload);
+    reader.full_box()?;
+    let entry_count = reader.u32()?;
+    if entry_count != 1 {
+        return Err(Error::Unsupported(format!(
+            "{entry_count} sample descriptions; exactly one is required"
+        )));
+    }
+    child_boxes(reader.rest())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| invalid_media("stsd entry is missing"))
 }
 
 fn classify_sample_description(
@@ -418,19 +384,15 @@ fn classify_sample_description(
     sample_table: &[u8],
 ) -> Result<Disposition> {
     let description = required_child(sample_table, *b"stsd")?;
-    if description.payload.len() < 8 {
-        return Err(invalid_media("stsd payload is truncated"));
-    }
-    let entry_count = read_u32(&description.payload[4..8])?;
+    let mut count = Reader::new(description.payload);
+    count.full_box()?;
+    let entry_count = count.u32()?;
     if entry_count != 1 {
         return Err(Error::Unsupported(format!(
             "track {track_id}: {entry_count} sample descriptions; exactly one is required"
         )));
     }
-    let entries = child_boxes(&description.payload[8..])?;
-    let entry = entries
-        .first()
-        .ok_or_else(|| invalid_media("stsd entry is missing"))?;
+    let entry = sample_entry(sample_table)?;
     match &entry.name {
         b"avc1" | b"mp4a" => Ok(Disposition::Package),
         b"encv" | b"enca" => Err(Error::Unsupported(format!(
@@ -447,202 +409,30 @@ fn classify_sample_description(
     }
 }
 
+/// The number of samples the track's size table declares, in either `stsz` or `stz2`.
 fn sample_count(sample_table: &[u8]) -> Result<u32> {
-    let sizes = required_child(sample_table, *b"stsz")?;
-    sizes
-        .payload
-        .get(8..12)
-        .ok_or_else(|| invalid_media("stsz payload is truncated"))
-        .and_then(read_u32)
-}
-
-#[derive(Clone, Copy)]
-struct RawBox<'a> {
-    name: [u8; 4],
-    payload: &'a [u8],
-    size: usize,
-}
-
-fn required_child(data: &[u8], name: [u8; 4]) -> Result<RawBox<'_>> {
-    child_boxes(data)?
-        .into_iter()
-        .find(|child| child.name == name)
-        .ok_or_else(|| invalid_media("required MP4 box is missing"))
-}
-
-fn child_boxes(mut data: &[u8]) -> Result<Vec<RawBox<'_>>> {
-    let mut children = Vec::new();
-    while !data.is_empty() {
-        let child = box_payload(data, 0)?;
-        children.push(child);
-        data = &data[child.size..];
+    if let Some(sizes) = optional_child(sample_table, *b"stsz")? {
+        let mut reader = Reader::new(sizes.payload);
+        reader.full_box()?;
+        reader.skip(4)?;
+        return reader.u32();
     }
-    Ok(children)
-}
-
-fn box_payload(data: &[u8], offset: usize) -> Result<RawBox<'_>> {
-    let header = data
-        .get(offset..offset + 8)
-        .ok_or_else(|| invalid_media("MP4 box header is truncated"))?;
-    let size32 = read_u32(&header[..4])?;
-    let name = header[4..8].try_into().unwrap();
-    let (size, header_size) = if size32 == 1 {
-        let extended = data
-            .get(offset + 8..offset + 16)
-            .ok_or_else(|| invalid_media("extended MP4 box header is truncated"))?;
-        (
-            usize::try_from(u64::from_be_bytes(extended.try_into().unwrap()))
-                .map_err(|_| invalid_media("MP4 box size does not fit in memory"))?,
-            16,
-        )
-    } else if size32 == 0 {
-        (data.len() - offset, 8)
-    } else {
-        (
-            usize::try_from(size32).map_err(|_| invalid_media("MP4 box size is invalid"))?,
-            8,
-        )
-    };
-    if size < header_size || offset.checked_add(size).is_none_or(|end| end > data.len()) {
-        return Err(invalid_media("MP4 child box size is invalid"));
-    }
-    Ok(RawBox {
-        name,
-        payload: &data[offset + header_size..offset + size],
-        size,
-    })
-}
-
-fn read_u32(bytes: &[u8]) -> Result<u32> {
-    Ok(u32::from_be_bytes(bytes.try_into().map_err(|_| {
-        invalid_media("expected four-byte integer")
-    })?))
-}
-
-fn sample_sizes(track: &Mp4Track, sample_count: usize) -> Result<Vec<u32>> {
-    let table = &track.trak.mdia.minf.stbl.stsz;
-    if table.sample_size != 0 {
-        return Ok(vec![table.sample_size; sample_count]);
-    }
-    if table.sample_sizes.len() != sample_count {
-        return Err(invalid_media(
-            "stsz entry count does not match sample count",
-        ));
-    }
-    Ok(table.sample_sizes.clone())
-}
-
-fn sample_offsets(track: &Mp4Track, sizes: &[u32], sample_count: usize) -> Result<Vec<u64>> {
-    let table = &track.trak.mdia.minf.stbl;
-    let chunks = if let Some(offsets) = &table.stco {
-        offsets
-            .entries
-            .iter()
-            .map(|offset| u64::from(*offset))
-            .collect()
-    } else if let Some(offsets) = &table.co64 {
-        offsets.entries.clone()
-    } else {
-        return Err(invalid_media("missing stco/co64 chunk offsets"));
-    };
-    if table.stsc.entries.is_empty() {
-        return Err(invalid_media("missing stsc entries"));
-    }
-
-    let mut offsets = Vec::with_capacity(sample_count);
-    let mut sample_index = 0usize;
-    for (entry_index, entry) in table.stsc.entries.iter().enumerate() {
-        if entry.first_chunk == 0 || entry.samples_per_chunk == 0 {
-            return Err(invalid_media("invalid stsc entry"));
-        }
-        let next_first_chunk = table
-            .stsc
-            .entries
-            .get(entry_index + 1)
-            .map_or(chunks.len() as u64 + 1, |next| u64::from(next.first_chunk));
-
-        for chunk_number in u64::from(entry.first_chunk)..next_first_chunk {
-            let chunk_index = usize::try_from(chunk_number - 1)
-                .map_err(|_| invalid_media("chunk index does not fit in memory"))?;
-            let mut offset = *chunks
-                .get(chunk_index)
-                .ok_or_else(|| invalid_media("stsc references a missing chunk"))?;
-
-            for _ in 0..entry.samples_per_chunk {
-                if sample_index == sample_count {
-                    return Err(invalid_media("stsc maps more samples than stsz"));
-                }
-                offsets.push(offset);
-                offset = offset
-                    .checked_add(u64::from(sizes[sample_index]))
-                    .ok_or_else(|| invalid_media("sample offset overflow"))?;
-                sample_index += 1;
-            }
-        }
-    }
-
-    if sample_index != sample_count {
-        return Err(invalid_media("stsc maps fewer samples than stsz"));
-    }
-    Ok(offsets)
-}
-
-fn sample_times(track: &Mp4Track, sample_count: usize) -> Result<Vec<(u64, u32)>> {
-    let mut times = Vec::with_capacity(sample_count);
-    let mut decode_time = 0u64;
-    for entry in &track.trak.mdia.minf.stbl.stts.entries {
-        // Bound the running total before expanding: a single run-length entry can claim
-        // billions of samples, and expansion must never outgrow the already-limited count.
-        let run = usize::try_from(entry.sample_count)
-            .ok()
-            .filter(|run| times.len().saturating_add(*run) <= sample_count)
-            .ok_or_else(|| invalid_media("stts entry count does not match sample count"))?;
-        for _ in 0..run {
-            times.push((decode_time, entry.sample_delta));
-            decode_time = decode_time
-                .checked_add(u64::from(entry.sample_delta))
-                .ok_or_else(|| invalid_media("decode timestamp overflow"))?;
-        }
-    }
-    if times.len() != sample_count {
-        return Err(invalid_media(
-            "stts entry count does not match sample count",
-        ));
-    }
-    Ok(times)
-}
-
-fn composition_offsets(track: &Mp4Track, sample_count: usize) -> Result<Vec<i32>> {
-    let Some(table) = &track.trak.mdia.minf.stbl.ctts else {
-        return Ok(vec![0; sample_count]);
-    };
-    let mut offsets = Vec::with_capacity(sample_count);
-    for entry in &table.entries {
-        let run = usize::try_from(entry.sample_count)
-            .ok()
-            .filter(|run| offsets.len().saturating_add(*run) <= sample_count)
-            .ok_or_else(|| invalid_media("ctts entry count does not match sample count"))?;
-        offsets.extend(std::iter::repeat_n(entry.sample_offset, run));
-    }
-    if offsets.len() != sample_count {
-        return Err(invalid_media(
-            "ctts entry count does not match sample count",
-        ));
-    }
-    Ok(offsets)
-}
-
-fn invalid_media(message: &str) -> Error {
-    Error::InvalidMedia(message.to_owned())
+    let sizes = required_child(sample_table, *b"stz2")?;
+    let mut reader = Reader::new(sizes.payload);
+    reader.full_box()?;
+    reader.skip(4)?;
+    reader.u32()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::path::PathBuf;
 
     use serde_json::Value;
 
     use super::*;
+    use crate::media::CodecConfig;
     use crate::source::LocalMediaSource;
 
     fn block_on<F: std::future::Future>(future: F) -> F::Output {
@@ -834,6 +624,162 @@ mod tests {
         assert_eq!(index.tracks[1].language, "und");
     }
 
+    /// Checks every sample of every track against an independent MP4 implementation: the same
+    /// timing and sync flags, and the same payload bytes, which proves each offset and size.
+    #[test]
+    fn agrees_with_an_independent_implementation_on_every_sample() {
+        for name in [
+            "h264-aac.mp4",
+            "h264-aac-moov-last.mp4",
+            "h264-video-only.mp4",
+            "h264-aac-44100-stereo.mp4",
+            "h264-variable-timing.mp4",
+            "h264-aac-anamorphic.mp4",
+            "h264-aac-two-audio.mp4",
+        ] {
+            let index = parse_fixture(name);
+            let raw = std::fs::read(fixture(name)).expect("fixture should be readable");
+            let mut reference = ::mp4::Mp4Reader::read_header(
+                std::io::BufReader::new(std::io::Cursor::new(raw.clone())),
+                raw.len() as u64,
+            )
+            .expect("the reference should parse the fixture");
+
+            for track in &index.tracks {
+                assert_eq!(
+                    reference.sample_count(track.id).unwrap() as usize,
+                    track.samples.len(),
+                    "{name} track {}: sample count",
+                    track.id
+                );
+                for (position, sample) in track.samples.iter().enumerate() {
+                    let expected = reference
+                        .read_sample(track.id, u32::try_from(position + 1).unwrap())
+                        .unwrap()
+                        .expect("the reference should have the sample");
+                    let at = format!("{name} track {} sample {position}", track.id);
+                    assert_eq!(expected.start_time, sample.decode_time, "{at}: decode time");
+                    assert_eq!(expected.duration, sample.duration, "{at}: duration");
+                    assert_eq!(
+                        expected.rendering_offset, sample.composition_offset,
+                        "{at}: composition offset"
+                    );
+                    assert_eq!(expected.is_sync, sample.is_sync, "{at}: sync flag");
+                    let start = usize::try_from(sample.offset).unwrap();
+                    let end = start + usize::try_from(sample.size).unwrap();
+                    assert_eq!(&expected.bytes[..], &raw[start..end], "{at}: payload bytes");
+                }
+            }
+        }
+    }
+
+    /// A deterministic stand-in for a fuzzer: corrupts a few random bytes of each fixture's
+    /// `moov` many times and runs the whole pipeline over the result. Any outcome is fine except
+    /// a panic, a hang, or a runaway allocation, which would abort the test process.
+    #[test]
+    fn corrupted_metadata_never_panics_the_pipeline() {
+        let limits = LimitsConfig::default();
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            // xorshift64: small, deterministic, and good enough to pick byte positions.
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut accepted = 0usize;
+        let mut rejected = 0usize;
+        for name in [
+            "h264-aac.mp4",
+            "h264-aac-default-edits.mp4",
+            "h264-aac-audio-delay.mp4",
+            "h264-aac-two-audio.mp4",
+            "h264-aac-timecode.mp4",
+            "h264-aac-quicktime.mov",
+            "h264-aac-anamorphic.mp4",
+        ] {
+            let source = open_kind(fixture(name)).expect("fixture should open");
+            let original = block_on(Metadata::fetch(&source, u64::MAX)).expect("fixture has moov");
+            let identity = source.identity().clone();
+            let len = original.len();
+            for _ in 0..700 {
+                let mut moov = original.moov_bytes().to_vec();
+                for _ in 0..=(next() % 4) {
+                    let position = usize::try_from(next()).unwrap() % moov.len();
+                    // Half the time set a byte to an extreme, which stresses counts and sizes.
+                    moov[position] = match next() % 4 {
+                        0 => 0xff,
+                        1 => 0x00,
+                        _ => u8::try_from(next() & 0xff).unwrap(),
+                    };
+                }
+                let metadata = Metadata::from_moov(len, moov);
+                match parse_metadata(&metadata, identity.clone(), &limits) {
+                    Ok(index) => {
+                        accepted += 1;
+                        if let Ok(plan) = crate::segment::plan(&index, 1000, &limits) {
+                            for track in &index.tracks {
+                                let _ = crate::fmp4::write_init_segment(&metadata, track.id);
+                                for segment in plan.segments.iter().take(2) {
+                                    if let Some(part) = segment
+                                        .tracks
+                                        .iter()
+                                        .find(|candidate| candidate.track_id == track.id)
+                                    {
+                                        let _ = crate::fmp4::prepare_media_segment(
+                                            track, *part, 1, &limits,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => rejected += 1,
+                }
+            }
+        }
+        // Both outcomes must occur, or the test is not exercising what it claims to.
+        assert!(accepted > 0, "no mutation survived parsing");
+        assert!(rejected > 0, "no mutation was rejected");
+    }
+
+    #[test]
+    fn parses_a_quicktime_file_with_versioned_sound_entries() {
+        let index = parse_fixture("h264-aac-quicktime.mov");
+
+        assert_eq!(index.tracks.len(), 2);
+        assert!(matches!(
+            index.tracks[1].codec,
+            CodecConfig::Aac {
+                sample_rate: 48_000,
+                channels: 1
+            }
+        ));
+        assert_eq!(index.tracks[1].samples.len(), 142);
+    }
+
+    #[test]
+    fn reads_the_avc_configuration_and_dimensions() {
+        let index = parse_fixture("h264-aac.mp4");
+
+        let CodecConfig::Avc {
+            width,
+            height,
+            profile,
+            level,
+            ref sequence_parameter_set,
+            ref picture_parameter_set,
+            ..
+        } = index.tracks[0].codec
+        else {
+            panic!("the first track is H.264");
+        };
+        assert_eq!((width, height), (320, 180));
+        assert_eq!((profile, level), (100, 13));
+        assert_eq!(sequence_parameter_set[0] & 0x1f, 7, "a real SPS NAL unit");
+        assert_eq!(picture_parameter_set[0] & 0x1f, 8, "a real PPS NAL unit");
+    }
+
     #[test]
     fn parses_video_without_audio() {
         let source = open_kind(fixture("h264-video-only.mp4")).expect("fixture should open");
@@ -993,7 +939,7 @@ mod tests {
 
     fn fixture_moov() -> Vec<u8> {
         let source = open_kind(fixture("h264-aac.mp4")).expect("fixture should open");
-        block_on(SparseFile::fetch(&source, u64::MAX))
+        block_on(Metadata::fetch(&source, u64::MAX))
             .expect("fixture should contain moov")
             .moov_bytes()
             .to_vec()

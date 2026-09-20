@@ -47,7 +47,7 @@ Recorded 2026-09-20 with `make bench` on a laptop: Intel Core i7-8550U (4 cores,
 | 1,000 sustained streams | < 0.1 % errors | 0 of 6,302 requests; 598 req/s, 116 MiB/s |
 | Extra memory per streaming connection | <= 512 KiB | 66 KiB (includes the benchmark's own client buffers) |
 
-The figures were refreshed after the async source and registry refactor; the load path now fetches metadata through `SparseFile` and assembles on the blocking pool, which costs a few tens of milliseconds more than the earlier synchronous path but stays well inside the budget. The 60-minute asset has 600 segments and an index of 8.6 MiB (about 276,000 samples).
+The figures were refreshed after the async source and registry refactor; the load path now fetches metadata through `Metadata` and assembles on the blocking pool, which costs a few tens of milliseconds more than the earlier synchronous path but stays well inside the budget. The 60-minute asset has 600 segments and an index of 8.6 MiB (about 276,000 samples).
 
 ## A finding the harness caught
 

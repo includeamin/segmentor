@@ -5,7 +5,7 @@ These modules turn an MP4 file into segment data. They contain no HTTP and no pr
 ```mermaid
 flowchart LR
     File[(MP4 file or remote object)] --> Source[source::MediaSourceKind]
-    Source --> Sparse[source::SparseFile<br/>headers, ftyp, moov]
+    Source --> Sparse[source::Metadata<br/>the moov box]
     Sparse --> Parser[mp4::parse]
     Parser --> Index[media::MediaIndex]
     Index --> Planner[segment::plan]
@@ -60,20 +60,22 @@ The sample table is stored compactly, as separate run-length or chunked tables t
 
 ## `mp4/parser.rs` : bytes to `MediaIndex`
 
-Entry point: `async parse(&MediaSourceKind, limits) -> ParsedMedia { index, metadata }`, where `metadata` is the `SparseFile` the index was built from (the init segment writer reuses it, so the file is not read again). It is deliberately defensive, in this order:
+Entry point: `async parse(&MediaSourceKind, limits) -> ParsedMedia { index, metadata }`, where `metadata` is the `Metadata` the index was built from (the init segment writer reuses it, so the file is not read again). The parser is in-tree, built on a bounded box walker (`mp4/boxes.rs`) whose every length is checked against the bytes present. It is deliberately defensive, in this order:
 
 1. **Size limit.** Reject sources larger than `limits.max_source_bytes`.
-2. **`SparseFile::fetch`** (async). Walk top-level boxes with tiny reads (8-byte headers, plus 8 more for 64-bit sizes, and size `0` meaning "to end of file"), fetching `ftyp` and `moov` whole. Reject impossible sizes, more than 4,096 top-level boxes, a missing `moov`, and a `moov` larger than `limits.max_metadata_bytes`. Nothing in `mdat` is ever read, whether the source is local or remote. Because every top-level box header is visited, a truncated `mdat` is rejected here, before any table is expanded.
+2. **`Metadata::fetch`** (async). Walk top-level boxes with tiny reads (8-byte headers, plus 8 more for 64-bit sizes, and size `0` meaning "to end of file"), then fetch `moov` whole. Reject impossible sizes, more than 4,096 top-level boxes, a missing `moov`, and a `moov` larger than `limits.max_metadata_bytes`. Nothing in `mdat` is ever read, whether the source is local or remote. Because every top-level box header is visited, a truncated `mdat` is rejected here, before any table is expanded.
 
 The remaining steps are synchronous CPU work in `parse_metadata`, run on the blocking pool:
 
-3. **`validate_raw_moov`.** A small hand-written box walker, independent of the `mp4` crate, checks each track before the crate sees it:
+3. **`validate_raw_moov`.** Walks `moov` once and decides, per track, whether it is packaged:
+   - `mvex` in `moov` means fragmented input, rejected with a message that says so;
+   - tracks whose handler is neither `vide` nor `soun` (timecode, timed metadata, subtitles) are skipped, and their tables are never read;
    - `dinf/dref` must contain exactly one self-contained `url ` entry (no external data references);
-   - `stsd` must contain exactly one entry, and it must be `avc1` or `mp4a`; `encv`/`enca` (encrypted) are rejected.
+   - `stsd` must contain exactly one entry, and it must be `avc1` or `mp4a`; `encv`/`enca` (encrypted) are rejected, an unknown video entry with at most one sample is skipped as a still image, and anything else is rejected naming the entry.
 4. **Hash `moov`** with SHA-256.
-5. **Parse with the `mp4` crate** (`Mp4Reader::read_header`) over `SparseFile::reader()`. Fragmented input is rejected earlier, by the raw preflight, so its error is specific. Too many tracks are rejected here. Tracks whose handler is not `vide` or `soun`, and single still images, are skipped and reported in `MediaIndex::skipped_tracks`. Each remaining track's edit list is read by `mp4/edit.rs`: one edit, optionally after one empty edit, is applied by shifting every track forward by one shared offset so no decode time goes negative (see [TDD 0004](../technical-design/0004-broader-mp4-input-support.md)); other shapes are rejected. The init segment drops `edts`, because the shift already applied it.
-6. **`parse_track`** per track: kind (subtitle tracks are rejected), `parse_codec` (H.264 needs `avc1` with SPS and PPS; AAC must be AAC-LC), and `parse_samples`.
-7. **`parse_samples`** checks the sample count against `limits.max_samples_per_track`, then expands the tables through `sample_sizes`, `sample_offsets`, `sample_times`, and `composition_offsets`. `sample_times` and `composition_offsets` bound each run-length entry against the sample count *before* expanding it, so a crafted `stts` claiming billions of samples fails immediately. Every sample's byte range must end inside the source.
+5. **`parse_track`** per packaged track: `mdhd` (timescale, duration, language), then the codec configuration from the sample entry (`mp4/codec.rs`: `avcC` for H.264, which needs an SPS and PPS; `esds` for AAC, which must be AAC-LC, including QuickTime's versioned entries with a `wave` box), then the sample tables.
+6. **Sample tables** (`mp4/tables.rs`). `stts`, `ctts` (signed in version 1), `stss`, `stsc`, `stsz` or the compact `stz2`, and `stco` or `co64` are parsed with every entry count checked against its box before allocating. `expand_samples` then checks the sample count against `limits.max_samples_per_track` and expands the tables through `sample_sizes`, `sample_offsets`, `sample_times`, and `composition_offsets`. `sample_times` and `composition_offsets` bound each run-length entry against the sample count *before* expanding it, so a crafted `stts` claiming billions of samples fails immediately. Every sample's byte range must end inside the source.
+7. **Edit lists** (`mp4/edit.rs`). Each track's edit list is read: one edit, optionally after one empty edit, is applied by shifting every track forward by one shared offset so no decode time goes negative (see [TDD 0004](../technical-design/0004-broader-mp4-input-support.md)); other shapes are rejected. Skipped tracks are reported in `MediaIndex::skipped_tracks`. Tracks are numbered in file order: one video track, then `audio-1`, `audio-2`, and so on.
 
 Back in async code:
 
@@ -104,7 +106,15 @@ Two independent writers, both producing ISO BMFF that players can consume.
 
 ### `fmp4/init.rs`: initialization segment
 
-`write_init_segment(metadata, track_id)` builds `ftyp + moov` for a single track from the `SparseFile` kept by the parse. It runs the `mp4` crate over that in-memory metadata, clones the parsed `moov`, keeps only the requested track, zeroes durations, clears every sample table (`stts`, `ctts`, `stss`, `stsc`, `stsz`, `stco`, `co64`), drops `mvex` and `udta`, and writes it back. It then patches the `moov` size and appends a hand-built `mvex/trex` box, which tells players the file is fragmented. Each track gets its own init segment ("separate tracks"; see [ADR 0001](../adr/0001-use-fragmented-mp4-for-media-segments.md)). Init segments are built once at asset load and cached.
+`write_init_segment(metadata, track_id)` builds `ftyp + moov` for a single track from the `moov` bytes kept by the parse, at the byte level, without re-serializing through a box model.
+
+- `ftyp` is fixed: major brand `iso6`, compatible `iso6` and `mp41`. The source's brands describe the source file, not this stream.
+- The `stsd` box (the sample entry) is copied **byte for byte**. That is what keeps `pasp` (pixel aspect ratio), `colr`, HDR boxes, and the codec configuration exactly as the encoder wrote them, and it is why a new codec needs no per-codec box writer. The one exception is a QuickTime-style `mp4a` entry (sound description version 1, `esds` inside `wave`), which browsers refuse; it is rewritten in the ISO layout with the same channel count, sample rate, and `esds`.
+- `mvhd`, `tkhd`, and `mdhd` are copied with their durations zeroed; `hdlr`, `vmhd`/`smhd`, and `dinf` are copied as they were.
+- The sample tables (`stts`, `stsc`, `stsz`, `stco`) are written empty, and a hand-built `mvex/trex` tells players the file is fragmented.
+- Everything else is left out: the edit list (already applied to the sample timestamps, so a player must not apply it again), `udta`, and other tracks.
+
+Each track gets its own init segment ("separate tracks"; see [ADR 0001](../adr/0001-use-fragmented-mp4-for-media-segments.md)). Init segments are built once at asset load and cached.
 
 ### `fmp4/fragment.rs`: media segment
 

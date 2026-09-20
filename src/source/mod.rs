@@ -6,7 +6,7 @@
 
 mod http;
 mod local;
-mod sparse;
+mod metadata;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ pub(crate) use http::{
     HttpMediaSource, LocationRefresher, RemoteReader, RemoteSettings, is_public_address,
 };
 pub(crate) use local::LocalMediaSource;
-pub(crate) use sparse::SparseFile;
+pub(crate) use metadata::Metadata;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ByteRange {

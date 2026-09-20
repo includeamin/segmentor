@@ -48,7 +48,7 @@ flowchart LR
 - **Address filtering.** The client resolves names through `FilteringResolver`, which drops loopback, private, link-local, shared, multicast, unspecified, and unique-local addresses (including IPv4-mapped forms) unless `allow_private_addresses` is set. Filtering at connect time defeats DNS rebinding. Literal IPs skip resolution, so `LocationPolicy` checks them separately. Redirects are disabled.
 - **Verify** re-probes the object and compares length and validator.
 
-**`sparse.rs`** is what makes metadata parsing independent of where a file lives. `SparseFile::fetch` walks the top-level box headers with small reads, fetches `ftyp` and `moov` whole, and records only those regions. `SparseReader` presents them as `Read + Seek` over a file of the true length whose other bytes fail to read, which is exactly what the `mp4` crate needs (it seeks past `mdat`). A remote parse therefore costs a few small range requests, not a download. It caps the top-level box count so a hostile file cannot cause millions of round trips.
+**`metadata.rs`** is what makes metadata parsing independent of where a file lives. `Metadata::fetch` walks the top-level box headers with small reads and fetches `moov` whole; nothing else is read, because every sample's location and timing is in `moov` and the payload is only read later, one segment at a time. A remote parse therefore costs a few small range requests, not a download. It caps the top-level box count so a hostile file cannot cause millions of round trips.
 
 `mp4::parse` (in [Media pipeline](media-pipeline.md)) runs `fetch`, parses on the blocking pool, then re-verifies the source and re-hashes `moov` to detect a change during parsing.
 

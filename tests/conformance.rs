@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 
 /// Asset ID, fixture file, and how many audio packets packaging drops from it. Only files with
 /// an edit list lose any: the encoder-padding frame before the edit starts.
-const FIXTURES: [(&str, &str, u64); 8] = [
+const FIXTURES: [(&str, &str, u64); 10] = [
     ("aac", "h264-aac.mp4", 0),
     ("moovlast", "h264-aac-moov-last.mp4", 0),
     ("videoonly", "h264-video-only.mp4", 0),
@@ -44,6 +44,8 @@ const FIXTURES: [(&str, &str, u64); 8] = [
     ("edits", "h264-aac-default-edits.mp4", 1),
     ("delay", "h264-aac-audio-delay.mp4", 0),
     ("twoaudio", "h264-aac-two-audio.mp4", 0),
+    ("anamorphic", "h264-aac-anamorphic.mp4", 0),
+    ("quicktime", "h264-aac-quicktime.mov", 0),
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -846,6 +848,14 @@ fn reassembled_tracks_decode_with_the_source_frame_counts() {
                 "{asset}/{kind}: frame count after repackaging"
             );
 
+            if kind == "video" {
+                assert_eq!(
+                    video_properties(&path),
+                    video_properties(&root().join("tests/fixtures").join(file)),
+                    "{asset}: aspect ratio and colour must survive repackaging"
+                );
+            }
+
             let errors = Command::new("ffmpeg")
                 .args(["-v", "error", "-i"])
                 .arg(&path)
@@ -860,6 +870,26 @@ fn reassembled_tracks_decode_with_the_source_frame_counts() {
             }
         }
     }
+}
+
+/// The properties a player needs to render the picture correctly, as FFprobe reports them.
+fn video_properties(path: &Path) -> String {
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0"])
+        .args([
+            "-show_entries",
+            "stream=sample_aspect_ratio,color_space,color_transfer,color_primaries",
+        ])
+        .args(["-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .expect("ffprobe should run");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
 /// The FFprobe stream selector for a track named `video` or `audio-N` in the source file.

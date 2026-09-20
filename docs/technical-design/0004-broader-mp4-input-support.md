@@ -1,6 +1,6 @@
 # TDD 0004: Broader MP4 input support
 
-- Status: Accepted; Phase 1 implemented
+- Status: Accepted; Phases 1 and 2 implemented
 - Created: 2026-09-20
 - Updated: 2026-09-20
 - Related ADRs: None yet. Two are proposed in [Rollout](#rollout): edit-list timeline mapping and verbatim sample-entry pass-through
@@ -14,15 +14,28 @@
 | 2. Accurate errors | Implemented | Fragmented input, unsupported codec, and edit-list shape errors name what was found |
 | 3. Track selection, multiple audio | Implemented | Non-media tracks skipped and logged; audio tracks are `audio-1`, `audio-2`, and so on |
 | DASH `SegmentTimeline` `t=` | Implemented | |
-| 4. Verbatim sample-entry pass-through | Pending (Phase 2) | `pasp` is still dropped from the init segment |
-| 5. In-tree container parser | Pending (Phase 2) | |
+| 4. Verbatim sample-entry pass-through | Implemented | `stsd` is copied byte for byte; `pasp` and `colr` now reach players |
+| 5. In-tree container parser | Implemented | `mp4/boxes.rs`, `tables.rs`, `codec.rs`; the `mp4` crate is a dev-dependency only, used to cross-check |
 | 6. New codecs, audio-only | Pending (Phase 3) | |
 | 7. Fragmented MP4 input | Pending (Phase 4) | |
-| Fixed `ftyp` brands | Pending (Phase 2) | Belongs with the init writer change |
+| Fixed `ftyp` brands | Implemented | `iso6` major, `iso6` and `mp41` compatible |
 
-The [support matrix](#current-support-matrix) below records the state *before* Phase 1, which is what the design was written against. After Phase 1, the rows for edit lists, two audio tracks, timecode and metadata tracks, and fragmented input's error message have changed; the other rows still hold.
+The [support matrix](#current-support-matrix) below records the state *before* Phase 1, which is what the design was written against. Since then the rows for edit lists, two audio tracks, timecode and metadata tracks, fragmented input's error message, QuickTime `.mov`, and the dropped `pasp` box have changed; the other rows still hold.
 
 ### What implementation found
+
+Phase 2:
+
+- **Copying is not always right: QuickTime audio entries are rewritten.** ffmpeg decodes a `.mov` whose `mp4a` entry uses QuickTime's sound description version 1 (extra fields, `esds` inside a `wave` box, a `chan` box), but Chrome's Media Source Extensions refuse it (`CHUNK_DEMUXER_ERROR_APPEND_FAILED`), so a byte-for-byte copy played in the conformance suite and failed in the browser. That one case is rewritten to the ISO layout, keeping the channel count, sample rate, and the `esds` box; every other entry is still copied verbatim. This is why browser playback is part of the check for this work and ffmpeg alone is not enough.
+- **The URL version had to include a format revision.** Chrome kept serving the old init segment for the same `?v=` URL after the writer changed, because media URLs are immutable and the version came only from a hash of `moov`. The same would happen behind a CDN on any upgrade that changes the bytes served for an unchanged file. The version now hashes `moov` together with `FORMAT_REVISION` in `asset.rs`, to be bumped whenever init layout, timeline mapping, or playlist format changes.
+- **`pasp` was dropped from every file, not only anamorphic ones.** FFmpeg writes a 1:1 `pasp` into ordinary output, so the old init writer discarded it everywhere; it only mattered for non-square pixels. `colr` (colour) travels the same path and is now kept too, and the conformance suite compares aspect ratio and colour between source and repackaged output.
+- **A second implementation caught nothing, which is the result.** The in-tree parser matches the `mp4` crate on every sample of seven fixtures, down to the payload bytes at each offset. The crate is kept as a dev-dependency for exactly this comparison.
+- **The parser and init writer need no per-codec code.** Because the sample entry is copied, only `avcC` and `esds` are read, and only for the manifest's codec string. A new codec in Phase 3 needs its configuration box read and nothing written, unless it too has a container-specific variant browsers refuse.
+- **`SparseFile` shrank to `Metadata`.** With no crate wanting a `Read + Seek` view, the reader shim and the `ftyp` fetch went away, so a remote parse is one fewer range request.
+- **Subtitle and other non-media tracks are skipped, not rejected.** The Phase 1 preflight already set aside every track whose handler is not `vide` or `soun`, so the matrix row saying subtitles are rejected has been out of date since then.
+- **Tracks are numbered in file order** (`audio-1` is the first audio track in the file) where the crate returned them by track ID.
+
+Phase 1:
 
 - **The init segment had to drop `edts`.** The design did not say so. Left in, a player applies the edit list a second time on top of the shifted timestamps. Measured with FFprobe: audio started at 0.045 s instead of 0.067 s for the default-edits file, and at 1.024 s instead of 0.545 s for the delayed-audio file. The init writer now clears `edts`, and a test checks the bytes.
 - **Encoder handler names are noise.** FFmpeg writes `SoundHandler` for every audio track, so HLS `NAME` is `Audio {n}`, plus the language in parentheses when the file names one, instead of the `hdlr` name.

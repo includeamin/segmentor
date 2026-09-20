@@ -65,4 +65,23 @@ ffmpeg_quiet \
     -movflags +frag_keyframe+empty_moov+default_base_moof \
     "$fixture_dir/h264-aac-fragmented.mp4"
 
+# Non-square pixels and tagged colour: the sample entry carries `pasp` and `colr`, which the
+# init segment must keep or players render the wrong aspect and colours.
+ffmpeg_quiet \
+    -f lavfi -i "$video" -f lavfi -i "$tone_a" \
+    -vf setsar=4:3 \
+    -c:v libx264 -pix_fmt yuv420p -preset medium -g 30 -keyint_min 30 -sc_threshold 0 -bf 2 \
+    -colorspace bt709 -color_primaries bt709 -color_trc bt709 \
+    -c:a aac -profile:a aac_low -b:a 96k \
+    -use_editlist 0 -movflags +faststart+write_colr \
+    "$fixture_dir/h264-aac-anamorphic.mp4"
+
+# QuickTime: versioned `mp4a` sample entries with a `wave` box, and a `qt  ` brand.
+ffmpeg_quiet \
+    -f lavfi -i "$video" -f lavfi -i "$tone_a" \
+    -c:v libx264 -pix_fmt yuv420p -preset medium -g 30 -keyint_min 30 -sc_threshold 0 -bf 2 \
+    -c:a aac -profile:a aac_low -b:a 96k \
+    -use_editlist 0 -movflags +faststart -f mov \
+    "$fixture_dir/h264-aac-quicktime.mov"
+
 printf 'Generated variant MP4 fixtures in %s\n' "$fixture_dir"

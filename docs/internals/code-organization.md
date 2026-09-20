@@ -21,8 +21,10 @@ src/
   protocol/          mod.rs, presentation.rs (read-only view), hls.rs, dash.rs
   observability/     mod.rs, logging.rs, metrics.rs
   error.rs
-  source/            mod.rs, local.rs, http.rs (remote), sparse.rs (metadata regions)
-  media/  mp4/  segment/  fmp4/     one focused file each (mod.rs is only re-exports)
+  source/            mod.rs, local.rs, http.rs (remote), metadata.rs (the `moov` box)
+  mp4/               parser.rs (orchestration), boxes.rs (bounded box walker), tables.rs (sample tables),
+                     codec.rs (avcC, esds), edit.rs (edit lists)
+  media/  segment/  fmp4/           one focused file each (mod.rs is only re-exports)
   testutil.rs        mock mapper and origin servers (tests only)
 tests/               cli.rs, package.rs, fixtures/
 fuzz/                separate crate that depends on the library
