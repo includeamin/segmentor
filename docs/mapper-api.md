@@ -1,6 +1,6 @@
 # Mapper API reference
 
-This page is for people who write a **mapper**: the service that tells `vod-module-rs` where the media for an asset ID lives. It is a self-contained reference. The reasoning behind it is in [TDD 0002](technical-design/0002-asset-map-interface.md).
+This page is for people who write a **mapper**: the service that tells `segmentor` where the media for an asset ID lives. It is a self-contained reference. The reasoning behind it is in [TDD 0002](technical-design/0002-asset-map-interface.md).
 
 A mapper answers one question: *where is asset X, and which version of it is current?* It never sees or returns media bytes. Playback authorization is not its job either; put viewer checks in a front proxy.
 
@@ -21,7 +21,7 @@ Accept: application/json
 Authorization: Bearer <token>          (if configured)
 If-None-Match: "2026-09-18T10:22:31Z#7"  (on revalidation)
 X-Request-Id: 18d6d3516a4d8c6c-2
-User-Agent: vod-module-rs/0.1.0
+User-Agent: segmentor/0.1.0
 ```
 
 ### `200 OK`

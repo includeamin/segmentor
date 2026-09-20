@@ -4,10 +4,10 @@ use std::process::Command;
 
 #[test]
 fn prints_the_application_name() {
-    let output = Command::new(env!("CARGO_BIN_EXE_vod-module-rs"))
+    let output = Command::new(env!("CARGO_BIN_EXE_segmentor"))
         .output()
         .expect("application should start");
 
     assert!(output.status.success());
-    assert_eq!(output.stdout, b"vod-module-rs\n");
+    assert_eq!(output.stdout, b"segmentor\n");
 }

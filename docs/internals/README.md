@@ -1,6 +1,6 @@
 # Implementation guide
 
-This part of the book explains how `vod-module-rs` works inside, module by module, so a new contributor can find the right file, understand its invariants, and change it safely. The [technical designs](../technical-design/README.md) explain *why* the system is shaped this way; this guide explains *how the code does it*.
+This part of the book explains how `segmentor` works inside, module by module, so a new contributor can find the right file, understand its invariants, and change it safely. The [technical designs](../technical-design/README.md) explain *why* the system is shaped this way; this guide explains *how the code does it*.
 
 | Page | Covers |
 | --- | --- |
@@ -15,7 +15,7 @@ This part of the book explains how `vod-module-rs` works inside, module by modul
 
 ## What the program does
 
-`vod-module-rs` is a video-on-demand **origin**. Given an ordinary MP4 file, it answers HLS and DASH requests by *repackaging* the existing encoded audio and video into fragmented MP4 (fMP4) on the fly. It never decodes or re-encodes media. The expensive facts about a file (where every frame is, when it plays, which frames are keyframes) are computed once when the asset is loaded. A segment request then only builds a small header and copies the requested byte ranges from the file.
+`segmentor` is a video-on-demand **origin**. Given an ordinary MP4 file, it answers HLS and DASH requests by *repackaging* the existing encoded audio and video into fragmented MP4 (fMP4) on the fly. It never decodes or re-encodes media. The expensive facts about a file (where every frame is, when it plays, which frames are keyframes) are computed once when the asset is loaded. A segment request then only builds a small header and copies the requested byte ranges from the file.
 
 It has two commands:
 

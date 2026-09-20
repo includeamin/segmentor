@@ -89,11 +89,11 @@ Described with the HTTP layer in [HTTP server](http-server.md#metrics).
 
 ## `main.rs`, `lib.rs`, and `cli/` : entry point and CLI
 
-`main.rs` is ten lines: a Tokio `#[tokio::main]` that calls `vod_module_rs::run()` and returns its `ExitCode`. `lib.rs` declares the modules, defines `APP_NAME`, and implements `run()`, which calls `cli::run` with the process arguments and, on failure, prints `vod-module-rs: <error>` and returns a failure code.
+`main.rs` is ten lines: a Tokio `#[tokio::main]` that calls `segmentor::run()` and returns its `ExitCode`. `lib.rs` declares the modules, defines `APP_NAME`, and implements `run()`, which calls `cli::run` with the process arguments and, on failure, prints `segmentor: <error>` and returns a failure code.
 
 `cli::run` reads the first argument:
 
-- none: prints `vod-module-rs` (used by `tests/cli.rs`);
+- none: prints `segmentor` (used by `tests/cli.rs`);
 - `serve --config <file>` (`cli/serve.rs`): `Config::load`, `logging::init`, then `http::serve`;
 - `package --input <mp4> --output <dir> [--segment-duration-ms N]` (`cli/package.rs`).
 

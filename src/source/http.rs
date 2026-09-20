@@ -49,7 +49,7 @@ impl RemoteReader {
             .dns_resolver(Arc::new(FilteringResolver {
                 allow_private: settings.allow_private_addresses,
             }))
-            .user_agent(concat!("vod-module-rs/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("segmentor/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| Error::Configuration(format!("remote media client: {error}")))?;
         Ok(Self {

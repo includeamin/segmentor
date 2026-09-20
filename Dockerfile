@@ -7,7 +7,7 @@
 #              then compiles the application
 #   runtime  - distroless glibc image with only the binary, running as non-root
 #
-# Build:  docker build -t vod-module-rs .
+# Build:  docker build -t segmentor .
 # Pin the bases for reproducible builds, e.g.
 #   --build-arg RUST_IMAGE=rust:<version>-slim-bookworm@sha256:<digest>
 #   --build-arg RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot@sha256:<digest>
@@ -41,20 +41,20 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo build --release --locked --bin vod-module-rs \
- && install -D target/release/vod-module-rs /out/vod-module-rs
+    cargo build --release --locked --bin segmentor \
+ && install -D target/release/segmentor /out/segmentor
 
 FROM ${RUNTIME_IMAGE} AS runtime
 ARG VERSION=dev
 ARG REVISION=unknown
-LABEL org.opencontainers.image.title="vod-module-rs" \
+LABEL org.opencontainers.image.title="segmentor" \
       org.opencontainers.image.description="On-demand HLS and DASH origin for MP4 files" \
-      org.opencontainers.image.source="https://github.com/includeamin/vod-module-rs" \
+      org.opencontainers.image.source="https://github.com/includeamin/segmentor" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}"
 
-COPY --from=builder /out/vod-module-rs /usr/local/bin/vod-module-rs
+COPY --from=builder /out/segmentor /usr/local/bin/segmentor
 
 # TLS roots come from the distroless image's CA bundle, so https mappers and origins verify.
 # Runtime contract:
@@ -69,7 +69,7 @@ USER nonroot:nonroot
 # (see server.shutdown_delay_ms and server.shutdown_grace_ms). Give the orchestrator a stop
 # timeout above their sum, for example `docker stop --time 45`.
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["/usr/local/bin/vod-module-rs"]
+ENTRYPOINT ["/usr/local/bin/segmentor"]
 CMD ["serve", "--config", "/etc/vod/vod.toml"]
 
 # No HEALTHCHECK: the image has no shell or curl. Probe GET /health (liveness) and GET /ready

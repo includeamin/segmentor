@@ -1,4 +1,4 @@
-# vod-module-rs
+# segmentor
 
 A video-on-demand application built with Rust.
 

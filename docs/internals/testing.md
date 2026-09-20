@@ -44,7 +44,7 @@ FFmpeg is needed only to regenerate fixtures and to run the decode test, which s
 
 ## Fuzzing
 
-The fuzz crate (`fuzz/`) is separate and depends on the library. Its target writes the fuzz input to a temporary file and calls `vod_module_rs::fuzzing::exercise_media_pipeline`, which runs parse, plan, init-segment writing, and fragment preparation and ignores expected failures; the fuzzer looks for panics, hangs, and runaway allocation. `make fuzz-check` compiles the target on stable; `make fuzz` runs a campaign on nightly with the fixtures as seeds.
+The fuzz crate (`fuzz/`) is separate and depends on the library. Its target writes the fuzz input to a temporary file and calls `segmentor::fuzzing::exercise_media_pipeline`, which runs parse, plan, init-segment writing, and fragment preparation and ignores expected failures; the fuzzer looks for panics, hangs, and runaway allocation. `make fuzz-check` compiles the target on stable; `make fuzz` runs a campaign on nightly with the fixtures as seeds.
 
 ## Adding a test
 

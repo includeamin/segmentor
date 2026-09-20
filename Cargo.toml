@@ -1,12 +1,12 @@
 [package]
-name = "vod-module-rs"
+name = "segmentor"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["Amin Jamal"]
 description = "A video-on-demand application built with Rust"
 license = "MIT"
-repository = "https://github.com/includeamin/vod-module-rs"
+repository = "https://github.com/includeamin/segmentor"
 
 [dependencies]
 axum = "0.8"
