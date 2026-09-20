@@ -17,9 +17,6 @@ pub(crate) enum Error {
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
 
-    #[error("MP4 error: {0}")]
-    Mp4(#[from] ::mp4::Error),
-
     #[error("configuration error: {0}")]
     Configuration(String),
 

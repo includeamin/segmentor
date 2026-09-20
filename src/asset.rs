@@ -233,17 +233,68 @@ impl RenderedManifests {
     }
 }
 
+/// Bumped whenever the bytes or text served for an unchanged source change: the init segment
+/// layout, the timeline mapping, or the playlist and manifest format.
+///
+/// Media URLs are cached as immutable by browsers and CDNs, so a new build that answers an old
+/// URL with different bytes would be served stale content until the cache expires. Mixing the
+/// revision into the version gives such a build new URLs instead.
+const FORMAT_REVISION: u32 = 1;
+
+/// The `v` value in media URLs: a hash of the source's `moov` box and [`FORMAT_REVISION`].
 fn version_of(index: &MediaIndex) -> String {
     use std::fmt::Write;
 
-    index
-        .source
-        .moov_sha256
-        .expect("parsed assets always have a moov hash")
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(
+        index
+            .source
+            .moov_sha256
+            .expect("parsed assets always have a moov hash"),
+    );
+    hasher.update(FORMAT_REVISION.to_be_bytes());
+    hasher
+        .finalize()
         .iter()
         .take(8)
         .fold(String::with_capacity(16), |mut version, byte| {
             write!(version, "{byte:02x}").expect("writing to a String cannot fail");
             version
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Write;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn the_version_depends_on_the_format_revision_and_not_only_on_the_file() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/h264-aac.mp4");
+        let asset = PackagedAsset::load_local(path, 1000, &LimitsConfig::default())
+            .await
+            .expect("fixture should load");
+
+        // What the version would be if it were only the first bytes of the moov hash.
+        let moov_only = asset.index.source.moov_sha256.unwrap().iter().take(8).fold(
+            String::new(),
+            |mut hex, byte| {
+                write!(hex, "{byte:02x}").unwrap();
+                hex
+            },
+        );
+
+        assert_eq!(asset.version().len(), 16);
+        assert!(asset.version().bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(asset.version(), moov_only);
+        assert_eq!(
+            version_of(&asset.index),
+            asset.version(),
+            "and it is stable"
+        );
+    }
 }
