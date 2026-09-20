@@ -9,7 +9,6 @@ use std::sync::Arc;
 
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
-use crate::media::CodecConfig;
 use crate::mp4::ParsedMedia;
 use crate::source::{LocalMediaSource, MediaSourceKind, Origin};
 use crate::{fmp4, mp4, segment};
@@ -123,23 +122,12 @@ async fn package(options: &PackageOptions) -> Result<()> {
         plan.segments.len()
     );
     for track in &index.tracks {
-        let codec = match &track.codec {
-            CodecConfig::Aac {
-                sample_rate,
-                channels,
-            } => format!("AAC-LC {sample_rate} Hz {channels} channel(s)"),
-            CodecConfig::Avc {
-                width,
-                height,
-                sequence_parameter_set,
-                picture_parameter_set,
-                ..
-            } => format!(
-                "H.264 {width}x{height} (SPS {} bytes, PPS {} bytes)",
-                sequence_parameter_set.len(),
-                picture_parameter_set.len()
-            ),
+        let format = match (track.codec.dimensions(), track.codec.audio_format()) {
+            (Some((width, height)), _) => format!("{width}x{height}"),
+            (None, Some((rate, channels))) => format!("{rate} Hz {channels} channel(s)"),
+            (None, None) => String::new(),
         };
+        let codec = format!("{} {format}", track.codec.codecs());
         println!(
             "track {}: {codec}, timescale {}, duration {}, samples {}",
             track.id,

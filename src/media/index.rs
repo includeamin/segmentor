@@ -86,12 +86,10 @@ impl fmt::Display for TrackKey {
     }
 }
 
+/// What packaging needs to know about a track's codec: enough to write the manifest's codec
+/// string and dimensions. The sample entry itself is copied into the init segment untouched.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CodecConfig {
-    Aac {
-        sample_rate: u32,
-        channels: u16,
-    },
     Avc {
         width: u16,
         height: u16,
@@ -101,6 +99,102 @@ pub(crate) enum CodecConfig {
         sequence_parameter_set: Vec<u8>,
         picture_parameter_set: Vec<u8>,
     },
+    /// HEVC, with the codec string already derived from `hvcC`.
+    Hevc {
+        width: u16,
+        height: u16,
+        codecs: String,
+    },
+    Vp9 {
+        width: u16,
+        height: u16,
+        codecs: String,
+    },
+    Av1 {
+        width: u16,
+        height: u16,
+        codecs: String,
+    },
+    /// AAC-LC (object type 2), HE-AAC (5), or HE-AACv2 (29).
+    Aac {
+        sample_rate: u32,
+        channels: u16,
+        object_type: u8,
+    },
+    Ac3 {
+        sample_rate: u32,
+        channels: u16,
+    },
+    Eac3 {
+        sample_rate: u32,
+        channels: u16,
+    },
+    Opus {
+        channels: u16,
+    },
+    Flac {
+        sample_rate: u32,
+        channels: u16,
+    },
+}
+
+impl CodecConfig {
+    /// The RFC 6381 codec string for HLS `CODECS` and DASH `codecs`.
+    pub(crate) fn codecs(&self) -> String {
+        match self {
+            Self::Avc {
+                profile,
+                compatibility,
+                level,
+                ..
+            } => format!("avc1.{profile:02x}{compatibility:02x}{level:02x}"),
+            Self::Hevc { codecs, .. } | Self::Vp9 { codecs, .. } | Self::Av1 { codecs, .. } => {
+                codecs.clone()
+            }
+            Self::Aac { object_type, .. } => format!("mp4a.40.{object_type}"),
+            Self::Ac3 { .. } => "ac-3".to_owned(),
+            Self::Eac3 { .. } => "ec-3".to_owned(),
+            Self::Opus { .. } => "opus".to_owned(),
+            Self::Flac { .. } => "fLaC".to_owned(),
+        }
+    }
+
+    /// Width and height in pixels, for video codecs.
+    pub(crate) const fn dimensions(&self) -> Option<(u16, u16)> {
+        match self {
+            Self::Avc { width, height, .. }
+            | Self::Hevc { width, height, .. }
+            | Self::Vp9 { width, height, .. }
+            | Self::Av1 { width, height, .. } => Some((*width, *height)),
+            _ => None,
+        }
+    }
+
+    /// Sample rate in hertz and channel count, for audio codecs.
+    pub(crate) const fn audio_format(&self) -> Option<(u32, u16)> {
+        match self {
+            Self::Aac {
+                sample_rate,
+                channels,
+                ..
+            }
+            | Self::Ac3 {
+                sample_rate,
+                channels,
+            }
+            | Self::Eac3 {
+                sample_rate,
+                channels,
+            }
+            | Self::Flac {
+                sample_rate,
+                channels,
+            } => Some((*sample_rate, *channels)),
+            // Opus always decodes at 48 kHz, whatever rate the source was captured at.
+            Self::Opus { channels } => Some((48_000, *channels)),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

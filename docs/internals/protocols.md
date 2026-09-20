@@ -48,9 +48,10 @@ Two pure functions from a `Presentation` to `String`, both called once at load.
 
 **`master_playlist(presentation)`** writes an `#EXTM3U` master with `#EXT-X-VERSION:7`:
 
-- The video track must be H.264 (`Error::Unsupported` otherwise). The codec string is `avc1.` plus profile, compatibility, and level as three hex bytes.
+- `CODECS` joins the video codec string with the default audio track's, each from `CodecConfig::codecs()` (RFC 6381: `avc1.` plus three hex bytes, `hvc1.` per ISO/IEC 14496-15, `vp09.`, `av01.`, `mp4a.40.{object type}`, `ac-3`, `ec-3`, `opus`, `fLaC`).
 - Every audio track is declared as an `#EXT-X-MEDIA:TYPE=AUDIO` rendition in group `audio`, with URI `audio-{n}/index.m3u8?v={version}`. The first is `DEFAULT=YES`. `NAME` is `Audio {n}`, followed by the language in parentheses when the file names one, and `LANGUAGE` is set from `mdhd`. `mp4a.40.2` is appended to `CODECS`, and the variant's bandwidth counts the default rendition only.
 - One `#EXT-X-STREAM-INF` carries `BANDWIDTH` (video peak plus audio peak), `AVERAGE-BANDWIDTH` (sums of averages), `CODECS`, `RESOLUTION`, and the `AUDIO` group, followed by `video/index.m3u8?v={version}`.
+- An audio-only asset has no video, so the variant has no `RESOLUTION` and points at the first audio track's playlist. A lone audio track is just that variant, with no `#EXT-X-MEDIA`; several audio tracks are renditions of it, with the variant naming their group.
 
 **`media_playlist(presentation, kind)`** writes a VOD media playlist for one track: `#EXT-X-TARGETDURATION` is the largest segment duration rounded up to whole seconds; `#EXT-X-PLAYLIST-TYPE:VOD`, `#EXT-X-INDEPENDENT-SEGMENTS`, and `#EXT-X-MAP:URI="init.mp4?v=..."` reference the init segment; each segment gets `#EXTINF` with millisecond precision and the URI `segments/{n}/media.m4s?v=...`; the file ends with `#EXT-X-ENDLIST`.
 

@@ -46,8 +46,11 @@ impl<'a> Presentation<'a> {
             .ok_or(Error::NotFound("track does not exist"))
     }
 
-    pub(crate) fn video(&self) -> Result<&'a Track> {
-        self.track(TrackKey::VIDEO)
+    /// The video track, absent in an audio-only asset.
+    pub(crate) fn video(&self) -> Option<&'a Track> {
+        self.tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Video)
     }
 
     /// Audio tracks in file order; the first is the default rendition.
