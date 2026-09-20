@@ -28,9 +28,9 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
 /// Asset ID, fixture file, and how many audio packets packaging drops from it. Only files with
@@ -85,10 +85,24 @@ fn expected_codecs(asset: &str) -> (Option<&'static str>, Option<&'static str>) 
 struct Server {
     child: Child,
     address: SocketAddr,
+    log: PathBuf,
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
+        // A test that fails while talking to the server needs to know what the server saw:
+        // a reset connection says only that the server went away.
+        if std::thread::panicking() {
+            let alive = self.child.try_wait().ok().flatten();
+            let log = fs::read_to_string(&self.log).unwrap_or_default();
+            let tail = log.lines().rev().take(15).collect::<Vec<_>>();
+            eprintln!(
+                "--- server at {} (exit status so far: {alive:?}), last log lines from {}:\n{}",
+                self.address,
+                self.log.display(),
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            );
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -99,38 +113,77 @@ fn root() -> PathBuf {
 }
 
 fn start_server() -> Server {
-    let address = TcpListener::bind("127.0.0.1:0")
-        .expect("an ephemeral port should be available")
-        .local_addr()
-        .unwrap();
     let directory = root().join("target/conformance");
     fs::create_dir_all(&directory).unwrap();
+    // The server picks its own port and says which. Choosing one here and handing it over would
+    // leave a gap in which another test, or anything else on the machine, could take it, and a
+    // connect check would then be answered by the wrong server.
     let mut config = format!(
-        "[server]\nlisten = \"{address}\"\n[storage]\nmedia_root = \"{}\"\n[packaging]\nsegment_duration_ms = 1000\n[logging]\nlevel = \"warn\"\n",
+        "[server]\nlisten = \"127.0.0.1:0\"\n[storage]\nmedia_root = \"{}\"\n[packaging]\nsegment_duration_ms = 1000\n[logging]\nlevel = \"info\"\nformat = \"compact\"\n",
         root().join("tests/fixtures").display()
     );
     for (id, file, _) in FIXTURES {
         config.push_str(&format!("[assets.{id}]\npath = \"{file}\"\n"));
     }
-    let config_path = directory.join(format!("vod-{}.toml", address.port()));
+    let name = format!(
+        "{}-{}",
+        std::process::id(),
+        std::thread::current()
+            .name()
+            .unwrap_or("test")
+            .replace("::", "-")
+    );
+    let config_path = directory.join(format!("vod-{name}.toml"));
     fs::write(&config_path, config).unwrap();
+    let log_path = directory.join(format!("server-{name}.log"));
 
-    let child = Command::new(env!("CARGO_BIN_EXE_segmentor"))
+    // The server writes its log to stdout and its fatal errors to stderr; keep both.
+    let log = fs::File::create(&log_path).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_segmentor"))
         .args(["serve", "--config"])
         .arg(&config_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
         .spawn()
         .expect("server should start");
-    let server = Server { child, address };
-    let deadline = Instant::now() + Duration::from_secs(10);
+
+    // The server logs `service_ready` with its address once assets are loaded and the port is
+    // bound, so seeing it means this process, and not another, owns the address.
+    let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
-        if TcpStream::connect(address).is_ok() {
-            return server;
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!(
+                "server exited with {status} before it was ready:\n{}",
+                fs::read_to_string(&log_path).unwrap_or_default()
+            );
+        }
+        let log = fs::read_to_string(&log_path).unwrap_or_default();
+        if let Some(address) = ready_address(&log) {
+            return Server {
+                child,
+                address,
+                log: log_path,
+            };
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("server did not become ready");
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!(
+        "server did not become ready:\n{}",
+        fs::read_to_string(&log_path).unwrap_or_default()
+    );
+}
+
+/// The address in the `service_ready` log line, if the server has logged it.
+fn ready_address(log: &str) -> Option<SocketAddr> {
+    let line = log.lines().find(|line| line.contains("service_ready"))?;
+    let start = line.find("listen.address=")? + "listen.address=".len();
+    line[start..]
+        .split(|c: char| c.is_whitespace() || c == '"')
+        .find(|part| !part.is_empty())?
+        .parse()
+        .ok()
 }
 
 struct Response {
