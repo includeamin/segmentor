@@ -38,14 +38,10 @@ pub(crate) fn plan(
         .filter(|track| track.kind == TrackKind::Audio)
         .collect::<Vec<_>>();
     if video_tracks.len() != 1 {
-        return Err(Error::Unsupported(
-            "input must contain exactly one video track",
-        ));
-    }
-    if audio_tracks.len() > 1 {
-        return Err(Error::Unsupported(
-            "input must contain at most one audio track",
-        ));
+        return Err(Error::Unsupported(format!(
+            "input must contain exactly one video track, found {}",
+            video_tracks.len()
+        )));
     }
 
     let video = video_tracks[0];
@@ -80,7 +76,7 @@ pub(crate) fn plan(
             duration: end_time - decode_time,
         }];
 
-        if let Some(audio) = audio_tracks.first() {
+        for audio in &audio_tracks {
             tracks.push(audio_segment(
                 audio,
                 video,
@@ -194,6 +190,43 @@ mod tests {
     use super::*;
     use crate::mp4;
     use crate::source::{LocalMediaSource, MediaSourceKind};
+
+    #[test]
+    fn every_audio_track_is_planned_alongside_the_video() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/h264-aac-two-audio.mp4");
+        let source = MediaSourceKind::Local(std::sync::Arc::new(
+            LocalMediaSource::open(path).expect("fixture should open"),
+        ));
+        let limits = LimitsConfig::default();
+        let index = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build")
+            .block_on(mp4::parse(&source, &limits))
+            .expect("fixture should parse")
+            .index;
+
+        let plan = plan(&index, 1000, &limits).expect("fixture should be segmentable");
+
+        assert_eq!(plan.segments.len(), 3);
+        for segment in &plan.segments {
+            let ids = segment
+                .tracks
+                .iter()
+                .map(|track| track.track_id)
+                .collect::<Vec<_>>();
+            assert_eq!(ids, [1, 2, 3], "video, then both audio tracks");
+        }
+        // The two audio tracks carry the same durations, so they cut identically.
+        for segment in &plan.segments {
+            assert_eq!(
+                segment.tracks[1].first_sample,
+                segment.tracks[2].first_sample
+            );
+            assert_eq!(segment.tracks[1].end_sample, segment.tracks[2].end_sample);
+        }
+    }
 
     #[test]
     fn creates_three_keyframe_aligned_segments() {

@@ -17,6 +17,9 @@ pub(crate) fn write_init_segment(metadata: &SparseFile, track_id: u32) -> Result
     movie.udta = None;
     let track = &mut movie.traks[0];
     track.tkhd.duration = 0;
+    // The edit list was applied to the sample timestamps when the file was parsed; keeping it
+    // here would make a player apply it a second time.
+    track.edts = None;
     track.mdia.mdhd.duration = 0;
     let sample_table = &mut track.mdia.minf.stbl;
     sample_table.stts.entries.clear();
@@ -66,4 +69,55 @@ fn movie_extends_box(track_id: u32) -> Vec<u8> {
     movie_extends.extend_from_slice(b"mvex");
     movie_extends.extend_from_slice(&track_extends);
     movie_extends
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::config::LimitsConfig;
+    use crate::media::TrackKey;
+    use crate::mp4;
+    use crate::source::{LocalMediaSource, MediaSourceKind};
+
+    fn parsed(name: &str) -> mp4::ParsedMedia {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        let source = MediaSourceKind::Local(std::sync::Arc::new(
+            LocalMediaSource::open(path).expect("fixture should open"),
+        ));
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build")
+            .block_on(mp4::parse(&source, &LimitsConfig::default()))
+            .expect("fixture should parse")
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    }
+
+    #[test]
+    fn the_init_segment_does_not_repeat_the_edit_list_the_timestamps_already_apply() {
+        let media = parsed("h264-aac-default-edits.mp4");
+        assert!(
+            contains(media.metadata.moov_bytes(), b"elst"),
+            "the fixture must have an edit list for this test to mean anything"
+        );
+
+        for track in &media.index.tracks {
+            let init = write_init_segment(&media.metadata, track.id).unwrap();
+            assert!(
+                !contains(&init, b"edts") && !contains(&init, b"elst"),
+                "{} init still carries an edit list",
+                track.key
+            );
+        }
+        assert_eq!(media.index.tracks[0].key, TrackKey::VIDEO);
+    }
 }

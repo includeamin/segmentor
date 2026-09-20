@@ -49,7 +49,7 @@ Two pure functions from a `Presentation` to `String`, both called once at load.
 **`master_playlist(presentation)`** writes an `#EXTM3U` master with `#EXT-X-VERSION:7`:
 
 - The video track must be H.264 (`Error::Unsupported` otherwise). The codec string is `avc1.` plus profile, compatibility, and level as three hex bytes.
-- If an audio track exists it is declared as an `#EXT-X-MEDIA:TYPE=AUDIO` rendition in group `audio`, with URI `audio/index.m3u8?v={version}`, and `mp4a.40.2` is appended to `CODECS`.
+- Every audio track is declared as an `#EXT-X-MEDIA:TYPE=AUDIO` rendition in group `audio`, with URI `audio-{n}/index.m3u8?v={version}`. The first is `DEFAULT=YES`. `NAME` is `Audio {n}`, followed by the language in parentheses when the file names one, and `LANGUAGE` is set from `mdhd`. `mp4a.40.2` is appended to `CODECS`, and the variant's bandwidth counts the default rendition only.
 - One `#EXT-X-STREAM-INF` carries `BANDWIDTH` (video peak plus audio peak), `AVERAGE-BANDWIDTH` (sums of averages), `CODECS`, `RESOLUTION`, and the `AUDIO` group, followed by `video/index.m3u8?v={version}`.
 
 **`media_playlist(presentation, kind)`** writes a VOD media playlist for one track: `#EXT-X-TARGETDURATION` is the largest segment duration rounded up to whole seconds; `#EXT-X-PLAYLIST-TYPE:VOD`, `#EXT-X-INDEPENDENT-SEGMENTS`, and `#EXT-X-MAP:URI="init.mp4?v=..."` reference the init segment; each segment gets `#EXTINF` with millisecond precision and the URI `segments/{n}/media.m4s?v=...`; the file ends with `#EXT-X-ENDLIST`.
@@ -61,10 +61,10 @@ All URLs are relative, so they resolve beneath the route the playlist was fetche
 `manifest(presentation)` writes a static MPD (`type="static"`, profile `isoff-main:2011`):
 
 - `mediaPresentationDuration` is the longest track duration in seconds.
-- The video track becomes one `AdaptationSet` with `Representation id="video"`; audio, when present, becomes another with `id="audio"`, an `audioSamplingRate`, and an `AudioChannelConfiguration`.
-- Each representation has a `SegmentTemplate` in that track's timescale, `startNumber="0"`, `initialization="$RepresentationID$/init.mp4?v=..."`, `media="$RepresentationID$/segments/$Number$/media.m4s?v=..."`, and a `SegmentTimeline` with one `<S d="..."/>` per segment. A timeline is used because real segment lengths vary with keyframe placement.
+- The video track becomes one `AdaptationSet` with `Representation id="video"`; each audio track becomes another, with `id="audio-{n}"`, a `lang` when known, an `audioSamplingRate`, and an `AudioChannelConfiguration`.
+- Each representation has a `SegmentTemplate` in that track's timescale, `startNumber="0"`, `initialization="$RepresentationID$/init.mp4?v=..."`, `media="$RepresentationID$/segments/$Number$/media.m4s?v=..."`, and a `SegmentTimeline` with one `<S d="..."/>` per segment. The first entry also carries `t`, because a file with an edit list starts after zero. A timeline is used because real segment lengths vary with keyframe placement.
 - `Representation@bandwidth` is the peak bitrate.
 
-Because the representation IDs are `video` and `audio`, `$RepresentationID$/...` resolves to the same `/dash/{asset}/{track}/...` routes the server registers.
+Because the representation IDs are the track names `video` and `audio-{n}`, `$RepresentationID$/...` resolves to the same `/dash/{asset}/{track}/...` routes the server registers.
 
 **Contributing:** the two renderers share the same fragments, so a fragment change affects both. Renderer unit tests check structure; FFmpeg decode tests in `http/tests.rs` check that players can actually play the output. Anything interpolated into text must be escaped or provably safe; today only numbers and hex strings are interpolated.

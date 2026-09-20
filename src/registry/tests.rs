@@ -507,10 +507,10 @@ async fn unsupported_media_is_a_load_failure_not_a_gateway_error() {
     let h = harness().await;
     h.mapper
         .state
-        .set("edited", Answer::file("v1", "h264-aac-edit-list.mp4"));
+        .set("modern", Answer::file("v1", "hevc-aac.mp4"));
 
     assert_eq!(
-        status(&h.app, "/hls/edited/master.m3u8").await,
+        status(&h.app, "/hls/modern/master.m3u8").await,
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert!(metric(
@@ -519,7 +519,7 @@ async fn unsupported_media_is_a_load_failure_not_a_gateway_error() {
     ));
     // The failure is cached briefly rather than reparsed on every request.
     assert_eq!(
-        status(&h.app, "/hls/edited/master.m3u8").await,
+        status(&h.app, "/hls/modern/master.m3u8").await,
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert!(metric(
@@ -585,10 +585,10 @@ async fn remote_media_is_served_byte_for_byte_like_local_media() {
 
     for path in [
         format!("video/init.mp4?v={version}"),
-        format!("audio/init.mp4?v={version}"),
+        format!("audio-1/init.mp4?v={version}"),
         format!("video/segments/0/media.m4s?v={version}"),
         format!("video/segments/2/media.m4s?v={version}"),
-        format!("audio/segments/1/media.m4s?v={version}"),
+        format!("audio-1/segments/1/media.m4s?v={version}"),
     ] {
         let (remote_status, _, remote) = fetch(&h.app, &format!("/hls/remote/{path}")).await;
         let (_, _, local) = fetch(&h.app, &format!("/hls/local/{path}")).await;

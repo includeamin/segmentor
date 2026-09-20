@@ -33,12 +33,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const FIXTURES: [(&str, &str); 5] = [
-    ("aac", "h264-aac.mp4"),
-    ("moovlast", "h264-aac-moov-last.mp4"),
-    ("videoonly", "h264-video-only.mp4"),
-    ("stereo44", "h264-aac-44100-stereo.mp4"),
-    ("variable", "h264-variable-timing.mp4"),
+/// Asset ID, fixture file, and how many audio packets packaging drops from it. Only files with
+/// an edit list lose any: the encoder-padding frame before the edit starts.
+const FIXTURES: [(&str, &str, u64); 8] = [
+    ("aac", "h264-aac.mp4", 0),
+    ("moovlast", "h264-aac-moov-last.mp4", 0),
+    ("videoonly", "h264-video-only.mp4", 0),
+    ("stereo44", "h264-aac-44100-stereo.mp4", 0),
+    ("variable", "h264-variable-timing.mp4", 0),
+    ("edits", "h264-aac-default-edits.mp4", 1),
+    ("delay", "h264-aac-audio-delay.mp4", 0),
+    ("twoaudio", "h264-aac-two-audio.mp4", 0),
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -72,7 +77,7 @@ fn start_server() -> Server {
         "[server]\nlisten = \"{address}\"\n[storage]\nmedia_root = \"{}\"\n[packaging]\nsegment_duration_ms = 1000\n[logging]\nlevel = \"warn\"\n",
         root().join("tests/fixtures").display()
     );
-    for (id, file) in FIXTURES {
+    for (id, file, _) in FIXTURES {
         config.push_str(&format!("[assets.{id}]\npath = \"{file}\"\n"));
     }
     let config_path = directory.join(format!("vod-{}.toml", address.port()));
@@ -367,6 +372,9 @@ fn parse_fragment(data: &[u8]) -> Fragment {
 struct Audited {
     init: Vec<u8>,
     segments: Vec<Vec<u8>>,
+    /// Where the first segment starts, in track ticks; zero unless the file had an edit list.
+    start_ticks: u64,
+    /// The sum of the segment durations, not counting `start_ticks`.
     total_ticks: u64,
     timescale: u32,
 }
@@ -377,10 +385,20 @@ fn audit_track(
     kind: &str,
     init: &[u8],
     segments: Vec<Vec<u8>>,
+    declared_start: Option<u64>,
     declared_ticks: impl Fn(usize, u32) -> u64,
 ) -> Audited {
     let init_info = parse_init(init);
-    let mut expected_start = 0u64;
+    // A track may start after zero when its file has an edit list. A manifest that states the
+    // start (DASH) is checked against it; one that does not (HLS) is taken from the first segment.
+    let start_ticks = declared_start
+        .or_else(|| {
+            segments
+                .first()
+                .map(|first| parse_fragment(first).decode_time)
+        })
+        .unwrap_or(0);
+    let mut expected_start = start_ticks;
     for (index, bytes) in segments.iter().enumerate() {
         let fragment = parse_fragment(bytes);
         assert_eq!(
@@ -415,7 +433,8 @@ fn audit_track(
     Audited {
         init: init.to_vec(),
         segments,
-        total_ticks: expected_start,
+        start_ticks,
+        total_ticks: expected_start - start_ticks,
         timescale: init_info.timescale,
     }
 }
@@ -498,14 +517,24 @@ fn audit_hls(server: &Server, asset: &str) -> HashMap<String, Audited> {
     match stream_attributes.get("AUDIO") {
         Some(group) => {
             assert!(stream_attributes["CODECS"].contains("mp4a.40.2"));
-            assert_eq!(media_lines.len(), 1, "one audio rendition expected");
-            let media = attributes(media_lines[0]);
-            assert_eq!(
-                &media["GROUP-ID"], group,
-                "AUDIO group must reference an EXT-X-MEDIA"
+            assert!(
+                !media_lines.is_empty(),
+                "AUDIO names a group with no renditions"
             );
-            assert_eq!(media["TYPE"], "AUDIO");
-            targets.push(("audio".to_owned(), media["URI"].clone()));
+            let mut defaults = 0;
+            for line in &media_lines {
+                let media = attributes(line);
+                assert_eq!(
+                    &media["GROUP-ID"], group,
+                    "AUDIO group must reference an EXT-X-MEDIA"
+                );
+                assert_eq!(media["TYPE"], "AUDIO");
+                defaults += usize::from(media["DEFAULT"] == "YES");
+                // The track's name in its URL is also its DASH Representation ID.
+                let name = media["URI"].split('/').next().unwrap().to_owned();
+                targets.push((name, media["URI"].clone()));
+            }
+            assert_eq!(defaults, 1, "exactly one rendition is the default");
         }
         None => assert!(
             media_lines.is_empty(),
@@ -560,7 +589,7 @@ fn audit_hls(server: &Server, asset: &str) -> HashMap<String, Audited> {
             .iter()
             .map(|url| get_ok(server, url).body)
             .collect::<Vec<_>>();
-        let audit = audit_track(&kind, &init, segments, |index, timescale| {
+        let audit = audit_track(&kind, &init, segments, None, |index, timescale| {
             (extinf[index] * f64::from(timescale)).round() as u64
         });
         audited.insert(kind, audit);
@@ -648,12 +677,25 @@ fn audit_dash(server: &Server, asset: &str) -> HashMap<String, Audited> {
             let rep = representation.expect("SegmentTemplate must sit inside a Representation");
             let id = rep.attributes["id"].clone();
             let start_number = tag.attributes["startNumber"].parse::<usize>().unwrap();
-            let durations = all[index + 1..]
+            let entries = all[index + 1..]
                 .iter()
                 .take_while(|candidate| candidate.name != "Representation")
                 .filter(|candidate| candidate.name == "S")
+                .collect::<Vec<_>>();
+            let durations = entries
+                .iter()
                 .map(|candidate| candidate.attributes["d"].parse::<u64>().unwrap())
                 .collect::<Vec<_>>();
+            assert!(
+                entries[1..]
+                    .iter()
+                    .all(|entry| !entry.attributes.contains_key("t")),
+                "only the first S may state t; the rest follow on"
+            );
+            let declared_start = entries[0]
+                .attributes
+                .get("t")
+                .map(|t| t.parse::<u64>().unwrap());
             assert!(!durations.is_empty(), "SegmentTimeline must list segments");
 
             let init_url = resolve(
@@ -669,8 +711,11 @@ fn audit_dash(server: &Server, asset: &str) -> HashMap<String, Audited> {
                     get_ok(server, &resolve(&manifest_url, &media)).body
                 })
                 .collect::<Vec<_>>();
-            let audit = audit_track(&id, &init, segments, |segment, _| durations[segment]);
-            let seconds = audit.total_ticks as f64 / f64::from(audit.timescale);
+            let audit = audit_track(&id, &init, segments, declared_start, |segment, _| {
+                durations[segment]
+            });
+            let seconds =
+                (audit.start_ticks + audit.total_ticks) as f64 / f64::from(audit.timescale);
             assert!(
                 seconds <= presentation + 0.002,
                 "{id} timeline ({seconds}s) exceeds mediaPresentationDuration ({presentation}s)"
@@ -681,7 +726,7 @@ fn audit_dash(server: &Server, asset: &str) -> HashMap<String, Audited> {
     }
     let longest = audited
         .values()
-        .map(|track| track.total_ticks as f64 / f64::from(track.timescale))
+        .map(|track| (track.start_ticks + track.total_ticks) as f64 / f64::from(track.timescale))
         .fold(0.0, f64::max);
     assert!(
         (longest - presentation).abs() < 0.002,
@@ -697,7 +742,7 @@ fn audit_dash(server: &Server, asset: &str) -> HashMap<String, Audited> {
 #[test]
 fn hls_and_dash_conform_and_agree_for_every_fixture() {
     let server = start_server();
-    for (asset, _) in FIXTURES {
+    for (asset, _, _) in FIXTURES {
         let hls = audit_hls(&server, asset);
         let dash = audit_dash(&server, asset);
         assert_eq!(
@@ -774,7 +819,7 @@ fn reassembled_tracks_decode_with_the_source_frame_counts() {
     let directory = root().join("target/conformance/reassembled");
     fs::create_dir_all(&directory).unwrap();
 
-    for (asset, file) in FIXTURES {
+    for (asset, file, dropped) in FIXTURES {
         let tracks = audit_hls(&server, asset);
         for (kind, track) in tracks {
             let path = directory.join(format!("{asset}-{kind}.mp4"));
@@ -784,10 +829,20 @@ fn reassembled_tracks_decode_with_the_source_frame_counts() {
             }
             fs::write(&path, bytes).unwrap();
 
-            let decoded = probe_frames(&path, &kind);
-            let source = probe_frames(&root().join("tests/fixtures").join(file), &kind);
+            // A reassembled file holds one stream; the source holds them all, in file order.
+            let decoded = probe_frames(&path, if kind == "video" { "v:0" } else { "a:0" });
+            let source = probe_frames(
+                &root().join("tests/fixtures").join(file),
+                &source_selector(&kind),
+            );
+            let expected = source
+                - if kind.starts_with("audio") {
+                    dropped
+                } else {
+                    0
+                };
             assert_eq!(
-                decoded, source,
+                decoded, expected,
                 "{asset}/{kind}: frame count after repackaging"
             );
 
@@ -807,8 +862,15 @@ fn reassembled_tracks_decode_with_the_source_frame_counts() {
     }
 }
 
-fn probe_frames(path: &Path, kind: &str) -> u64 {
-    let selector = if kind == "video" { "v:0" } else { "a:0" };
+/// The FFprobe stream selector for a track named `video` or `audio-N` in the source file.
+fn source_selector(kind: &str) -> String {
+    match kind.strip_prefix("audio-") {
+        Some(number) => format!("a:{}", number.parse::<usize>().unwrap() - 1),
+        None => "v:0".to_owned(),
+    }
+}
+
+fn probe_frames(path: &Path, selector: &str) -> u64 {
     let output = Command::new("ffprobe")
         .args(["-v", "error", "-count_packets", "-select_streams", selector])
         .args(["-show_entries", "stream=nb_read_packets", "-of", "csv=p=0"])
@@ -824,4 +886,83 @@ fn probe_frames(path: &Path, kind: &str) -> u64 {
         .trim()
         .parse()
         .unwrap_or_else(|_| panic!("unexpected ffprobe output for {}", path.display()))
+}
+
+/// The stream start times FFprobe reports for `input`, as `(video, audio)` in seconds.
+fn start_times(input: &str) -> (f64, f64) {
+    let output = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,start_time",
+            "-of",
+            "csv=p=0",
+        ])
+        .arg(input)
+        .output()
+        .expect("ffprobe should run");
+    assert!(
+        output.status.success(),
+        "{input}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let mut video = None;
+    let mut audio = None;
+    // FFprobe separates programs with a blank line, and adds a third field for some inputs.
+    for line in text.lines().filter(|line| !line.is_empty()) {
+        let mut fields = line.split(',');
+        let (kind, start) = (
+            fields.next().unwrap(),
+            fields.next().expect("codec_type,start_time"),
+        );
+        let start = start.parse::<f64>().unwrap();
+        match kind {
+            "video" => video = video.or(Some(start)),
+            "audio" => audio = audio.or(Some(start)),
+            _ => {}
+        }
+    }
+    (
+        video.expect("a video stream"),
+        audio.expect("an audio stream"),
+    )
+}
+
+/// The gap between audio and video is what an edit list encodes, so it must survive packaging
+/// exactly, even though both tracks move forward by the same small amount.
+#[test]
+fn audio_and_video_stay_in_sync_through_edit_lists() {
+    if Command::new("ffprobe").arg("-version").output().is_err() {
+        eprintln!("skipping: ffprobe is not installed");
+        return;
+    }
+    let server = start_server();
+    for (asset, file, _) in FIXTURES {
+        if ["videoonly", "variable", "twoaudio"].contains(&asset) {
+            continue;
+        }
+        let (source_video, source_audio) = start_times(
+            &root()
+                .join("tests/fixtures")
+                .join(file)
+                .display()
+                .to_string(),
+        );
+        let gap_in_source = source_audio - source_video;
+        for protocol in ["hls/{}/master.m3u8", "dash/{}/manifest.mpd"] {
+            let url = format!(
+                "http://{}/{}",
+                server.address,
+                protocol.replace("{}", asset)
+            );
+            let (video, audio) = start_times(&url);
+            assert!(
+                ((audio - video) - gap_in_source).abs() < 0.001,
+                "{asset} over {protocol}: audio leads video by {:.4}s, the source by {gap_in_source:.4}s",
+                audio - video
+            );
+        }
+    }
 }

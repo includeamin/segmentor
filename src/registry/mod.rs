@@ -285,6 +285,7 @@ impl AssetRegistry {
                 ))
             })?;
             total = total.saturating_add(asset.index_bytes());
+            asset.log_load_details(&id);
             tracing::info!(
                 event = "asset_loaded",
                 asset.id = %id,
@@ -590,6 +591,7 @@ impl AssetRegistry {
                 loaded.insert(asset_id, &resolved.version, Arc::clone(&asset));
                 drop(loaded);
                 self.publish_loaded();
+                asset.log_load_details(asset_id);
                 tracing::debug!(
                     event = "asset_loaded",
                     asset.id = asset_id,

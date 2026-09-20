@@ -30,12 +30,12 @@ pub(crate) async fn media_playlist(
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
-    let kind = parse_track(&track)?;
+    let key = parse_track(&track)?;
     let etag = entity_tag(&asset, &format!("hls-{track}-playlist"));
     if not_modified(&headers, &etag) {
         return not_modified_response(etag, "public, max-age=60");
     }
-    playlist_response(asset.hls_media_playlist(kind)?, etag)
+    playlist_response(asset.hls_media_playlist(key)?, etag)
 }
 
 pub(crate) async fn dash_manifest(
