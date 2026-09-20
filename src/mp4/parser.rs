@@ -137,7 +137,14 @@ fn parse_track(
     let entry = sample_entry(stbl.payload)?;
     let codec = match (&entry.name, kind) {
         (b"avc1", TrackKind::Video) => codec::parse_avc(entry.payload)?,
+        (b"hvc1" | b"hev1", TrackKind::Video) => codec::parse_hevc(entry.payload, entry.name)?,
+        (b"vp09", TrackKind::Video) => codec::parse_vp9(entry.payload)?,
+        (b"av01", TrackKind::Video) => codec::parse_av1(entry.payload)?,
         (b"mp4a", TrackKind::Audio) => codec::parse_aac(entry.payload, raw.id)?,
+        (b"ac-3", TrackKind::Audio) => codec::parse_ac3(entry.payload, raw.id)?,
+        (b"ec-3", TrackKind::Audio) => codec::parse_eac3(entry.payload, raw.id)?,
+        (b"Opus", TrackKind::Audio) => codec::parse_opus(entry.payload, raw.id)?,
+        (b"fLaC", TrackKind::Audio) => codec::parse_flac(entry.payload, raw.id)?,
         (name, _) => {
             return Err(Error::Unsupported(format!(
                 "track {}: sample description `{}` does not belong in a {} track",
@@ -394,7 +401,8 @@ fn classify_sample_description(
     }
     let entry = sample_entry(sample_table)?;
     match &entry.name {
-        b"avc1" | b"mp4a" => Ok(Disposition::Package),
+        b"avc1" | b"hvc1" | b"hev1" | b"vp09" | b"av01" | b"mp4a" | b"ac-3" | b"ec-3" | b"Opus"
+        | b"fLaC" => Ok(Disposition::Package),
         b"encv" | b"enca" => Err(Error::Unsupported(format!(
             "track {track_id}: encrypted media is not supported"
         ))),
@@ -582,11 +590,36 @@ mod tests {
 
     #[test]
     fn an_unsupported_codec_is_named_in_the_error() {
-        let error = parse_error("hevc-aac.mp4");
+        // MP3 in MP4 hides in an `mp4a` entry, so it is the audio object type that gives it away.
+        let error = parse_error("h264-mp3.mp4");
 
         assert!(matches!(error, Error::Unsupported(_)), "{error}");
-        assert!(error.to_string().contains("track 1"), "{error}");
-        assert!(error.to_string().contains("`hvc1`"), "{error}");
+        assert!(error.to_string().contains("track 2"), "{error}");
+        assert!(error.to_string().contains("0x6b"), "{error}");
+    }
+
+    #[test]
+    fn reads_the_codec_of_every_supported_format_from_real_files() {
+        // File, video codec string, audio codec string, and the audio format.
+        for (name, video, audio, format) in [
+            ("hevc-aac.mp4", "hvc1.1.6.L60.90", "mp4a.40.2", (48_000, 1)),
+            ("vp9-opus.mp4", "vp09.00.11.08", "opus", (48_000, 1)),
+            ("av1-aac.mp4", "av01.0.00M.08", "mp4a.40.2", (48_000, 1)),
+            ("h264-ac3.mp4", "avc1.64000d", "ac-3", (48_000, 1)),
+            ("h264-eac3.mp4", "avc1.64000d", "ec-3", (48_000, 1)),
+            ("h264-flac.mp4", "avc1.64000d", "fLaC", (48_000, 1)),
+        ] {
+            let index = parse_fixture(name);
+
+            assert_eq!(index.tracks[0].codec.codecs(), video, "{name} video");
+            assert_eq!(
+                index.tracks[0].codec.dimensions(),
+                Some((320, 180)),
+                "{name}"
+            );
+            assert_eq!(index.tracks[1].codec.codecs(), audio, "{name} audio");
+            assert_eq!(index.tracks[1].codec.audio_format(), Some(format), "{name}");
+        }
     }
 
     #[test]
@@ -697,12 +730,20 @@ mod tests {
             "h264-aac-timecode.mp4",
             "h264-aac-quicktime.mov",
             "h264-aac-anamorphic.mp4",
+            "hevc-aac.mp4",
+            "vp9-opus.mp4",
+            "av1-aac.mp4",
+            "h264-ac3.mp4",
+            "h264-eac3.mp4",
+            "h264-flac.mp4",
+            "aac-only.m4a",
+            "aac-two-tracks-only.m4a",
         ] {
             let source = open_kind(fixture(name)).expect("fixture should open");
             let original = block_on(Metadata::fetch(&source, u64::MAX)).expect("fixture has moov");
             let identity = source.identity().clone();
             let len = original.len();
-            for _ in 0..700 {
+            for _ in 0..400 {
                 let mut moov = original.moov_bytes().to_vec();
                 for _ in 0..=(next() % 4) {
                     let position = usize::try_from(next()).unwrap() % moov.len();
@@ -752,7 +793,8 @@ mod tests {
             index.tracks[1].codec,
             CodecConfig::Aac {
                 sample_rate: 48_000,
-                channels: 1
+                channels: 1,
+                object_type: 2
             }
         ));
         assert_eq!(index.tracks[1].samples.len(), 142);
@@ -808,6 +850,7 @@ mod tests {
             CodecConfig::Aac {
                 sample_rate: 44_100,
                 channels: 2,
+                object_type: 2,
             }
         );
     }

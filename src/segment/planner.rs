@@ -37,52 +37,64 @@ pub(crate) fn plan(
         .iter()
         .filter(|track| track.kind == TrackKind::Audio)
         .collect::<Vec<_>>();
-    if video_tracks.len() != 1 {
+    if video_tracks.len() > 1 {
         return Err(Error::Unsupported(format!(
-            "input must contain exactly one video track, found {}",
+            "input must contain at most one video track, found {}",
             video_tracks.len()
         )));
     }
 
-    let video = video_tracks[0];
-    if video.samples.is_empty() || !video.samples[0].is_sync {
+    // The reference track decides where segments are cut: the video track, whose cuts must fall
+    // on keyframes, or, with no video, the first audio track, where every sample is a valid cut.
+    // The remaining audio tracks are cut at the same instants.
+    let reference = video_tracks
+        .first()
+        .or_else(|| audio_tracks.first())
+        .copied()
+        .ok_or_else(|| Error::Unsupported("input has no audio or video track".to_owned()))?;
+    let followers = audio_tracks
+        .iter()
+        .filter(|track| track.id != reference.id)
+        .copied()
+        .collect::<Vec<_>>();
+    if reference.samples.is_empty() || !reference.samples[0].is_sync {
         return Err(Error::InvalidMedia(
-            "video must begin with a sync sample".to_owned(),
+            "the first track must begin with a sync sample".to_owned(),
         ));
     }
     let target_ticks = target_duration_ms
-        .checked_mul(u64::from(video.timescale))
+        .checked_mul(u64::from(reference.timescale))
         .and_then(|duration| duration.checked_div(1000))
         .filter(|duration| *duration != 0)
         .ok_or_else(|| Error::InvalidMedia("invalid target segment duration".to_owned()))?;
-    let boundaries = video_boundaries(video, target_ticks);
-    let video_end = track_end(video)?;
+    let boundaries = reference_boundaries(reference, target_ticks);
+    let reference_end = track_end(reference)?;
 
     let mut segments = Vec::with_capacity(boundaries.len().saturating_sub(1));
     for (segment_index, boundaries) in boundaries.windows(2).enumerate() {
         let first_sample = boundaries[0];
         let end_sample = boundaries[1];
-        let decode_time = video.samples[first_sample].decode_time;
-        let end_time = if end_sample == video.samples.len() {
-            video_end
+        let decode_time = reference.samples[first_sample].decode_time;
+        let end_time = if end_sample == reference.samples.len() {
+            reference_end
         } else {
-            video.samples[end_sample].decode_time
+            reference.samples[end_sample].decode_time
         };
         let mut tracks = vec![TrackSegment {
-            track_id: video.id,
+            track_id: reference.id,
             first_sample,
             end_sample,
             decode_time,
             duration: end_time - decode_time,
         }];
 
-        for audio in &audio_tracks {
+        for audio in &followers {
             tracks.push(audio_segment(
                 audio,
-                video,
+                reference,
                 decode_time,
                 end_time,
-                end_sample == video.samples.len(),
+                end_sample == reference.samples.len(),
             )?);
         }
         if tracks
@@ -104,14 +116,16 @@ pub(crate) fn plan(
     Ok(SegmentPlan { segments })
 }
 
-fn video_boundaries(video: &Track, target_ticks: u64) -> Vec<usize> {
+/// Sample indexes at which segments start, plus the end: the first sync sample at or after each
+/// target duration.
+fn reference_boundaries(reference: &Track, target_ticks: u64) -> Vec<usize> {
     let mut boundaries = vec![0];
     let mut current = 0usize;
     loop {
-        let target = video.samples[current]
+        let target = reference.samples[current]
             .decode_time
             .saturating_add(target_ticks);
-        let Some(next) = video
+        let Some(next) = reference
             .samples
             .iter()
             .enumerate()
@@ -124,7 +138,7 @@ fn video_boundaries(video: &Track, target_ticks: u64) -> Vec<usize> {
         boundaries.push(next);
         current = next;
     }
-    boundaries.push(video.samples.len());
+    boundaries.push(reference.samples.len());
     boundaries
 }
 
@@ -190,6 +204,61 @@ mod tests {
     use super::*;
     use crate::mp4;
     use crate::source::{LocalMediaSource, MediaSourceKind};
+
+    fn plan_of(name: &str, target_ms: u64) -> (MediaIndex, SegmentPlan) {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        let source = MediaSourceKind::Local(std::sync::Arc::new(
+            LocalMediaSource::open(path).expect("fixture should open"),
+        ));
+        let limits = LimitsConfig::default();
+        let index = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime should build")
+            .block_on(mp4::parse(&source, &limits))
+            .expect("fixture should parse")
+            .index;
+        let plan = plan(&index, target_ms, &limits).expect("fixture should be segmentable");
+        (index, plan)
+    }
+
+    #[test]
+    fn an_audio_only_asset_is_cut_into_windows_of_the_target_duration() {
+        let (index, plan) = plan_of("aac-only.m4a", 1000);
+
+        let audio = &index.tracks[0];
+        assert_eq!(plan.segments.len(), 3);
+        // Cut points are one second apart to within one AAC frame (1024 / 48000 s).
+        for segment in &plan.segments[..2] {
+            let duration = segment.tracks[0].duration;
+            assert!(
+                duration.abs_diff(u64::from(audio.timescale)) < 1024,
+                "segment lasts {duration} ticks"
+            );
+        }
+        // Every sample lands in exactly one segment.
+        let covered = plan
+            .segments
+            .iter()
+            .map(|s| s.tracks[0].end_sample - s.tracks[0].first_sample);
+        assert_eq!(covered.sum::<usize>(), audio.samples.len());
+    }
+
+    #[test]
+    fn audio_only_tracks_after_the_first_follow_its_cuts() {
+        let (_, plan) = plan_of("aac-two-tracks-only.m4a", 1000);
+
+        for segment in &plan.segments {
+            assert_eq!(segment.tracks.len(), 2);
+            assert_eq!(
+                segment.tracks[0].first_sample,
+                segment.tracks[1].first_sample
+            );
+            assert_eq!(segment.tracks[0].end_sample, segment.tracks[1].end_sample);
+        }
+    }
 
     #[test]
     fn every_audio_track_is_planned_alongside_the_video() {

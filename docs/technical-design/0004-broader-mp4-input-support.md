@@ -1,6 +1,6 @@
 # TDD 0004: Broader MP4 input support
 
-- Status: Accepted; Phases 1 and 2 implemented
+- Status: Accepted; Phases 1 to 3 implemented
 - Created: 2026-09-20
 - Updated: 2026-09-20
 - Related ADRs: None yet. Two are proposed in [Rollout](#rollout): edit-list timeline mapping and verbatim sample-entry pass-through
@@ -16,13 +16,35 @@
 | DASH `SegmentTimeline` `t=` | Implemented | |
 | 4. Verbatim sample-entry pass-through | Implemented | `stsd` is copied byte for byte; `pasp` and `colr` now reach players |
 | 5. In-tree container parser | Implemented | `mp4/boxes.rs`, `tables.rs`, `codec.rs`; the `mp4` crate is a dev-dependency only, used to cross-check |
-| 6. New codecs, audio-only | Pending (Phase 3) | |
+| 6. New codecs, audio-only | Implemented | HEVC, VP9, AV1, HE-AAC, AC-3, E-AC-3, Opus, FLAC, and audio-only assets; see the verification table below |
 | 7. Fragmented MP4 input | Pending (Phase 4) | |
 | Fixed `ftyp` brands | Implemented | `iso6` major, `iso6` and `mp41` compatible |
 
 The [support matrix](#current-support-matrix) below records the state *before* Phase 1, which is what the design was written against. Since then the rows for edit lists, two audio tracks, timecode and metadata tracks, fragmented input's error message, QuickTime `.mov`, and the dropped `pasp` box have changed; the other rows still hold.
 
 ### What implementation found
+
+Phase 3, and what was verified where:
+
+| Format | FFmpeg decodes the repackaged output | Codec string checked against | Chrome 153 (hls.js and dash.js) |
+| --- | --- | --- | --- |
+| HEVC (`hvc1`) | Yes | Unit tests with reference strings (`hvc1.1.6.L93.B0`, `hvc1.2.4.L120.B0`); FFmpeg's DASH muxer leaves HEVC blank | Cannot decode on this machine (`isTypeSupported` is false) |
+| VP9 | Yes | Matches FFmpeg's DASH muxer | Plays |
+| AV1 | Yes | Matches FFmpeg's DASH muxer | Plays |
+| HE-AAC, HE-AACv2 | No real file: no HE-AAC encoder was available | Synthetic `esds` tests for object types 5 and 29 | Unverified; Chrome reports both codec strings as supported |
+| AC-3, E-AC-3 | Yes | Matches FFmpeg's DASH muxer | Cannot decode on this machine |
+| Opus | Yes | Matches FFmpeg's DASH muxer | Plays |
+| FLAC | Yes | FFmpeg writes `flac`; segmentor writes `fLaC`, the sample entry tag. Chrome accepts both | Plays |
+| Audio only, one track and two | Yes | | Plays over HLS and DASH |
+
+HEVC, AC-3, and E-AC-3 are therefore verified through FFmpeg and the unit tests but not in a browser, and HE-AAC only through synthetic entries. The README says so.
+
+- **Only configuration boxes were needed per codec.** With the sample entry copied, each codec needed its config box read for a codec string and dimensions or channel count, and nothing written. The one place a format still needed special handling was AAC, where `mp4a` also carries MP3, which shows up as a non-AAC audio object type and is rejected by number.
+- **MP3 in MP4 hides in an `mp4a` entry.** The parser rejects it by its object type indication (`0x6b`), and it replaced the HEVC fixture as the "must be rejected" case.
+- **Codec strings must not be assumed longer than four characters.** `opus`, `ac-3`, and `ec-3` are exactly four; a conformance check that rejected shorter strings would have rejected all three.
+- **Opus and FLAC report their own channel and rate fields.** Opus takes its channel count from `dOps` and always decodes at 48 kHz; FLAC reads `STREAMINFO`, because the sample entry's 16-bit rate field cannot hold 96 kHz.
+- **Audio only needed no new protocol concepts.** The planner cuts on the first audio track's samples, the master playlist loses `RESOLUTION`, and a lone audio track is simply the variant. Several audio-only tracks are renditions of one variant, which follows the HLS authoring pattern and plays in hls.js.
+- **`hev1` is passed through, not rewritten.** The codec string keeps the entry's tag. Players that follow the standard (Chrome, Firefox) accept either; Apple requires `hvc1`, so an `hev1` file will play in browsers and may not in Safari. Rewriting the tag is valid only if parameter sets never change in-band, which cannot be checked without scanning samples.
 
 Phase 2:
 
@@ -259,7 +281,7 @@ Each codec needs three things: a sample entry the packager can copy, a codec con
 | VP9 | `vp09` | `vpcC` | `vp09.PP.LL.DD` | |
 | AV1 | `av01` | `av1C` | `av01.P.LLT.DD` | |
 | AAC-LC (have) | `mp4a` | `esds` | `mp4a.40.2` | |
-| HE-AAC, HE-AACv2 | `mp4a` | `esds` (AudioSpecificConfig, object type 5 or 29) | `mp4a.40.5`, `mp4a.40.29` | Explicit signaling only. Implicit SBR, where the config says LC but the stream has SBR, is rejected because the true sample rate is unknowable without decoding |
+| HE-AAC, HE-AACv2 | `mp4a` | `esds` (AudioSpecificConfig, object type 5 or 29) | `mp4a.40.5`, `mp4a.40.29` | Explicit signaling only. Implicit SBR, where the config says LC but the stream has SBR, cannot be detected without decoding, so such a file is treated as LC, as it always has been |
 | AC-3, E-AC-3 | `ac-3`, `ec-3` | `dac3`, `dec3` | `ac-3`, `ec-3` | |
 | Opus | `Opus` | `dOps` | `opus` | |
 | FLAC | `fLaC` | `dfLa` | `fLaC` | |
@@ -362,7 +384,7 @@ Update the matrix in [TDD 0001](0001-on-demand-mp4-packaging-core.md) and [media
 ## Open questions
 
 - **Edit lists in players.** Does the shifted-timeline approach behave identically in Safari, Chrome, and Firefox, including seeking to the first segment? What does each do with a first `tfdt` greater than zero when the DASH manifest and HLS playlist both start there? If any player misbehaves, is carrying the `elst` in the init segment a better fallback for that player?
-- **`hev1` versus `hvc1`.** Apple requires `hvc1`. Rewriting the four-byte sample-entry tag is valid only if parameter sets are never updated in-band, which cannot be proven without scanning samples. Options: accept only `hvc1`, rewrite `hev1` when `hvcC` is complete and document the assumption, or scan the first sample of each segment. Which is acceptable?
+- **`hev1` versus `hvc1`.** Settled: the entry's tag is passed through and not rewritten (see the Phase 3 findings). Whether to warn when an `hev1` asset is served is open.
 - **Ordering of new codecs.** The order above is by expected usage, but HEVC and AV1 have the widest player-support variance. Should AV1 wait for evidence that target players decode it through the protocols in use?
 - **Rotation and HDR signaling.** `tkhd` matrix and HDR boxes will be preserved by pass-through, but HLS and DASH have their own attributes (`VIDEO-RANGE`, for example). Should the manifest advertise them, and how much of this is in scope here?
 - **Lenient track handling.** Should an operator be able to serve the tracks segmentor understands from a file that also has an unsupported audio track (for example AC-3 next to AAC), and if so, per asset or globally?

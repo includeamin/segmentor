@@ -2,54 +2,60 @@ use std::fmt::Write;
 
 use super::Presentation;
 use crate::error::{Error, Result};
-use crate::media::{CodecConfig, Track, TrackKey};
+use crate::media::{Track, TrackKey};
 
 pub(crate) fn master_playlist(presentation: Presentation<'_>) -> Result<String> {
-    let video = presentation.video()?;
+    let video = presentation.video();
     let audio_tracks = presentation.audio_tracks().collect::<Vec<_>>();
     // The variant's bandwidth and codecs describe the default (first) audio rendition.
     let audio = audio_tracks.first().copied();
-    let CodecConfig::Avc {
-        width,
-        height,
-        profile,
-        compatibility,
-        level,
-        ..
-    } = video.codec
-    else {
-        return Err(Error::Unsupported("HLS video must be H.264".to_owned()));
-    };
-    let mut codecs = format!("avc1.{profile:02x}{compatibility:02x}{level:02x}");
     let version = presentation.version();
+
+    let codecs = video
+        .into_iter()
+        .chain(audio)
+        .map(|track| track.codec.codecs())
+        .collect::<Vec<_>>();
+    if codecs.is_empty() {
+        return Err(Error::InvalidMedia("asset contains no tracks".to_owned()));
+    }
+
     let mut playlist = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
-    let audio_attribute = if audio.is_some() {
-        codecs.push_str(",mp4a.40.2");
+    // Audio joins the variant as a rendition group whenever there is something to choose
+    // between: video plus audio, or several audio tracks. A lone audio track is just the variant.
+    let audio_group = audio.is_some() && (video.is_some() || audio_tracks.len() > 1);
+    if audio_group {
         for (index, track) in audio_tracks.iter().enumerate() {
             write_audio_rendition(&mut playlist, track, index, version);
         }
-        ",AUDIO=\"audio\""
-    } else {
-        ""
-    };
-    let video_bandwidth = presentation.bandwidth(video)?;
-    let audio_bandwidth = audio
-        .map(|track| presentation.bandwidth(track))
-        .transpose()?;
-    let bandwidth = video_bandwidth
-        .peak
-        .checked_add(audio_bandwidth.map_or(0, |audio| audio.peak))
-        .ok_or_else(|| Error::InvalidMedia("bandwidth overflow".to_owned()))?;
-    let average_bandwidth = video_bandwidth
-        .average
-        .checked_add(audio_bandwidth.map_or(0, |audio| audio.average))
-        .ok_or_else(|| Error::InvalidMedia("bandwidth overflow".to_owned()))?;
+    }
+
+    let mut bandwidth = 0u64;
+    let mut average_bandwidth = 0u64;
+    for track in video.into_iter().chain(audio) {
+        let track_bandwidth = presentation.bandwidth(track)?;
+        bandwidth = bandwidth
+            .checked_add(track_bandwidth.peak)
+            .ok_or_else(|| Error::InvalidMedia("bandwidth overflow".to_owned()))?;
+        average_bandwidth = average_bandwidth
+            .checked_add(track_bandwidth.average)
+            .ok_or_else(|| Error::InvalidMedia("bandwidth overflow".to_owned()))?;
+    }
+    let resolution = video
+        .and_then(|track| track.codec.dimensions())
+        .map_or_else(String::new, |(width, height)| {
+            format!(",RESOLUTION={width}x{height}")
+        });
+    let audio_attribute = if audio_group { ",AUDIO=\"audio\"" } else { "" };
     writeln!(
         playlist,
-        "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={average_bandwidth},CODECS=\"{codecs}\",RESOLUTION={width}x{height}{audio_attribute}"
+        "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={average_bandwidth},CODECS=\"{}\"{resolution}{audio_attribute}",
+        codecs.join(",")
     )
     .expect("writing to a String cannot fail");
-    writeln!(playlist, "video/index.m3u8?v={version}").expect("writing to a String cannot fail");
+    let variant = video.or(audio).map_or(TrackKey::VIDEO, |track| track.key);
+    writeln!(playlist, "{variant}/index.m3u8?v={version}")
+        .expect("writing to a String cannot fail");
     Ok(playlist)
 }
 
@@ -167,6 +173,62 @@ mod tests {
         assert!(renditions[1].contains("DEFAULT=NO"));
         assert!(renditions[1].contains(&format!("URI=\"audio-2/index.m3u8?v={version}\"")));
         assert_eq!(playlist.matches("#EXT-X-STREAM-INF").count(), 1);
+    }
+
+    #[test]
+    fn the_master_lists_the_codecs_of_the_formats_it_carries() {
+        for (name, codecs) in [
+            ("vp9-opus.mp4", "vp09.00.11.08,opus"),
+            ("av1-aac.mp4", "av01.0.00M.08,mp4a.40.2"),
+            ("hevc-aac.mp4", "hvc1.1.6.L60.90,mp4a.40.2"),
+            ("h264-ac3.mp4", "avc1.64000d,ac-3"),
+            ("h264-eac3.mp4", "avc1.64000d,ec-3"),
+            ("h264-flac.mp4", "avc1.64000d,fLaC"),
+        ] {
+            let loaded = Loaded::fixture(name);
+
+            let playlist =
+                master_playlist(loaded.presentation()).expect("master playlist should render");
+
+            assert!(
+                playlist.contains(&format!("CODECS=\"{codecs}\"")),
+                "{name}: {playlist}"
+            );
+            assert!(playlist.contains("RESOLUTION=320x180"), "{name}");
+        }
+    }
+
+    #[test]
+    fn an_audio_only_asset_is_one_audio_variant() {
+        let loaded = Loaded::fixture("aac-only.m4a");
+
+        let playlist =
+            master_playlist(loaded.presentation()).expect("master playlist should render");
+
+        assert!(playlist.contains("CODECS=\"mp4a.40.2\""), "{playlist}");
+        assert!(!playlist.contains("RESOLUTION"), "{playlist}");
+        assert!(
+            !playlist.contains("EXT-X-MEDIA"),
+            "a lone track is the variant: {playlist}"
+        );
+        assert!(playlist.contains(&format!("\naudio-1/index.m3u8?v={}\n", loaded.version)));
+        let media = media_playlist(loaded.presentation(), TrackKey::audio(1)).unwrap();
+        assert_eq!(media.matches("#EXTINF:").count(), 3);
+    }
+
+    #[test]
+    fn several_audio_only_tracks_are_renditions_of_one_variant() {
+        let loaded = Loaded::fixture("aac-two-tracks-only.m4a");
+
+        let playlist =
+            master_playlist(loaded.presentation()).expect("master playlist should render");
+
+        assert_eq!(playlist.matches("#EXT-X-MEDIA").count(), 2, "{playlist}");
+        assert_eq!(playlist.matches("#EXT-X-STREAM-INF").count(), 1);
+        assert!(playlist.contains("AUDIO=\"audio\""));
+        assert!(!playlist.contains("RESOLUTION"));
+        assert!(playlist.contains("LANGUAGE=\"spa\""));
+        assert!(playlist.contains(&format!("\naudio-1/index.m3u8?v={}\n", loaded.version)));
     }
 
     #[test]

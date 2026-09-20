@@ -463,6 +463,7 @@ mod tests {
             codec: CodecConfig::Aac {
                 sample_rate: 48_000,
                 channels: 2,
+                object_type: 2,
             },
             samples,
         }

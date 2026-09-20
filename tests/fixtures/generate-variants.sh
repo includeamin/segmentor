@@ -84,4 +84,67 @@ ffmpeg_quiet \
     -use_editlist 0 -movflags +faststart -f mov \
     "$fixture_dir/h264-aac-quicktime.mov"
 
+# Codecs beyond H.264 and AAC-LC. Each carries a one-second keyframe interval so segments cut.
+h264="-c:v libx264 -pix_fmt yuv420p -preset medium -g 30 -keyint_min 30 -sc_threshold 0"
+
+ffmpeg_quiet \
+    -f lavfi -i "$video" -f lavfi -i "$tone_a" \
+    -c:v libvpx-vp9 -b:v 0 -crf 40 -g 30 -keyint_min 30 -deadline realtime -cpu-used 8 \
+    -c:a libopus -b:a 64k -strict -2 \
+    -use_editlist 0 -movflags +faststart \
+    "$fixture_dir/vp9-opus.mp4"
+
+ffmpeg_quiet \
+    -f lavfi -i "$video" -f lavfi -i "$tone_a" \
+    -c:v libsvtav1 -preset 10 -g 30 \
+    -c:a aac -profile:a aac_low -b:a 96k \
+    -use_editlist 0 -movflags +faststart \
+    "$fixture_dir/av1-aac.mp4"
+
+# shellcheck disable=SC2086
+ffmpeg_quiet \
+    -f lavfi -i "$video" -f lavfi -i "$tone_a" \
+    $h264 -c:a ac3 -b:a 192k \
+    -use_editlist 0 -movflags +faststart \
+    "$fixture_dir/h264-ac3.mp4"
+
+# shellcheck disable=SC2086
+ffmpeg_quiet \
+    -f lavfi -i "$video" -f lavfi -i "$tone_a" \
+    $h264 -c:a eac3 -b:a 192k \
+    -use_editlist 0 -movflags +faststart \
+    "$fixture_dir/h264-eac3.mp4"
+
+# shellcheck disable=SC2086
+ffmpeg_quiet \
+    -f lavfi -i "$video" -f lavfi -i "$tone_a" \
+    $h264 -c:a flac -strict -2 \
+    -use_editlist 0 -movflags +faststart \
+    "$fixture_dir/h264-flac.mp4"
+
+# Audio only, with FFmpeg's default edit list for AAC priming.
+ffmpeg_quiet \
+    -f lavfi -i "$tone_a" \
+    -c:a aac -profile:a aac_low -b:a 96k \
+    -movflags +faststart \
+    "$fixture_dir/aac-only.m4a"
+
+# Two audio tracks and no video.
+ffmpeg_quiet \
+    -f lavfi -i "$tone_a" -f lavfi -i "$tone_b" \
+    -map 0:a -map 1:a \
+    -c:a aac -profile:a aac_low -b:a 96k \
+    -metadata:s:a:0 language=eng -metadata:s:a:1 language=spa \
+    -use_editlist 0 -movflags +faststart \
+    "$fixture_dir/aac-two-tracks-only.m4a"
+
+# MP3 inside MP4: a codec the packager does not support, in a sample entry (`mp4a`) that looks
+# like one it does. The rejection must name the audio object type.
+# shellcheck disable=SC2086
+ffmpeg_quiet \
+    -f lavfi -i "$video" -f lavfi -i "$tone_a" \
+    $h264 -c:a libmp3lame -b:a 128k \
+    -use_editlist 0 -movflags +faststart -f mp4 \
+    "$fixture_dir/h264-mp3.mp4"
+
 printf 'Generated variant MP4 fixtures in %s\n' "$fixture_dir"

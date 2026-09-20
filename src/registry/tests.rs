@@ -507,7 +507,7 @@ async fn unsupported_media_is_a_load_failure_not_a_gateway_error() {
     let h = harness().await;
     h.mapper
         .state
-        .set("modern", Answer::file("v1", "hevc-aac.mp4"));
+        .set("modern", Answer::file("v1", "h264-mp3.mp4"));
 
     assert_eq!(
         status(&h.app, "/hls/modern/master.m3u8").await,

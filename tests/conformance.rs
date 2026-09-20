@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 
 /// Asset ID, fixture file, and how many audio packets packaging drops from it. Only files with
 /// an edit list lose any: the encoder-padding frame before the edit starts.
-const FIXTURES: [(&str, &str, u64); 10] = [
+const FIXTURES: [(&str, &str, u64); 18] = [
     ("aac", "h264-aac.mp4", 0),
     ("moovlast", "h264-aac-moov-last.mp4", 0),
     ("videoonly", "h264-video-only.mp4", 0),
@@ -46,7 +46,31 @@ const FIXTURES: [(&str, &str, u64); 10] = [
     ("twoaudio", "h264-aac-two-audio.mp4", 0),
     ("anamorphic", "h264-aac-anamorphic.mp4", 0),
     ("quicktime", "h264-aac-quicktime.mov", 0),
+    ("hevc", "hevc-aac.mp4", 0),
+    ("vp9opus", "vp9-opus.mp4", 0),
+    ("av1", "av1-aac.mp4", 0),
+    ("ac3", "h264-ac3.mp4", 0),
+    ("eac3", "h264-eac3.mp4", 0),
+    ("flac", "h264-flac.mp4", 0),
+    ("audioonly", "aac-only.m4a", 1),
+    ("audiotwo", "aac-two-tracks-only.m4a", 0),
 ];
+
+/// The video codec prefix and audio codec each fixture's master playlist must declare; `None`
+/// means the fixture has no such track.
+fn expected_codecs(asset: &str) -> (Option<&'static str>, Option<&'static str>) {
+    match asset {
+        "hevc" => (Some("hvc1."), Some("mp4a.40.2")),
+        "vp9opus" => (Some("vp09."), Some("opus")),
+        "av1" => (Some("av01."), Some("mp4a.40.2")),
+        "ac3" => (Some("avc1."), Some("ac-3")),
+        "eac3" => (Some("avc1."), Some("ec-3")),
+        "flac" => (Some("avc1."), Some("fLaC")),
+        "audioonly" | "audiotwo" => (None, Some("mp4a.40.2")),
+        "videoonly" | "variable" => (Some("avc1."), None),
+        _ => (Some("avc1."), Some("mp4a.40.2")),
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Server harness
@@ -505,20 +529,40 @@ fn audit_hls(server: &Server, asset: &str) -> HashMap<String, Audited> {
         bandwidth >= average,
         "BANDWIDTH is a peak and must not be below the average"
     );
-    assert!(
-        stream_attributes["CODECS"].starts_with("avc1."),
-        "video codec string"
-    );
-    assert!(stream_attributes["RESOLUTION"].contains('x'));
+    let (video_codec, audio_codec) = expected_codecs(asset);
+    let codecs = &stream_attributes["CODECS"];
+    match video_codec {
+        Some(prefix) => {
+            assert!(
+                codecs.starts_with(prefix),
+                "{asset}: video codec string in {codecs}"
+            );
+            assert!(stream_attributes["RESOLUTION"].contains('x'));
+        }
+        None => assert!(
+            !stream_attributes.contains_key("RESOLUTION"),
+            "{asset}: audio-only variants have no resolution"
+        ),
+    }
+    if let Some(audio) = audio_codec {
+        assert!(
+            codecs.contains(audio),
+            "{asset}: {audio} missing from {codecs}"
+        );
+    }
 
-    let mut targets = vec![("video".to_owned(), lines[stream + 1].to_owned())];
+    // The variant's own URI names its track: `video`, or the audio track of an audio-only asset.
+    let variant = lines[stream + 1];
+    let mut targets = vec![(
+        variant.split('/').next().unwrap().to_owned(),
+        variant.to_owned(),
+    )];
     let media_lines = lines
         .iter()
         .filter(|line| line.starts_with("#EXT-X-MEDIA"))
         .collect::<Vec<_>>();
     match stream_attributes.get("AUDIO") {
         Some(group) => {
-            assert!(stream_attributes["CODECS"].contains("mp4a.40.2"));
             assert!(
                 !media_lines.is_empty(),
                 "AUDIO names a group with no renditions"
@@ -534,7 +578,10 @@ fn audit_hls(server: &Server, asset: &str) -> HashMap<String, Audited> {
                 defaults += usize::from(media["DEFAULT"] == "YES");
                 // The track's name in its URL is also its DASH Representation ID.
                 let name = media["URI"].split('/').next().unwrap().to_owned();
-                targets.push((name, media["URI"].clone()));
+                // An audio-only variant may point at its default rendition's own playlist.
+                if !targets.iter().any(|(existing, _)| *existing == name) {
+                    targets.push((name, media["URI"].clone()));
+                }
             }
             assert_eq!(defaults, 1, "exactly one rendition is the default");
         }
@@ -673,7 +720,7 @@ fn audit_dash(server: &Server, asset: &str) -> HashMap<String, Audited> {
         if tag.name == "Representation" {
             representation = Some(tag);
             assert!(tag.attributes["bandwidth"].parse::<u64>().unwrap() > 0);
-            assert!(tag.attributes["codecs"].len() > 4);
+            assert!(!tag.attributes["codecs"].is_empty());
         }
         if tag.name == "SegmentTemplate" {
             let rep = representation.expect("SegmentTemplate must sit inside a Representation");
@@ -912,8 +959,12 @@ fn probe_frames(path: &Path, selector: &str) -> u64 {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // Some codecs (AC-3) make FFprobe append an empty field after the count.
     String::from_utf8_lossy(&output.stdout)
         .trim()
+        .split(',')
+        .next()
+        .unwrap_or_default()
         .parse()
         .unwrap_or_else(|_| panic!("unexpected ffprobe output for {}", path.display()))
 }
@@ -970,7 +1021,7 @@ fn audio_and_video_stay_in_sync_through_edit_lists() {
     }
     let server = start_server();
     for (asset, file, _) in FIXTURES {
-        if ["videoonly", "variable", "twoaudio"].contains(&asset) {
+        if ["videoonly", "variable", "twoaudio", "audioonly", "audiotwo"].contains(&asset) {
             continue;
         }
         let (source_video, source_audio) = start_times(

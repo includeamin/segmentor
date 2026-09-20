@@ -73,7 +73,7 @@ The remaining steps are synchronous CPU work in `parse_metadata`, run on the blo
    - `dinf/dref` must contain exactly one self-contained `url ` entry (no external data references);
    - `stsd` must contain exactly one entry, and it must be `avc1` or `mp4a`; `encv`/`enca` (encrypted) are rejected, an unknown video entry with at most one sample is skipped as a still image, and anything else is rejected naming the entry.
 4. **Hash `moov`** with SHA-256.
-5. **`parse_track`** per packaged track: `mdhd` (timescale, duration, language), then the codec configuration from the sample entry (`mp4/codec.rs`: `avcC` for H.264, which needs an SPS and PPS; `esds` for AAC, which must be AAC-LC, including QuickTime's versioned entries with a `wave` box), then the sample tables.
+5. **`parse_track`** per packaged track: `mdhd` (timescale, duration, language), then the codec configuration from the sample entry (`mp4/codec.rs`). Only what the manifest needs is read: `avcC`, `hvcC`, `vpcC`, or `av1C` for the codec string and dimensions; `esds` for AAC, whose audio object type must be LC, SBR, or SBR with parametric stereo (QuickTime's versioned entries with a `wave` box included); `dac3`, `dec3`, `dOps`, or `dfLa` for AC-3, E-AC-3, Opus, and FLAC. Then the sample tables.
 6. **Sample tables** (`mp4/tables.rs`). `stts`, `ctts` (signed in version 1), `stss`, `stsc`, `stsz` or the compact `stz2`, and `stco` or `co64` are parsed with every entry count checked against its box before allocating. `expand_samples` then checks the sample count against `limits.max_samples_per_track` and expands the tables through `sample_sizes`, `sample_offsets`, `sample_times`, and `composition_offsets`. `sample_times` and `composition_offsets` bound each run-length entry against the sample count *before* expanding it, so a crafted `stts` claiming billions of samples fails immediately. Every sample's byte range must end inside the source.
 7. **Edit lists** (`mp4/edit.rs`). Each track's edit list is read: one edit, optionally after one empty edit, is applied by shifting every track forward by one shared offset so no decode time goes negative (see [TDD 0004](../technical-design/0004-broader-mp4-input-support.md)); other shapes are rejected. Skipped tracks are reported in `MediaIndex::skipped_tracks`. Tracks are numbered in file order: one video track, then `audio-1`, `audio-2`, and so on.
 
@@ -89,10 +89,10 @@ The result carries the `moov` hash in its `SourceIdentity`. `PackagedAsset::vers
 
 `plan(index, target_duration_ms, limits) -> SegmentPlan`.
 
-Rules: exactly one video track and at most one audio track, and the first video sample must be a keyframe.
+Rules: at most one video track, at least one track of some kind, and the first sample of the reference track must be a sync sample. The reference track is the video track, or with no video the first audio track.
 
-- **Video boundaries** (`video_boundaries`): start at sample 0. From each boundary, the next boundary is the first *sync* sample whose decode time is at least `boundary_time + target`. The target duration is a goal, not a guarantee; segments are exactly as long as keyframe spacing allows, and the last one takes whatever remains.
-- **Audio follows video** (`audio_segment`): convert the video segment's start and end times to the audio timescale (`rescale`) and take every audio sample whose decode time falls in that window using binary search (`partition_point`). The final segment takes all remaining audio.
+- **Reference boundaries** (`reference_boundaries`): start at sample 0. From each boundary, the next boundary is the first *sync* sample whose decode time is at least `boundary_time + target`. The target duration is a goal, not a guarantee; segments are exactly as long as keyframe spacing allows, and the last one takes whatever remains.
+- **Audio follows the reference** (`audio_segment`): convert the reference segment's start and end times to the audio timescale (`rescale`) and take every audio sample whose decode time falls in that window using binary search (`partition_point`). The final segment takes all remaining audio.
 - **Durations are real.** A segment's duration is computed from actual sample decode times, so playlists report true values.
 - Each segment is checked against `limits.max_samples_per_segment`.
 

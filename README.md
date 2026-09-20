@@ -26,7 +26,7 @@ make fuzz
 
 ## Packaging prototype
 
-The first implementation slice parses a local H.264/AAC MP4, creates keyframe-aligned segment plans, and writes separate fragmented MP4 audio and video tracks:
+The packager parses a local MP4, creates keyframe-aligned segment plans, and writes separate fragmented MP4 audio and video tracks:
 
 ```sh
 cargo run -- package \
@@ -35,6 +35,20 @@ cargo run -- package \
 ```
 
 Regenerate the synthetic parser fixture and its FFprobe packet manifest with `make fixtures`. FFmpeg is used only for fixture generation and output validation, not by the application.
+
+## Supported input
+
+Progressive MP4, M4A, and QuickTime `.mov` files, with `moov` first or last. Nothing is decoded or re-encoded, so the codecs must already suit the protocol:
+
+| | Supported |
+| --- | --- |
+| Video | H.264, HEVC (`hvc1`/`hev1`), VP9, AV1 |
+| Audio | AAC-LC, HE-AAC and HE-AACv2 (explicit signaling), AC-3, E-AC-3, Opus, FLAC |
+| Layout | one video track and any number of audio tracks, or audio only; edit lists of one edit, optionally after one empty edit |
+| Skipped | tracks that are not audio or video (timecode, metadata, subtitles) |
+| Rejected | fragmented MP4, encrypted media, external data references, more than one sample description per track, other codecs (each error names what was found) |
+
+Whether a player can decode a codec is a separate question: HEVC and the Dolby codecs need Safari or a platform decoder, for instance. See [TDD 0004](docs/technical-design/0004-broader-mp4-input-support.md) for what was verified where.
 
 ## HLS service
 
