@@ -3,7 +3,7 @@
 CARGO ?= cargo
 MDBOOK ?= mdbook
 
-.PHONY: bench test-scripts bench-enforce conformance book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve site test
+.PHONY: bench test-scripts bench-enforce conformance book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve demo site test
 
 help: ## Show the available targets
 	@printf '%s\n' \
@@ -28,6 +28,7 @@ help: ## Show the available targets
 		'install-doc-tools Install mdBook and Mermaid support' \
 		'lint       Run Clippy with warnings denied' \
 		'serve      Run the example HLS service' \
+		'demo       Serve the web player demo on http://127.0.0.1:8080' \
 		'site       Build mdBook with rustdoc under /api' \
 		'test       Run unit and integration tests'
 
@@ -97,6 +98,9 @@ install-doc-tools: ## Install mdBook and Mermaid support
 
 serve: ## Run the example HLS service
 	$(CARGO) run -- serve --config vod.example.toml
+
+demo: ## Serve the web player demo on http://127.0.0.1:8080
+	python3 -m http.server 8080 --bind 127.0.0.1 --directory demo
 
 ci: fmt-check check lint test test-scripts fuzz-check doc ## Run every CI check
 

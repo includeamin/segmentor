@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vod-module-rs demo</title>
+<style>
+  :root { --bg:#0f1115; --panel:#181b22; --line:#2a2f3a; --fg:#e6e8ec; --dim:#8b93a3; --acc:#4cc2ff; --ok:#4cd98a; --warn:#ffb84c; --bad:#ff5c6c; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.4 system-ui,sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:10px; align-items:end; padding:14px 16px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0 12px 0 0; }
+  label { display:flex; flex-direction:column; gap:3px; color:var(--dim); font-size:12px; }
+  input, select, button { background:var(--panel); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 8px; font:inherit; }
+  button { cursor:pointer; background:var(--acc); color:#04121b; border:0; font-weight:600; }
+  main { display:grid; grid-template-columns:minmax(0,3fr) minmax(0,2fr); gap:14px; padding:14px 16px; }
+  @media (max-width:1000px) { main { grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; }
+  .panel h2 { margin:0 0 10px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); }
+  video { width:100%; background:#000; border-radius:6px; aspect-ratio:16/9; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:8px; }
+  .tile { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px; }
+  .tile .k { color:var(--dim); font-size:11px; }
+  .tile .v { font-size:18px; font-variant-numeric:tabular-nums; }
+  table { width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
+  th, td { text-align:left; padding:3px 6px; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:500; }
+  td.n, th.n { text-align:right; }
+  canvas { width:100%; height:70px; display:block; }
+  .stack { display:flex; flex-direction:column; gap:14px; }
+  #log { height:150px; overflow:auto; font:11px/1.5 ui-monospace,monospace; color:var(--dim); }
+  #status { font-size:12px; color:var(--dim); }
+  .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+</style>
+</head>
+<body>
+<header>
+  <h1>vod-module-rs demo</h1>
+  <label>Server <input id="base" size="26" value="http://127.0.0.1:3000"></label>
+  <label>Asset <input id="asset" size="12" value="sample"></label>
+  <label>Protocol
+    <select id="proto"><option value="hls">HLS</option><option value="dash">DASH</option></select>
+  </label>
+  <label>Poll (s) <input id="poll" type="number" min="0.5" step="0.5" value="1" style="width:70px"></label>
+  <button id="load">Load</button>
+  <span id="status"></span>
+</header>
+
+<main>
+  <div class="stack">
+    <div class="panel">
+      <h2>Player</h2>
+      <video id="video" controls muted loop playsinline></video>
+      <div id="diag" style="margin-top:8px;font-size:12px"></div>
+    </div>
+    <div class="panel">
+      <h2>Player stats</h2>
+      <div class="tiles" id="pstats"></div>
+    </div>
+    <div class="panel">
+      <h2>Segment log</h2>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <div class="stack">
+    <div class="panel">
+      <h2>Server <span id="health"></span></h2>
+      <div class="tiles" id="tiles"></div>
+    </div>
+    <div class="panel">
+      <h2>Requests / s</h2><canvas id="c-rps"></canvas>
+      <h2 style="margin-top:10px">Response throughput (KiB/s)</h2><canvas id="c-bps"></canvas>
+    </div>
+    <div class="panel">
+      <h2>Per route</h2>
+      <table id="routes"><thead><tr><th>Route</th><th class="n">Reqs</th><th class="n">Errors</th><th class="n">Avg ms</th><th class="n">p95 ms</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="panel">
+      <h2>Resolver &amp; cache</h2>
+      <table id="events"><tbody></tbody></table>
+    </div>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<script src="https://cdn.jsdelivr.net/npm/dashjs@4/dist/dash.all.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video');
+let hls = null, dash = null, pollTimer = null, prev = null;
+const frag = { count: 0, bytes: 0, lastMs: 0 };
+const series = { rps: [], bps: [] };
+
+const base = () => $('base').value.replace(/\/+$/, '');
+const log = msg => {
+  const el = $('log');
+  el.insertAdjacentHTML('beforeend', `<div>${new Date().toLocaleTimeString()}  ${msg}</div>`);
+  el.scrollTop = el.scrollHeight;
+};
+const fmtBytes = n => n >= 1073741824 ? (n/1073741824).toFixed(2)+' GiB' : n >= 1048576 ? (n/1048576).toFixed(1)+' MiB' : n >= 1024 ? (n/1024).toFixed(1)+' KiB' : n+' B';
+const tile = (k, v, cls='') => `<div class="tile"><div class="k">${k}</div><div class="v ${cls}">${v}</div></div>`;
+
+// ---------- player ----------
+function teardown() {
+  if (hls) { hls.destroy(); hls = null; }
+  if (dash) { dash.reset(); dash = null; }
+  video.removeAttribute('src'); video.load();
+  frag.count = frag.bytes = 0;
+}
+
+function diagnose() {
+  const problems = [];
+  if (typeof Hls === 'undefined') problems.push('hls.js failed to load from the CDN (offline or blocked?)');
+  if (typeof dashjs === 'undefined') problems.push('dash.js failed to load from the CDN (offline or blocked?)');
+  const mse = window.MediaSource || window.ManagedMediaSource;
+  if (!mse) problems.push('this browser has no Media Source Extensions');
+  else if (!mse.isTypeSupported('video/mp4; codecs="avc1.64000d"')) problems.push('this browser cannot decode H.264 (install a build with proprietary codecs, or use Firefox)');
+  $('diag').innerHTML = problems.map(p => `<div class="bad">⚠ ${p}</div>`).join('');
+  return problems.length === 0;
+}
+for (const ev of ['error', 'ended', 'stalled', 'waiting', 'playing'])
+  video.addEventListener(ev, () => log(`<span class="${ev === 'error' ? 'bad' : ''}">video ${ev}${video.error ? ': ' + video.error.message : ''}</span>`));
+
+function load() {
+  teardown();
+  if (!diagnose()) log('<span class="bad">cannot start, see warnings under the player</span>');
+  $('log').innerHTML = '';
+  const asset = encodeURIComponent($('asset').value);
+  if ($('proto').value === 'hls') {
+    const url = `${base()}/hls/${asset}/master.m3u8`;
+    log('HLS ' + url);
+    if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+      hls = new Hls({ debug: false });
+      hls.on(Hls.Events.FRAG_LOADED, (_, d) => {
+        const s = d.frag.stats, ms = Math.round(s.loading.end - s.loading.start);
+        frag.count++; frag.bytes += s.total; frag.lastMs = ms;
+        log(`${d.frag.type} #${d.frag.sn}  ${fmtBytes(s.total)}  ${ms} ms`);
+      });
+      hls.on(Hls.Events.ERROR, (_, d) => log(`<span class="bad">error ${d.type}/${d.details}${d.fatal ? ' (fatal)' : ''}</span>`));
+      hls.loadSource(url);
+      hls.attachMedia(video);
+    } else {
+      video.src = url; // Safari native HLS
+    }
+  } else {
+    const url = `${base()}/dash/${asset}/manifest.mpd`;
+    log('DASH ' + url);
+    if (typeof dashjs === 'undefined') return;
+    dash = dashjs.MediaPlayer().create();
+    dash.on('fragmentLoadingCompleted', e => {
+      const r = e.request;
+      frag.count++; frag.bytes += r.bytesTotal || 0;
+      log(`${r.mediaType} #${r.index}  ${fmtBytes(r.bytesTotal || 0)}`);
+    });
+    dash.on('error', e => log(`<span class="bad">error ${JSON.stringify(e.error && e.error.message)}</span>`));
+    dash.initialize(video, url, true);
+  }
+  video.play().catch(() => {});
+}
+
+function renderPlayerStats() {
+  const b = video.buffered, t = video.currentTime;
+  let ahead = 0;
+  for (let i = 0; i < b.length; i++) if (b.start(i) <= t && t <= b.end(i)) ahead = b.end(i) - t;
+  const q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : {};
+  const bw = hls && hls.bandwidthEstimate ? (hls.bandwidthEstimate / 1e6).toFixed(1) + ' Mbps'
+           : dash ? Math.round(dash.getAverageThroughput('video') || 0) + ' kbps' : '–';
+  $('pstats').innerHTML =
+    tile('Position', t.toFixed(1) + ' s') +
+    tile('Duration', isFinite(video.duration) ? video.duration.toFixed(1) + ' s' : '–') +
+    tile('Buffer ahead', ahead.toFixed(1) + ' s', ahead < 1 && !video.paused ? 'warn' : '') +
+    tile('Resolution', video.videoWidth ? `${video.videoWidth}×${video.videoHeight}` : '–') +
+    tile('Dropped frames', q.droppedVideoFrames ?? '–', q.droppedVideoFrames ? 'warn' : '') +
+    tile('Bandwidth est.', bw) +
+    tile('Segments', frag.count) +
+    tile('Segment bytes', fmtBytes(frag.bytes)) +
+    tile('Last segment', frag.lastMs ? frag.lastMs + ' ms' : '–');
+}
+setInterval(renderPlayerStats, 500);
+
+// ---------- metrics ----------
+function parseProm(text) {
+  const out = [];
+  for (const line of text.split('\n')) {
+    if (!line || line[0] === '#') continue;
+    const m = line.match(/^([a-zA-Z_:][\w:]*)(?:\{([^}]*)\})?\s+(\S+)$/);
+    if (!m) continue;
+    const labels = {};
+    if (m[2]) for (const p of m[2].matchAll(/(\w+)="([^"]*)"/g)) labels[p[1]] = p[2];
+    out.push({ name: m[1], labels, value: parseFloat(m[3]) });
+  }
+  return out;
+}
+const sum = (s, name, f = () => true) => s.filter(x => x.name === name && f(x.labels)).reduce((a, x) => a + x.value, 0);
+const one = (s, name) => (s.find(x => x.name === name) || { value: 0 }).value;
+
+// quantile from cumulative histogram buckets for one route (linear interpolation)
+function quantile(s, route, q) {
+  const b = s.filter(x => x.name === 'vod_http_request_duration_seconds_bucket' && x.labels.route === route)
+             .map(x => ({ le: x.labels.le === '+Inf' ? Infinity : parseFloat(x.labels.le), c: x.value }))
+             .sort((a, c) => a.le - c.le);
+  const total = b.length ? b[b.length - 1].c : 0;
+  if (!total) return 0;
+  const rank = q * total;
+  let lo = 0, prevC = 0;
+  for (const x of b) {
+    if (x.c >= rank) {
+      if (x.le === Infinity) return lo;
+      return lo + (x.le - lo) * ((rank - prevC) / Math.max(1, x.c - prevC));
+    }
+    lo = x.le; prevC = x.c;
+  }
+  return lo;
+}
+
+function spark(canvas, data, color) {
+  const dpr = devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const c = canvas.getContext('2d'); c.scale(dpr, dpr); c.clearRect(0, 0, w, h);
+  if (data.length < 2) return;
+  const max = Math.max(...data, 1e-9);
+  c.strokeStyle = color; c.lineWidth = 1.5; c.beginPath();
+  data.forEach((v, i) => { const x = i / (data.length - 1) * w, y = h - 4 - (v / max) * (h - 12); i ? c.lineTo(x, y) : c.moveTo(x, y); });
+  c.stroke();
+  c.fillStyle = '#8b93a3'; c.font = '10px system-ui'; c.fillText('max ' + max.toFixed(1), 4, 10);
+}
+
+async function poll() {
+  const interval = Math.max(0.5, parseFloat($('poll').value) || 1);
+  try {
+    const [mres, hres] = await Promise.all([fetch(base() + '/metrics'), fetch(base() + '/ready').catch(() => null)]);
+    const s = parseProm(await mres.text()), now = performance.now();
+    $('health').innerHTML = hres && hres.ok ? '<span class="ok">● ready</span>' : '<span class="bad">● not ready</span>';
+    $('status').textContent = '';
+
+    const reqs = sum(s, 'vod_http_requests_total', l => l.route !== '/metrics');
+    const bytes = one(s, 'vod_http_response_bytes_total');
+    if (prev) {
+      const dt = (now - prev.t) / 1000;
+      series.rps.push(Math.max(0, (reqs - prev.reqs) / dt));
+      series.bps.push(Math.max(0, (bytes - prev.bytes) / dt / 1024));
+      for (const k of ['rps', 'bps']) if (series[k].length > 120) series[k].shift();
+    }
+    prev = { t: now, reqs, bytes };
+    spark($('c-rps'), series.rps, '#4cc2ff'); spark($('c-bps'), series.bps, '#4cd98a');
+
+    const errors = sum(s, 'vod_http_requests_total', l => +l.status >= 400 || l.status === 'other');
+    $('tiles').innerHTML =
+      tile('Requests', reqs) +
+      tile('Errors (4xx/5xx)', errors, errors ? 'warn' : '') +
+      tile('In flight', one(s, 'vod_http_requests_in_flight')) +
+      tile('Connections', one(s, 'vod_http_connections_open')) +
+      tile('Response bytes', fmtBytes(one(s, 'vod_http_response_bytes_total'))) +
+      tile('Source read', fmtBytes(one(s, 'vod_source_read_bytes_total'))) +
+      tile('Shed', one(s, 'vod_http_requests_shed_total'), one(s, 'vod_http_requests_shed_total') ? 'bad' : '') +
+      tile('Queue timeouts', one(s, 'vod_segment_queue_timeouts_total')) +
+      tile('Aborts (idle/client)', `${one(s, 'vod_segment_stream_aborts_idle_total')}/${one(s, 'vod_segment_stream_aborts_client_total')}`);
+
+    const routes = [...new Set(s.filter(x => x.name === 'vod_http_requests_total').map(x => x.labels.route))];
+    $('routes').tBodies[0].innerHTML = routes.map(r => {
+      const n = sum(s, 'vod_http_requests_total', l => l.route === r);
+      const e = sum(s, 'vod_http_requests_total', l => l.route === r && (+l.status >= 400 || l.status === 'other'));
+      const total = sum(s, 'vod_http_request_duration_seconds_count', l => l.route === r);
+      const avg = total ? sum(s, 'vod_http_request_duration_seconds_sum', l => l.route === r) / total * 1000 : 0;
+      return { r, n, e, avg, p95: quantile(s, r, 0.95) * 1000 };
+    }).filter(x => x.n).sort((a, b) => b.n - a.n).map(x =>
+      `<tr><td>${x.r}</td><td class="n">${x.n}</td><td class="n ${x.e ? 'bad' : ''}">${x.e}</td><td class="n">${x.avg.toFixed(2)}</td><td class="n">${x.p95.toFixed(1)}</td></tr>`).join('');
+
+    const ev = s.filter(x => x.name === 'vod_resolver_requests_total' || x.name === 'vod_resolution_cache_events_total');
+    $('events').tBodies[0].innerHTML = ev.map(x =>
+      `<tr><td>${x.name.replace('vod_', '').replace('_total', '')}: ${x.labels.outcome || x.labels.event}</td><td class="n">${x.value}</td></tr>`).join('');
+  } catch (e) {
+    $('health').innerHTML = '<span class="bad">● unreachable</span>';
+    $('status').textContent = 'metrics: ' + e.message;
+  }
+  pollTimer = setTimeout(poll, interval * 1000);
+}
+
+$('load').onclick = () => { load(); clearTimeout(pollTimer); prev = null; poll(); };
+load(); poll();
+</script>
+</body>
+</html>
