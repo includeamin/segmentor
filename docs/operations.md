@@ -91,7 +91,7 @@ Behavior worth knowing before you run it:
 
 ### Remote media
 
-A mapper can return `http` locations, in which case the server reads the media from that origin with ranged requests. It reads only the headers and `moov` metadata to load an asset, then fetches segment bytes as they are requested. Because a mapper controls where the server connects, `[remote_media]` is a security boundary:
+A mapper can return `http` locations, in which case the server reads the media from that origin with ranged requests. It reads only the headers and metadata to load an asset (`moov`, plus every `moof` of a fragmented file), then fetches segment bytes as they are requested. A fragmented file costs about one request per fragment, one after another, because each box's offset comes from the one before it; `limits.max_fragments` (default 20,000) bounds that, and a file that exceeds it fails to load with a message naming the limit. Lower it for slow remote origins. Because a mapper controls where the server connects, `[remote_media]` is a security boundary:
 
 - `allowed_hosts` must list every origin host; an empty list refuses all remote locations.
 - Locations must be `https` (`allow_insecure_http` is for development), carry no credentials, and are never redirected.

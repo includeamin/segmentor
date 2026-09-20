@@ -57,13 +57,87 @@ ffmpeg_quiet \
     -use_editlist 0 -movflags +faststart \
     "$fixture_dir/hevc-aac.mp4"
 
-# Already-fragmented input, which the packager rejects with a specific message.
-ffmpeg_quiet \
-    -f lavfi -i "$video" -f lavfi -i "$tone_a" \
-    -c:v libx264 -pix_fmt yuv420p -preset medium -g 30 -keyint_min 30 -sc_threshold 0 \
-    -c:a aac -profile:a aac_low -b:a 96k \
+# Fragmented input, remuxed with `-c copy` from the progressive fixture so that it holds exactly
+# the same packets and a test can compare the two sample by sample. Each variant is a layout a
+# real writer produces. This needs h264-aac.mp4, which generate.sh writes.
+frag_source="$fixture_dir/h264-aac.mp4"
+
+# Both tracks in each `moof`, base offsets relative to the `moof`.
+ffmpeg_quiet -i "$frag_source" -c copy \
     -movflags +frag_keyframe+empty_moov+default_base_moof \
     "$fixture_dir/h264-aac-fragmented.mp4"
+
+# No `default-base-is-moof`, so every `tfhd` carries an explicit base data offset.
+ffmpeg_quiet -i "$frag_source" -c copy \
+    -movflags +frag_keyframe+empty_moov \
+    "$fixture_dir/h264-aac-fragmented-legacy.mp4"
+
+# One track per `moof`, as CMAF writers produce.
+ffmpeg_quiet -i "$frag_source" -c copy \
+    -movflags +cmaf+separate_moof \
+    "$fixture_dir/h264-aac-fragmented-cmaf.mp4"
+
+# A `sidx` that a reader could use and must not need.
+ffmpeg_quiet -i "$frag_source" -c copy \
+    -movflags +frag_keyframe+empty_moov+default_base_moof+global_sidx \
+    "$fixture_dir/h264-aac-fragmented-sidx.mp4"
+
+# Version 1 `trun` boxes, whose composition offsets are signed.
+ffmpeg_quiet -i "$frag_source" -c copy \
+    -movflags +frag_keyframe+empty_moov+default_base_moof+negative_cts_offsets \
+    "$fixture_dir/h264-aac-fragmented-negative-cts.mp4"
+
+# A timeline that starts at 100 seconds, as recordings stamped with stream time do. FFmpeg
+# normalises the start to zero, so this adds 100 seconds to every `tfdt` in the plain fragmented
+# fixture, using each track's own timescale.
+python3 - "$fixture_dir/h264-aac-fragmented.mp4" "$fixture_dir/h264-aac-fragmented-offset.mp4" <<'EOF'
+import struct
+import sys
+
+
+def boxes(data, start, end):
+    while start + 8 <= end:
+        size, name = struct.unpack(">I4s", data[start:start + 8])
+        yield name, start, start + size
+        start += size
+
+
+source, target = sys.argv[1:3]
+data = bytearray(open(source, "rb").read())
+timescales = {}
+for name, start, end in boxes(data, 0, len(data)):
+    if name != b"moov":
+        continue
+    for name, start, end in boxes(data, start + 8, end):
+        if name != b"trak":
+            continue
+        track_id = timescale = None
+        for name, inner, inner_end in boxes(data, start + 8, end):
+            if name == b"tkhd":
+                track_id = struct.unpack(">I", data[inner + 20:inner + 24])[0]
+            if name == b"mdia":
+                for name, deep, deep_end in boxes(data, inner + 8, inner_end):
+                    if name == b"mdhd":
+                        timescale = struct.unpack(">I", data[deep + 20:deep + 24])[0]
+        timescales[track_id] = timescale
+for name, start, end in boxes(data, 0, len(data)):
+    if name != b"moof":
+        continue
+    for name, traf, traf_end in boxes(data, start + 8, end):
+        if name != b"traf":
+            continue
+        track_id = base = None
+        for name, inner, inner_end in boxes(data, traf + 8, traf_end):
+            if name == b"tfhd":
+                track_id = struct.unpack(">I", data[inner + 12:inner + 16])[0]
+            if name == b"tfdt":
+                wide = data[inner + 8] == 1
+                base = inner + 12
+        width, code = (8, ">Q") if wide else (4, ">I")
+        (old,) = struct.unpack(code, data[base:base + width])
+        data[base:base + width] = struct.pack(code, old + 100 * timescales[track_id])
+open(target, "wb").write(data)
+EOF
 
 # Non-square pixels and tagged colour: the sample entry carries `pasp` and `colr`, which the
 # init segment must keep or players render the wrong aspect and colours.

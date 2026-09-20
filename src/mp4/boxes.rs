@@ -161,6 +161,16 @@ impl<'a> Reader<'a> {
         Ok(version)
     }
 
+    /// Reads the version and the 24-bit flags that open a "full box".
+    pub(crate) fn full_box_flags(&mut self) -> Result<(u8, u32)> {
+        let version = self.u8()?;
+        let flags = self.take(3)?;
+        Ok((
+            version,
+            u32::from_be_bytes([0, flags[0], flags[1], flags[2]]),
+        ))
+    }
+
     /// Reads a table's entry count and checks that many `entry_size`-byte entries can exist in
     /// what is left, so the count can be trusted for allocation.
     pub(crate) fn entry_count(&mut self, entry_size: usize) -> Result<usize> {

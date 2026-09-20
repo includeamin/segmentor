@@ -1,6 +1,6 @@
 # TDD 0004: Broader MP4 input support
 
-- Status: Accepted; Phases 1 to 3 implemented
+- Status: Accepted; Phases 1 to 4 implemented
 - Created: 2026-09-20
 - Updated: 2026-09-20
 - Related ADRs: None yet. Two are proposed in [Rollout](#rollout): edit-list timeline mapping and verbatim sample-entry pass-through
@@ -17,7 +17,7 @@
 | 4. Verbatim sample-entry pass-through | Implemented | `stsd` is copied byte for byte; `pasp` and `colr` now reach players |
 | 5. In-tree container parser | Implemented | `mp4/boxes.rs`, `tables.rs`, `codec.rs`; the `mp4` crate is a dev-dependency only, used to cross-check |
 | 6. New codecs, audio-only | Implemented | HEVC, VP9, AV1, HE-AAC, AC-3, E-AC-3, Opus, FLAC, and audio-only assets; see the verification table below |
-| 7. Fragmented MP4 input | Pending (Phase 4) | |
+| 7. Fragmented MP4 input | Implemented | Designed and delivered in [TDD 0005](0005-fragmented-mp4-input.md) |
 | Fixed `ftyp` brands | Implemented | `iso6` major, `iso6` and `mp41` compatible |
 
 The [support matrix](#current-support-matrix) below records the state *before* Phase 1, which is what the design was written against. Since then the rows for edit lists, two audio tracks, timecode and metadata tracks, fragmented input's error message, QuickTime `.mov`, and the dropped `pasp` box have changed; the other rows still hold.
@@ -296,9 +296,9 @@ An `.m4a` or an MP4 with no video track becomes a valid asset. The change is con
 - HLS master playlists omit `RESOLUTION` and list only the audio codec. DASH emits a single audio `AdaptationSet`.
 - The current "exactly one video track" rule becomes "one video track, or none if there is at least one audio track".
 
-### 7. Fragmented MP4 input (later)
+### 7. Fragmented MP4 input
 
-Already-fragmented sources (recorders, CMAF output) cannot be indexed from `moov` alone. The index has to come from `moof`/`traf`/`trun` boxes, located through `sidx` or `mfra` when present, otherwise by scanning. This is the one item that changes the metadata-only read strategy in [TDD 0001](0001-on-demand-mp4-packaging-core.md), so it needs its own design. Until then the accurate error from item 2 tells the operator to re-mux.
+Designed and delivered separately in [TDD 0005](0005-fragmented-mp4-input.md), because it changes the metadata-only read strategy of [TDD 0001](0001-on-demand-mp4-packaging-core.md).
 
 ### What stays rejected
 

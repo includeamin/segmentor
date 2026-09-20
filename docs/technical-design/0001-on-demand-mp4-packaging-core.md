@@ -91,7 +91,7 @@ Files with unsupported edit lists, malformed timing tables, external data refere
 
 | Input condition | Required behavior | Status |
 | --- | --- | --- |
-| Fragmented MP4 input | Reject as unsupported input | Implemented |
+| Fragmented MP4 input | Index from the `moof` boxes | Implemented ([TDD 0005](0005-fragmented-mp4-input.md)) |
 | Codec other than H.264/AAC-LC | Reject as unsupported media | Implemented |
 | Missing H.264 SPS/PPS | Reject as unsupported media | Implemented |
 | More than one video track | Reject during segment planning | Implemented. Several audio tracks are supported since [TDD 0004](0004-broader-mp4-input-support.md) |

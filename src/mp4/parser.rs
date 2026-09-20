@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use sha2::{Digest, Sha256};
 
 use super::boxes::{
@@ -5,11 +7,12 @@ use super::boxes::{
 };
 use super::codec;
 use super::edit::{self, ElstEntry, TrackEdit};
+use super::fragments::{self, TrackDefaults};
 use super::tables::{expand_samples, parse_sample_tables};
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
 use crate::media::{MediaIndex, SkippedTrack, Track, TrackKey, TrackKind};
-use crate::source::{MediaSourceKind, Metadata, SourceIdentity};
+use crate::source::{Fragment, MediaSourceKind, Metadata, SourceIdentity};
 
 /// A parsed file: the sample index plus the `moov` box it was built from, which the init
 /// segment writer reuses so the file is not read again.
@@ -29,7 +32,7 @@ pub(crate) async fn parse(source: &MediaSourceKind, limits: &LimitsConfig) -> Re
             "source exceeds configured size limit".to_owned(),
         ));
     }
-    let metadata = Metadata::fetch(source, limits.max_metadata_bytes).await?;
+    let metadata = Metadata::fetch(source, limits).await?;
     let identity = source.identity().clone();
     let limits_for_parse = limits.clone();
     let (metadata, index) = tokio::task::spawn_blocking(move || {
@@ -68,6 +71,20 @@ fn parse_metadata(
         )));
     }
 
+    let source = if moov.fragmented {
+        if metadata.fragments().is_empty() {
+            return Err(invalid_media("the file is fragmented but has no fragments"));
+        }
+        TrackSource::Fragmented {
+            fragments: metadata.fragments(),
+            defaults: &moov.defaults,
+        }
+    } else if metadata.fragments().is_empty() {
+        TrackSource::Tables
+    } else {
+        return Err(invalid_media("moof boxes without an mvex box in moov"));
+    };
+
     let mut tracks = Vec::new();
     let mut edits = Vec::new();
     let mut skipped_tracks = Vec::new();
@@ -79,7 +96,8 @@ fn parse_metadata(
                 reason,
             });
         } else {
-            let (track, edit) = parse_track(raw, moov.movie_timescale, metadata.len(), limits)?;
+            let (track, edit) =
+                parse_track(raw, moov.movie_timescale, metadata.len(), limits, &source)?;
             tracks.push(track);
             edits.push(edit);
         }
@@ -94,16 +112,86 @@ fn parse_metadata(
     for ((track, edit), shift) in tracks.iter_mut().zip(edits).zip(shifts) {
         edit::apply(track, edit, shift)?;
     }
+    if moov.fragmented {
+        normalise_fragmented_timeline(&mut tracks)?;
+    }
     assign_keys(&mut tracks);
     identity.moov_sha256 = Some(moov_sha256);
 
+    let duration = if moov.movie_duration == 0 {
+        movie_duration(&tracks, moov.movie_timescale)
+    } else {
+        moov.movie_duration
+    };
     Ok(MediaIndex {
         source: identity,
         movie_timescale: moov.movie_timescale,
-        duration: moov.movie_duration,
+        duration,
         tracks,
         skipped_tracks,
     })
+}
+
+/// Moves a fragmented file's timeline to start at zero and gives each track the duration its
+/// samples add up to.
+///
+/// Fragmented files are often stamped with wall-clock or stream time, so their first decode
+/// time is far from zero, and their `mvhd`, `mdhd`, and `tkhd` durations are usually zero. The
+/// earliest first decode time across tracks becomes the origin, so the tracks keep their
+/// relative timing and every duration is unchanged. Tracks have different timescales, so the
+/// earliest is found in seconds and converted into each track's ticks, rounding down so that no
+/// track's first sample goes below zero.
+fn normalise_fragmented_timeline(tracks: &mut [Track]) -> Result<()> {
+    // The track whose first sample is earliest in seconds: a/ts_a < b/ts_b is a·ts_b < b·ts_a.
+    let Some((earliest_ticks, earliest_timescale)) = tracks
+        .iter()
+        .filter_map(|track| Some((track.samples.first()?.decode_time, track.timescale)))
+        .min_by(|(a, ts_a), (b, ts_b)| {
+            (u128::from(*a) * u128::from(*ts_b)).cmp(&(u128::from(*b) * u128::from(*ts_a)))
+        })
+    else {
+        return Ok(());
+    };
+    for track in tracks {
+        let origin = u128::from(earliest_ticks) * u128::from(track.timescale)
+            / u128::from(earliest_timescale);
+        let origin =
+            u64::try_from(origin).map_err(|_| invalid_media("timeline origin overflow"))?;
+        for sample in &mut track.samples {
+            sample.decode_time -= origin;
+        }
+        let last = track
+            .samples
+            .last()
+            .ok_or_else(|| invalid_media("a fragmented track has no samples"))?;
+        track.duration = last
+            .decode_time
+            .checked_add(u64::from(last.duration))
+            .ok_or_else(|| invalid_media("track duration overflow"))?;
+    }
+    Ok(())
+}
+
+/// The movie duration in the movie timescale, from the longest track.
+fn movie_duration(tracks: &[Track], movie_timescale: u32) -> u64 {
+    tracks
+        .iter()
+        .map(|track| {
+            u128::from(track.duration) * u128::from(movie_timescale) / u128::from(track.timescale)
+        })
+        .max()
+        .map_or(0, |duration| u64::try_from(duration).unwrap_or(u64::MAX))
+}
+
+/// Where a track's samples come from.
+enum TrackSource<'a> {
+    /// The sample tables in `moov`.
+    Tables,
+    /// The `moof` boxes of a fragmented file, with the `trex` defaults.
+    Fragmented {
+        fragments: &'a [Fragment],
+        defaults: &'a HashMap<u32, TrackDefaults>,
+    },
 }
 
 /// Names the tracks the way URLs will: one video, then audio numbered in file order.
@@ -125,6 +213,7 @@ fn parse_track(
     movie_timescale: u32,
     source_len: u64,
     limits: &LimitsConfig,
+    source: &TrackSource<'_>,
 ) -> Result<(Track, TrackEdit)> {
     let kind = if raw.handler == *b"vide" {
         TrackKind::Video
@@ -154,7 +243,22 @@ fn parse_track(
             )));
         }
     };
-    let samples = expand_samples(&parse_sample_tables(stbl.payload)?, source_len, limits)?;
+    let samples = match source {
+        TrackSource::Tables => {
+            expand_samples(&parse_sample_tables(stbl.payload)?, source_len, limits)?
+        }
+        TrackSource::Fragmented {
+            fragments,
+            defaults,
+        } => {
+            fragments::reject_mixed(raw.id, sample_count(stbl.payload)?)?;
+            let track_defaults = defaults.get(&raw.id).copied().unwrap_or_default();
+            fragments::track_samples(fragments, raw.id, track_defaults, source_len, limits)?
+        }
+    };
+    if samples.is_empty() {
+        return Err(invalid_media(&format!("track {} has no samples", raw.id)));
+    }
     let edit = track_edit(raw, movie_timescale, header.timescale)?;
 
     Ok((
@@ -248,6 +352,10 @@ fn track_edit(raw: &RawTrack<'_>, movie_timescale: u32, track_timescale: u32) ->
 struct RawMoov<'a> {
     movie_timescale: u32,
     movie_duration: u64,
+    /// True when `moov` has an `mvex`: the samples are in `moof` boxes, not in `moov`.
+    fragmented: bool,
+    /// The `trex` defaults by track ID, empty unless fragmented.
+    defaults: HashMap<u32, TrackDefaults>,
     tracks: Vec<RawTrack<'a>>,
 }
 
@@ -266,13 +374,6 @@ enum Disposition {
     Skip(&'static str),
 }
 
-fn fragmented() -> Error {
-    Error::Unsupported(
-        "fragmented MP4 input is not supported; re-mux it to a regular MP4 with `ffmpeg -i in.mp4 -c copy out.mp4`"
-            .to_owned(),
-    )
-}
-
 /// Checks the raw `moov` structure and decides, per track, whether it is packaged.
 ///
 /// Unsupported constructs fail here with a specific message, and tracks that are not audio or
@@ -283,9 +384,10 @@ fn validate_raw_moov(moov: &[u8]) -> Result<RawMoov<'_>> {
         return Err(invalid_media("metadata range is not a moov box"));
     }
     let children = child_boxes(root.payload)?;
-    if children.iter().any(|child| child.name == *b"mvex") {
-        return Err(fragmented());
-    }
+    let defaults = match children.iter().find(|child| child.name == *b"mvex") {
+        Some(mvex) => Some(fragments::parse_defaults(mvex.payload)?),
+        None => None,
+    };
     let header = children
         .iter()
         .find(|child| child.name == *b"mvhd")
@@ -324,6 +426,8 @@ fn validate_raw_moov(moov: &[u8]) -> Result<RawMoov<'_>> {
     Ok(RawMoov {
         movie_timescale,
         movie_duration,
+        fragmented: defaults.is_some(),
+        defaults: defaults.unwrap_or_default(),
         tracks,
     })
 }
@@ -577,14 +681,138 @@ mod tests {
         assert_eq!(index.tracks[1].samples.len(), 141 + 1);
     }
 
+    /// Every fragmented fixture is a `-c copy` remux of the progressive fixture, so it must
+    /// index to the same samples: the same sizes, durations, flags, and payload bytes, in the
+    /// same places relative to one another.
     #[test]
-    fn fragmented_input_is_rejected_with_a_specific_message() {
-        let error = parse_error("h264-aac-fragmented.mp4");
+    fn a_fragmented_file_indexes_like_the_progressive_file_it_was_made_from() {
+        let progressive = parse_fixture("h264-aac.mp4");
+        let progressive_bytes = std::fs::read(fixture("h264-aac.mp4")).unwrap();
+        for name in FRAGMENTED_FIXTURES {
+            let fragmented = parse_fixture(name);
+            let fragmented_bytes = std::fs::read(fixture(name)).unwrap();
+            assert_eq!(fragmented.tracks.len(), progressive.tracks.len(), "{name}");
 
-        assert!(matches!(error, Error::Unsupported(_)), "{error}");
+            for (fragment, original) in fragmented.tracks.iter().zip(&progressive.tracks) {
+                let at = |i: usize| format!("{name} track {} sample {i}", fragment.id);
+                assert_eq!(fragment.kind, original.kind, "{name}");
+                assert_eq!(fragment.codec, original.codec, "{name}");
+                assert_eq!(fragment.samples.len(), original.samples.len(), "{name}");
+                for (i, (got, want)) in fragment.samples.iter().zip(&original.samples).enumerate() {
+                    assert_eq!(got.size, want.size, "{}: size", at(i));
+                    assert_eq!(got.duration, want.duration, "{}: duration", at(i));
+                    assert_eq!(got.is_sync, want.is_sync, "{}: sync", at(i));
+                    let range = |sample: &crate::media::Sample| {
+                        let start = usize::try_from(sample.offset).unwrap();
+                        start..start + usize::try_from(sample.size).unwrap()
+                    };
+                    assert_eq!(
+                        fragmented_bytes[range(got)],
+                        progressive_bytes[range(want)],
+                        "{}: payload",
+                        at(i)
+                    );
+                }
+            }
+        }
+    }
+
+    const FRAGMENTED_FIXTURES: [&str; 6] = [
+        "h264-aac-fragmented.mp4",
+        "h264-aac-fragmented-legacy.mp4",
+        "h264-aac-fragmented-cmaf.mp4",
+        "h264-aac-fragmented-sidx.mp4",
+        "h264-aac-fragmented-offset.mp4",
+        "h264-aac-fragmented-negative-cts.mp4",
+    ];
+
+    #[test]
+    fn a_fragmented_file_has_the_same_timing_as_its_progressive_original() {
+        let progressive = parse_fixture("h264-aac.mp4");
+        // Some variants (`cmaf`, `negative_cts_offsets`) have FFmpeg shift every composition
+        // offset by a constant to make them negative. That changes the offsets but not the
+        // timing, so those are compared by how samples differ from the first, and the rest also
+        // by absolute value.
+        for name in FRAGMENTED_FIXTURES {
+            let shifts_offsets = name.contains("negative") || name.contains("cmaf");
+            let fragmented = parse_fixture(name);
+            for (fragment, original) in fragmented.tracks.iter().zip(&progressive.tracks) {
+                let relative = |track: &Track| {
+                    let first = &track.samples[0];
+                    track
+                        .samples
+                        .iter()
+                        .map(|s| {
+                            (
+                                s.decode_time - first.decode_time,
+                                i64::from(s.composition_offset)
+                                    - i64::from(first.composition_offset),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    relative(fragment),
+                    relative(original),
+                    "{name} track {}",
+                    fragment.id
+                );
+                if !shifts_offsets {
+                    let absolute = |track: &Track| {
+                        track
+                            .samples
+                            .iter()
+                            .map(|s| (s.decode_time, s.composition_offset))
+                            .collect::<Vec<_>>()
+                    };
+                    assert_eq!(
+                        absolute(fragment),
+                        absolute(original),
+                        "{name} track {}",
+                        fragment.id
+                    );
+                }
+                assert_eq!(
+                    fragment.duration, original.duration,
+                    "{name} track {}",
+                    fragment.id
+                );
+            }
+            // The movie timescales differ between files, so compare durations in seconds:
+            // a/ts_a == b/ts_b is a·ts_b == b·ts_a.
+            assert_eq!(
+                u128::from(fragmented.duration) * u128::from(progressive.movie_timescale),
+                u128::from(progressive.duration) * u128::from(fragmented.movie_timescale),
+                "{name}: movie duration"
+            );
+        }
+    }
+
+    #[test]
+    fn a_timeline_that_starts_at_100_seconds_is_moved_to_zero() {
+        let plain = parse_fixture("h264-aac-fragmented.mp4");
+        let offset = parse_fixture("h264-aac-fragmented-offset.mp4");
+
+        // The two files differ only in their `tfdt` values, so once the origin is moved every
+        // sample, including where its bytes are, must be the same.
+        for (moved, original) in offset.tracks.iter().zip(&plain.tracks) {
+            assert_eq!(moved.samples[0].decode_time, 0, "track {}", moved.id);
+            assert_eq!(moved.samples, original.samples, "track {}", moved.id);
+            // The end is a duration, not a timestamp near 100 seconds.
+            assert_eq!(moved.duration, original.duration, "track {}", moved.id);
+        }
+    }
+
+    #[test]
+    fn signed_composition_offsets_survive_version_one_trun_boxes() {
+        let index = parse_fixture("h264-aac-fragmented-negative-cts.mp4");
+
         assert!(
-            error.to_string().contains("fragmented MP4 input"),
-            "{error}"
+            index.tracks[0]
+                .samples
+                .iter()
+                .any(|sample| sample.composition_offset < 0),
+            "the fixture must carry negative offsets for this test to mean anything"
         );
     }
 
@@ -706,6 +934,15 @@ mod tests {
         }
     }
 
+    /// A byte for a corruption: half the time an extreme, which stresses counts and sizes.
+    fn extreme_or_random(next: &mut impl FnMut() -> u64) -> u8 {
+        match next() % 4 {
+            0 => 0xff,
+            1 => 0x00,
+            _ => u8::try_from(next() & 0xff).unwrap(),
+        }
+    }
+
     /// A deterministic stand-in for a fuzzer: corrupts a few random bytes of each fixture's
     /// `moov` many times and runs the whole pipeline over the result. Any outcome is fine except
     /// a panic, a hang, or a runaway allocation, which would abort the test process.
@@ -738,23 +975,35 @@ mod tests {
             "h264-flac.mp4",
             "aac-only.m4a",
             "aac-two-tracks-only.m4a",
+            "h264-aac-fragmented.mp4",
+            "h264-aac-fragmented-legacy.mp4",
+            "h264-aac-fragmented-cmaf.mp4",
+            "h264-aac-fragmented-negative-cts.mp4",
         ] {
             let source = open_kind(fixture(name)).expect("fixture should open");
-            let original = block_on(Metadata::fetch(&source, u64::MAX)).expect("fixture has moov");
+            let original = block_on(Metadata::fetch(&source, &LimitsConfig::default()))
+                .expect("fixture has moov");
             let identity = source.identity().clone();
             let len = original.len();
             for _ in 0..400 {
                 let mut moov = original.moov_bytes().to_vec();
+                let mut fragments = original.fragments().to_vec();
                 for _ in 0..=(next() % 4) {
-                    let position = usize::try_from(next()).unwrap() % moov.len();
-                    // Half the time set a byte to an extreme, which stresses counts and sizes.
-                    moov[position] = match next() % 4 {
-                        0 => 0xff,
-                        1 => 0x00,
-                        _ => u8::try_from(next() & 0xff).unwrap(),
+                    // In a fragmented file, half the corruption lands in a `moof`.
+                    let target = if fragments.is_empty() || next() % 2 == 0 {
+                        &mut moov
+                    } else {
+                        let which = usize::try_from(next()).unwrap() % fragments.len();
+                        let mut bytes = fragments[which].bytes.to_vec();
+                        let position = usize::try_from(next()).unwrap() % bytes.len();
+                        bytes[position] = extreme_or_random(&mut next);
+                        fragments[which].bytes = bytes::Bytes::from(bytes);
+                        continue;
                     };
+                    let position = usize::try_from(next()).unwrap() % target.len();
+                    target[position] = extreme_or_random(&mut next);
                 }
-                let metadata = Metadata::from_moov(len, moov);
+                let metadata = Metadata::from_parts(len, moov, fragments);
                 match parse_metadata(&metadata, identity.clone(), &limits) {
                     Ok(index) => {
                         accepted += 1;
@@ -982,7 +1231,7 @@ mod tests {
 
     fn fixture_moov() -> Vec<u8> {
         let source = open_kind(fixture("h264-aac.mp4")).expect("fixture should open");
-        block_on(Metadata::fetch(&source, u64::MAX))
+        block_on(Metadata::fetch(&source, &LimitsConfig::default()))
             .expect("fixture should contain moov")
             .moov_bytes()
             .to_vec()
