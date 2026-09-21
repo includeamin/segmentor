@@ -5,6 +5,7 @@
 # Design
 
 - [Architecture](architecture.md)
+- [Deploying](deployment.md)
 - [Operating the origin](operations.md)
 - [Performance budgets](benchmarks.md)
 - [Protocol conformance](conformance.md)

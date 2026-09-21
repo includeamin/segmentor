@@ -79,6 +79,9 @@ server metrics next to it. `make help` lists everything else.
 
 - **Release binaries.** Each [GitHub release](https://github.com/includeamin/segmentor/releases)
   attaches Linux binaries for x86-64 and arm64 with checksums and build attestations.
+  [`install.sh`](install.sh) downloads one, verifies its checksum, and copies it into place
+  (`curl -fsSL https://raw.githubusercontent.com/includeamin/segmentor/main/install.sh | sh`; read
+  it first, it is short).
 - **Container image.** `ghcr.io/includeamin/segmentor`, for the same architectures:
 
   ```sh
@@ -91,7 +94,9 @@ server metrics next to it. `make help` lists everything else.
   recent stable Rust toolchain and a C compiler.
 
 [Verifying a download](docs/releasing.md#verifying-a-release) explains how to check the
-attestations and the image signature.
+attestations and the image signature. [Deploying](docs/deployment.md) has a Docker Compose file, a
+Kubernetes manifest, and a hardened systemd unit, and says what to put in front of it: segmentor has
+no TLS or authentication of its own.
 
 ## Supported input
 
