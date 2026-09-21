@@ -613,11 +613,16 @@ mod tests {
         bytes
     }
 
-    /// Writes `bytes` under `target/` and opens it as a source.
+    /// Writes `bytes` under `target/` and opens it as a source. Tests run in parallel and several
+    /// use the same names, so each call gets a file of its own: one test rewriting a file while
+    /// another reads it made `every_kind_of_wrong_sidx_falls_back_to_the_sequential_walk` fail now
+    /// and then.
     fn source(name: &str, bytes: &[u8]) -> MediaSourceKind {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/metadata-tests");
         std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join(name);
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = directory.join(format!("{}-{unique}-{name}", std::process::id()));
         std::fs::write(&path, bytes).unwrap();
         MediaSourceKind::Local(Arc::new(LocalMediaSource::open(path).unwrap()))
     }
