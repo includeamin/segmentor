@@ -39,6 +39,8 @@ An asset is one MP4 today: one video track, some audio tracks, and a single vide
 
 ## 1. HLS I-frame playlists
 
+> **Implemented** as designed. The conformance suite checks, for every fixture with video, that the playlist lists the source's keyframes and that each fragment decodes to one picture. The first version trusts `stss`, as described below; the open question about IDR pictures remains.
+
 ### Output
 
 The master playlist gains an `#EXT-X-I-FRAME-STREAM-INF` line pointing at `video/iframes.m3u8`. That playlist has `#EXT-X-I-FRAMES-ONLY` and one entry per keyframe. Each entry is its own small resource, `/hls/{asset}/video/iframes/{n}/media.m4s`: a fragment holding that one sample, with the video track's existing init segment.

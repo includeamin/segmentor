@@ -8,7 +8,7 @@ use crate::error::{Error, Result};
 use crate::media::{MediaIndex, Sample, Track, TrackKey};
 use crate::mp4::ParsedMedia;
 use crate::protocol::{Presentation, dash, hls};
-use crate::segment::SegmentPlan;
+use crate::segment::{SegmentPlan, TrackSegment};
 use crate::source::{ByteRange, LocalMediaSource, MediaSourceKind};
 use crate::{fmp4, mp4, segment};
 use std::sync::Arc;
@@ -29,6 +29,7 @@ pub(crate) struct PackagedAsset {
 struct RenderedManifests {
     hls_master: Bytes,
     hls_media: HashMap<TrackKey, Bytes>,
+    hls_iframes: Option<Bytes>,
     dash: Bytes,
 }
 
@@ -118,6 +119,44 @@ impl PackagedAsset {
             .get(&key)
             .cloned()
             .ok_or(Error::NotFound("track does not exist"))
+    }
+
+    /// The video track's I-frame playlist, absent for an audio-only asset.
+    pub(crate) fn hls_iframe_playlist(&self) -> Result<Bytes> {
+        self.rendered
+            .hls_iframes
+            .clone()
+            .ok_or(Error::NotFound("asset has no video track"))
+    }
+
+    /// The fragment holding only the `frame_index`th keyframe of the video track.
+    pub(crate) fn prepare_iframe(&self, frame_index: u32) -> Result<fmp4::PreparedSegment> {
+        let presentation = self.presentation();
+        let track = presentation
+            .video()
+            .ok_or(Error::NotFound("asset has no video track"))?;
+        let position = track
+            .samples
+            .iter()
+            .enumerate()
+            .filter(|(_, sample)| sample.is_sync)
+            .nth(usize::try_from(frame_index).map_err(|_| {
+                Error::InvalidMedia("keyframe index does not fit in memory".to_owned())
+            })?)
+            .map(|(position, _)| position)
+            .ok_or(Error::NotFound("keyframe does not exist"))?;
+        let sample = track.samples[position];
+        let segment = TrackSegment {
+            track_id: track.id,
+            first_sample: position,
+            end_sample: position + 1,
+            decode_time: sample.decode_time,
+            duration: u64::from(sample.duration),
+        };
+        let sequence_number = frame_index
+            .checked_add(1)
+            .ok_or_else(|| Error::InvalidMedia("sequence number overflow".to_owned()))?;
+        fmp4::prepare_media_segment(track, segment, sequence_number, &self.limits)
     }
 
     pub(crate) fn dash_manifest(&self) -> Bytes {
@@ -244,6 +283,7 @@ impl RenderedManifests {
         Ok(Self {
             hls_master: Bytes::from(hls::master_playlist(presentation)?),
             hls_media,
+            hls_iframes: hls::iframe_playlist(presentation)?.map(Bytes::from),
             dash: Bytes::from(dash::manifest(presentation)?),
         })
     }
@@ -255,7 +295,7 @@ impl RenderedManifests {
 /// Media URLs are cached as immutable by browsers and CDNs, so a new build that answers an old
 /// URL with different bytes would be served stale content until the cache expires. Mixing the
 /// revision into the version gives such a build new URLs instead.
-const FORMAT_REVISION: u32 = 1;
+const FORMAT_REVISION: u32 = 2;
 
 /// The `v` value in media URLs: a hash of everything the index was built from (`moov`, and every
 /// `moof` of a fragmented file) and [`FORMAT_REVISION`].

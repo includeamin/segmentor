@@ -16,6 +16,8 @@ Each asset exposes:
 /hls/{asset}/master.m3u8
 /hls/{asset}/video/index.m3u8
 /hls/{asset}/audio-{n}/index.m3u8   (one per audio track, numbered from 1)
+/hls/{asset}/video/iframes.m3u8     (I-frame playlist, when there is video)
+/hls/{asset}/video/iframes/{n}/media.m4s   (one keyframe as its own fragment)
 /hls/{asset}/{track}/init.mp4
 /hls/{asset}/{track}/segments/{index}/media.m4s
 /dash/{asset}/manifest.mpd

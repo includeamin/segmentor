@@ -38,6 +38,19 @@ pub(crate) async fn media_playlist(
     playlist_response(asset.hls_media_playlist(key)?, etag)
 }
 
+pub(crate) async fn iframe_playlist(
+    State(state): State<AppState>,
+    Path(asset_id): Path<String>,
+    headers: HeaderMap,
+) -> HttpResult<Response> {
+    let asset = state.asset(&asset_id).await?;
+    let etag = entity_tag(&asset, "hls-iframe-playlist");
+    if not_modified(&headers, &etag) {
+        return not_modified_response(etag, "public, max-age=60");
+    }
+    playlist_response(asset.hls_iframe_playlist()?, etag)
+}
+
 pub(crate) async fn dash_manifest(
     State(state): State<AppState>,
     Path(asset_id): Path<String>,
