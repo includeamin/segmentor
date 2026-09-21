@@ -1,0 +1,55 @@
+# Runs a release binary as a hardened system service.
+#
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin segmentor
+#   sudo install -m 0755 segmentor /usr/local/bin/segmentor
+#   sudo install -d /etc/segmentor && sudo cp vod.toml /etc/segmentor/vod.toml
+#   sudo cp deploy/systemd/segmentor.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now segmentor
+#
+# Logs go to the journal: `journalctl -u segmentor -f`.
+[Unit]
+Description=segmentor on-demand HLS and DASH origin
+Documentation=https://github.com/includeamin/segmentor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=segmentor
+Group=segmentor
+ExecStart=/usr/local/bin/segmentor serve --config /etc/segmentor/vod.toml
+Restart=on-failure
+RestartSec=2
+
+# SIGTERM starts a graceful drain (server.shutdown_delay_ms plus server.shutdown_grace_ms), so give
+# it longer than both before systemd sends SIGKILL.
+TimeoutStopSec=45
+LimitNOFILE=65536
+
+# The service reads media and its configuration and opens sockets, and nothing else.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+UMask=0077
+# Set storage.media_root to a directory below one of these, or add its path.
+ReadOnlyPaths=/srv/vod
+
+[Install]
+WantedBy=multi-user.target

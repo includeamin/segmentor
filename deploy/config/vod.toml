@@ -1,0 +1,35 @@
+# Configuration for the container image and for the examples in this directory.
+#
+# In the container it is mounted read-only at /etc/vod/vod.toml, and the media directory at
+# /srv/vod. See vod.example.toml at the repository root for every setting, and docs/operations.md
+# for what to change before real traffic.
+
+[server]
+listen = "0.0.0.0:3000"          # inside a container this must not be 127.0.0.1
+shutdown_delay_ms = 5000         # after SIGTERM, keep serving while /ready reports 503, so a load
+                                 # balancer stops sending traffic before connections close
+shutdown_grace_ms = 30000        # then wait at most this long for in-flight streams to finish
+
+[storage]
+media_root = "/srv/vod"
+
+[packaging]
+segment_duration_ms = 6000
+
+[logging]
+level = "info"                   # trace, debug, info, warn, or error
+format = "json"
+
+[limits]
+# The sample index is about 40 bytes per sample. An hour of 30 fps video and audio is roughly 5 MiB,
+# so this holds a large catalog. The default is 4 GiB; keep it below the container's memory limit.
+max_index_bytes = 536870912
+
+[cors]
+enabled = true
+allowed_origins = ["*"]          # restrict to your player's origin in production
+
+# Files under /srv/vod, one table per asset. To resolve assets from a mapper service instead, remove
+# these tables and configure [resolver]; see docs/mapper-api.md.
+[assets.sample]
+path = "sample.mp4"

@@ -1,0 +1,28 @@
+# Runs segmentor from the published image with a read-only filesystem and no extra privileges.
+#
+#   mkdir -p media && cp /path/to/some-video.mp4 media/sample.mp4
+#   docker compose -f deploy/docker-compose.yml up
+#   ffplay http://127.0.0.1:3000/hls/sample/master.m3u8
+#
+# Put a reverse proxy or CDN that provides TLS in front of it before exposing it to the internet;
+# segmentor has no TLS and no authentication (see docs/deployment.md).
+services:
+  segmentor:
+    # Use a version tag, and in production pin the image by digest (image@sha256:...).
+    image: ghcr.io/includeamin/segmentor:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./config/vod.toml:/etc/vod/vod.toml:ro
+      - ../media:/srv/vod:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    # Longer than shutdown_delay_ms plus shutdown_grace_ms in the configuration, so a stop drains
+    # streams instead of killing them.
+    stop_grace_period: 45s
+    ulimits:
+      nofile: 65536            # limits.max_connections defaults to 10000
+    # No healthcheck: the image has no shell or curl. Probe GET /health and GET /ready from outside.

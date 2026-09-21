@@ -10,7 +10,7 @@ help: ## Show the available targets
 		'bench      Measure the performance budgets (generates a 60-minute asset on first run)' \
 		'bench-enforce Like bench, but fail when a budget is missed' \
 		'conformance Run the black-box HLS/DASH conformance suite' \
-		'test-scripts Test the release automation scripts' \
+		'test-scripts Test the release automation scripts and install.sh' \
 		'book       Build the mdBook documentation' \
 		'book-serve Build, serve, and watch the documentation' \
 		'book-test  Test Rust examples in the book' \
@@ -33,8 +33,9 @@ help: ## Show the available targets
 		'site       Build mdBook with rustdoc under /api' \
 		'test       Run unit and integration tests'
 
-test-scripts: ## Test the release automation scripts
+test-scripts: ## Test the release automation scripts and install.sh
 	.github/scripts/test.sh
+	.github/scripts/test-install.sh
 
 bench: ## Measure the performance budgets
 	$(CARGO) bench --bench budgets
