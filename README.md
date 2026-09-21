@@ -22,18 +22,17 @@ proportional to the segment asked for, not to the length of the video.
 - **Packages on demand.** Playlists and manifests are built when an asset loads and segments when
   they are requested, from a sample index kept in memory. There is no packaging step and no output
   to store.
-- **Reads what encoders produce.** Progressive and fragmented MP4, M4A, and QuickTime files; H.264,
-  HEVC, VP9, and AV1; AAC, HE-AAC, AC-3, E-AC-3, Opus, and FLAC; edit lists, several audio tracks,
-  and audio-only files. See [Supported input](#supported-input).
+- **Reads what encoders produce.** Progressive and fragmented MP4, M4A, and QuickTime files with
+  H.264, HEVC, VP9, or AV1 video and AAC, AC-3, E-AC-3, Opus, or FLAC audio. See
+  [supported input](docs/supported-input.md).
 - **Finds media through a mapper.** A mapper service answers "where is asset X?" with a file or an
   HTTP location, so the catalog lives wherever you already keep it. Remote origins are read with
   ranged requests and the server never downloads a whole file.
 - **Is bounded by construction.** Every length read from a file or a mapper is checked before it is
   allocated, and the limits are configuration. `unsafe` code is forbidden. The parser is run against
   corrupted input on every test run, and has a fuzz target.
-- **Is built to be operated.** Prometheus metrics, request IDs, readiness and liveness endpoints,
-  load shedding, graceful shutdown, immutable content-versioned URLs for CDNs, and byte-range and
-  conditional requests.
+- **Is built to be operated.** Prometheus metrics, health endpoints, load shedding, graceful
+  shutdown, and immutable content-versioned URLs for CDNs.
 
 ## What it does not do
 
@@ -72,16 +71,15 @@ Then play it:
 ffplay http://127.0.0.1:3000/hls/sample/master.m3u8
 ```
 
-or, in a second terminal, `make demo` and open <http://127.0.0.1:8080> for a player with live
-server metrics next to it. `make help` lists everything else.
+`make demo` starts a web player with live server metrics, and `make help` lists everything else; see
+[Using segmentor](docs/usage.md).
 
 ## Install
 
 - **Release binaries.** Each [GitHub release](https://github.com/includeamin/segmentor/releases)
   attaches Linux binaries for x86-64 and arm64 with checksums and build attestations.
   [`install.sh`](install.sh) downloads one, verifies its checksum, and copies it into place
-  (`curl -fsSL https://raw.githubusercontent.com/includeamin/segmentor/main/install.sh | sh`; read
-  it first, it is short).
+ ).
 - **Container image.** `ghcr.io/includeamin/segmentor`, for the same architectures:
 
   ```sh
@@ -93,31 +91,16 @@ server metrics next to it. `make help` lists everything else.
 - **From source.** `cargo install --git https://github.com/includeamin/segmentor`, which needs a
   recent stable Rust toolchain and a C compiler.
 
-[Verifying a download](docs/releasing.md#verifying-a-release) explains how to check the
-attestations and the image signature. [Deploying](docs/deployment.md) has a Docker Compose file, a
-Kubernetes manifest, and a hardened systemd unit, and says what to put in front of it: segmentor has
-no TLS or authentication of its own.
-
-## Supported input
-
-Progressive and fragmented MP4, M4A, and QuickTime `.mov` files, with `moov` first or last. Nothing is decoded or re-encoded, so the codecs must already suit the protocol:
-
-| | Supported |
-| --- | --- |
-| Video | H.264, HEVC (`hvc1`/`hev1`), VP9, AV1 |
-| Audio | AAC-LC, HE-AAC and HE-AACv2 (explicit signaling), AC-3, E-AC-3, Opus, FLAC |
-| Layout | one video track and any number of audio tracks, or audio only; edit lists of one edit, optionally after one empty edit |
-| Skipped | tracks that are not audio or video (timecode, metadata, subtitles) |
-| Rejected | encrypted media, samples in `moov` mixed with fragments, external data references, more than one sample description per track, other codecs (each error names what was found) |
-
-Whether a player can decode a codec is a separate question: HEVC and the Dolby codecs need Safari or a platform decoder, for instance. See [TDD 0004](docs/technical-design/0004-broader-mp4-input-support.md) for what was verified where.
+See [Deploying](docs/deployment.md) for Compose, Kubernetes and systemd files, and
+[Verifying a release](docs/releasing.md#verifying-a-release) for checking downloads.
 
 ## Documentation
 
 The handbook, built with mdBook, covers everything beyond this page:
 
 - [Using segmentor](docs/usage.md): endpoints, the web player demo, the packaging command
-- [Deploying](docs/deployment.md) and [Operating the origin](docs/operations.md)
+- [Supported input](docs/supported-input.md), [Deploying](docs/deployment.md), and
+  [Operating the origin](docs/operations.md)
 - [Mapper API](docs/mapper-api.md), [architecture](docs/architecture.md), and the
   [technical designs](docs/technical-design/README.md)
 - [Releasing](docs/releasing.md), including how versions and tags are made
