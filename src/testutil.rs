@@ -180,7 +180,10 @@ async fn mapper_asset(
     if !state.always_full.load(Ordering::SeqCst)
         && condition.as_deref() == Some(&format!("\"{}\"", answer.version))
     {
-        return (StatusCode::NOT_MODIFIED, [(CACHE_CONTROL, "max-age=300")]).into_response();
+        // A mapper repeats its reuse policy on a `304`; without it the server falls back to its
+        // default window, and an answer that was meant to be short-lived would stop being one.
+        let max_age = format!("max-age={}", answer.ttl_seconds.unwrap_or(300));
+        return (StatusCode::NOT_MODIFIED, [(CACHE_CONTROL, max_age)]).into_response();
     }
     let mut body = json!({
         "asset_id": id,
