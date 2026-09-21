@@ -50,7 +50,7 @@ ARG REVISION=unknown
 LABEL org.opencontainers.image.title="segmentor" \
       org.opencontainers.image.description="On-demand HLS and DASH origin for MP4 files" \
       org.opencontainers.image.source="https://github.com/includeamin/segmentor" \
-      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}"
 
