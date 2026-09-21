@@ -23,7 +23,8 @@
     clippy::large_futures,
     clippy::redundant_closure_for_method_calls,
     clippy::too_many_lines,
-    clippy::trivially_copy_pass_by_ref
+    clippy::trivially_copy_pass_by_ref,
+    reason = "harness code, not the production crate"
 )]
 
 use std::path::{Path, PathBuf};

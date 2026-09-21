@@ -25,3 +25,18 @@ jobs:
 
       - name: Run validation suite
         run: make ci
+
+  unused-dependencies:
+    name: Unused dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+
+      - name: Fail on dependencies nothing uses
+        run: cargo machete

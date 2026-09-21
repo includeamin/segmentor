@@ -9,7 +9,7 @@ use crate::registry::RegistryError;
 
 const NO_STORE: HeaderValue = HeaderValue::from_static("no-store");
 
-pub(crate) type HttpResult<T> = std::result::Result<T, HttpError>;
+pub(crate) type HttpResult<T> = Result<T, HttpError>;
 
 #[derive(Debug)]
 pub(crate) struct HttpError {

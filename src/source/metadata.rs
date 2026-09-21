@@ -429,19 +429,17 @@ impl<'a> Walk<'a> {
         }
         // A cut `mdat` belongs to the `moof` just before it, which now describes samples that are
         // not all there.
-        let mut from = offset;
-        let mut dropped_fragments = 0;
-        if cut == Cut::Mdat
+        let (from, dropped_fragments) = if cut == Cut::Mdat
             && let Some(moof) = self.last_moof.take_if(|start| {
                 self.fragments
                     .last()
                     .is_some_and(|fragment| fragment.offset == *start)
-            })
-        {
+            }) {
             self.fragments.pop();
-            from = moof;
-            dropped_fragments = 1;
-        }
+            (moof, 1)
+        } else {
+            (offset, 0)
+        };
         if self.fragments.is_empty() {
             return Err(invalid(
                 "the file ends before its first fragment is complete",
@@ -1092,7 +1090,7 @@ mod tests {
             ("zero.mp4", zero, 0),
             ("past.mp4", past_the_end, 0),
             // Media said to start in the middle of a box.
-            ("misaligned.mp4", honest.clone(), 5),
+            ("misaligned.mp4", honest, 5),
         ] {
             let file = with_sidx(&head, &parts, &sizes, first_offset);
 

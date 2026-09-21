@@ -22,7 +22,8 @@
     clippy::large_futures,
     clippy::redundant_closure_for_method_calls,
     clippy::too_many_lines,
-    clippy::trivially_copy_pass_by_ref
+    clippy::trivially_copy_pass_by_ref,
+    reason = "harness code, not the production crate"
 )]
 
 use std::collections::HashMap;
@@ -387,13 +388,11 @@ fn parse_fragment(data: &[u8]) -> Fragment {
     let flags = be32(trun) & 0x00ff_ffff;
     let count = be32(&trun[4..]) as usize;
     let mut cursor = 8;
-    let data_offset = if flags & 0x1 != 0 {
+    let data_offset = (flags & 0x1 != 0).then(|| {
         let value = i32::from_be_bytes(trun[cursor..cursor + 4].try_into().unwrap());
         cursor += 4;
-        Some(value)
-    } else {
-        None
-    };
+        value
+    });
     if flags & 0x4 != 0 {
         cursor += 4;
     }

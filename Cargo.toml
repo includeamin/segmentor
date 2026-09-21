@@ -52,6 +52,15 @@ strip = "debuginfo"
 [lints.rust]
 missing_docs = "warn"
 unsafe_code = "forbid"
+# Code that is never used is deleted, not left behind: dead_code is on by default, and CI turns
+# every warning into an error.
+unused_qualifications = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+redundant_lifetimes = "warn"
+single_use_lifetimes = "warn"
+unit_bindings = "warn"
 
 [lints.rustdoc]
 broken_intra_doc_links = "deny"
@@ -59,3 +68,23 @@ broken_intra_doc_links = "deny"
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
+# Leftovers from debugging and unfinished work must not reach main.
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+# Correctness and clarity picks from the restriction group.
+allow_attributes_without_reason = "warn"
+mem_forget = "warn"
+rc_mutex = "warn"
+str_to_string = "warn"
+unused_result_ok = "warn"
+verbose_file_reads = "warn"
+empty_drop = "warn"
+if_then_some_else_none = "warn"
+needless_raw_strings = "warn"
+redundant_type_annotations = "warn"
+# Rust's own `Result<_, ()>` and friends aside, these catch code that compiles but is dead weight.
+redundant_clone = "warn"
+useless_let_if_seq = "warn"
+unnecessary_self_imports = "warn"
+unnecessary_wraps = "warn"

@@ -371,8 +371,8 @@ mod tests {
         assert!(!contains(&rewritten, b"wave") && !contains(&rewritten, b"chan"));
         // Same audio, described the standard way.
         assert_eq!(
-            crate::mp4::codec::parse_aac(&rewritten, 2).unwrap(),
-            crate::mp4::codec::parse_aac(&source, 2).unwrap()
+            mp4::codec::parse_aac(&rewritten, 2).unwrap(),
+            mp4::codec::parse_aac(&source, 2).unwrap()
         );
         assert_eq!(
             &rewritten[..8],

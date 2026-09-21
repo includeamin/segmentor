@@ -37,7 +37,7 @@ impl StreamJob {
         }
     }
 
-    async fn stream(&mut self) -> std::result::Result<(), StreamAbort> {
+    async fn stream(&mut self) -> Result<(), StreamAbort> {
         let header_end = self.prepared.header.len() as u64;
         if let Some(overlap) = self.interval.overlap(0, header_end) {
             let (Ok(start), Ok(end)) =
@@ -69,7 +69,7 @@ impl StreamJob {
         Ok(())
     }
 
-    async fn read(&mut self, offset: u64, length: u64) -> std::result::Result<Bytes, StreamAbort> {
+    async fn read(&mut self, offset: u64, length: u64) -> Result<Bytes, StreamAbort> {
         let permit = match self.first_permit.take() {
             Some(permit) => permit,
             None => match acquire_segment_permit(&self.segment_jobs, self.queue_timeout).await {
@@ -96,7 +96,7 @@ impl StreamJob {
         }
     }
 
-    async fn send(&self, item: std::io::Result<Bytes>) -> std::result::Result<(), StreamAbort> {
+    async fn send(&self, item: std::io::Result<Bytes>) -> Result<(), StreamAbort> {
         let length = item.as_ref().map_or(0, Bytes::len);
         match timeout(self.idle_timeout, self.sender.send(item)).await {
             Ok(Ok(())) => {
@@ -112,7 +112,7 @@ impl StreamJob {
     }
 
     /// Surfaces a generic body error to the client, then reports the abort.
-    async fn fail<T>(&self, message: &'static str) -> std::result::Result<T, StreamAbort> {
+    async fn fail<T>(&self, message: &'static str) -> Result<T, StreamAbort> {
         let _ = self.send(Err(std::io::Error::other(message))).await;
         Err(StreamAbort::Error)
     }
