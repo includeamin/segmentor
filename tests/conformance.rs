@@ -22,7 +22,8 @@
     clippy::large_futures,
     clippy::redundant_closure_for_method_calls,
     clippy::too_many_lines,
-    clippy::trivially_copy_pass_by_ref
+    clippy::trivially_copy_pass_by_ref,
+    reason = "harness code, not the production crate"
 )]
 
 use std::collections::HashMap;
@@ -387,13 +388,11 @@ fn parse_fragment(data: &[u8]) -> Fragment {
     let flags = be32(trun) & 0x00ff_ffff;
     let count = be32(&trun[4..]) as usize;
     let mut cursor = 8;
-    let data_offset = if flags & 0x1 != 0 {
+    let data_offset = (flags & 0x1 != 0).then(|| {
         let value = i32::from_be_bytes(trun[cursor..cursor + 4].try_into().unwrap());
         cursor += 4;
-        Some(value)
-    } else {
-        None
-    };
+        value
+    });
     if flags & 0x4 != 0 {
         cursor += 4;
     }
@@ -1105,4 +1104,124 @@ fn audio_and_video_stay_in_sync_through_edit_lists() {
             );
         }
     }
+}
+
+/// The I-frame playlist lists exactly the source's keyframes, and each listed fragment, with the
+/// video init segment in front of it, decodes to one picture.
+#[test]
+fn every_iframe_fragment_decodes_to_exactly_one_frame() {
+    let ffprobe = Command::new("ffprobe").arg("-version").output().is_ok();
+    let server = start_server();
+    let directory = root().join("target/conformance/iframes");
+    fs::create_dir_all(&directory).unwrap();
+
+    for (asset, file, _) in FIXTURES {
+        let master = get_ok(&server, &format!("/hls/{asset}/master.m3u8")).text();
+        let has_video = expected_codecs(asset).0.is_some();
+        let declared = master
+            .lines()
+            .find(|line| line.starts_with("#EXT-X-I-FRAME-STREAM-INF"));
+        assert_eq!(
+            declared.is_some(),
+            has_video,
+            "{asset}: only assets with video have an I-frame stream\n{master}"
+        );
+        let Some(declared) = declared else {
+            assert_eq!(
+                get(&server, &format!("/hls/{asset}/video/iframes.m3u8")).status,
+                404,
+                "{asset}: no video, no I-frame playlist"
+            );
+            continue;
+        };
+        assert!(declared.contains("CODECS=\""), "{asset}: {declared}");
+        assert!(declared.contains("BANDWIDTH="), "{asset}: {declared}");
+        assert!(!declared.contains("mp4a"), "{asset}: video codec only");
+
+        let playlist_url = format!("/hls/{asset}/video/iframes.m3u8");
+        let playlist = get_ok(&server, &playlist_url);
+        assert_eq!(
+            playlist.headers["content-type"],
+            "application/vnd.apple.mpegurl"
+        );
+        let text = playlist.text();
+        assert!(text.contains("#EXT-X-I-FRAMES-ONLY"), "{asset}: {text}");
+        assert!(text.ends_with("#EXT-X-ENDLIST\n"), "{asset}");
+        let map = text
+            .lines()
+            .find_map(|line| line.strip_prefix("#EXT-X-MAP:URI=\""))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .expect("the playlist names the init segment");
+        let init = get_ok(&server, &resolve(&playlist_url, map)).body;
+        let entries = text
+            .lines()
+            .filter(|line| line.starts_with("iframes/"))
+            .collect::<Vec<_>>();
+
+        if ffprobe {
+            assert_eq!(
+                entries.len() as u64,
+                source_keyframes(&root().join("tests/fixtures").join(file)),
+                "{asset}: the playlist lists the source's keyframes"
+            );
+        }
+        for (index, entry) in entries.iter().enumerate() {
+            assert!(
+                entry.starts_with(&format!("iframes/{index}/media.m4s?v=")),
+                "{asset}: {entry}"
+            );
+            let fragment = get_ok(&server, &resolve(&playlist_url, entry));
+            assert_eq!(fragment.headers["content-type"], "video/mp4");
+            if !ffprobe || index % 4 != 0 {
+                continue;
+            }
+            let path = directory.join(format!("{asset}-{index}.mp4"));
+            let mut bytes = init.clone();
+            bytes.extend_from_slice(&fragment.body);
+            fs::write(&path, bytes).unwrap();
+            assert_eq!(
+                probe_frames(&path, "v:0"),
+                1,
+                "{asset}: fragment {index} holds one picture"
+            );
+            let errors = Command::new("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(&path)
+                .args(["-f", "null", "-"])
+                .output();
+            if let Ok(output) = errors {
+                assert!(
+                    output.stderr.is_empty(),
+                    "{asset}: fragment {index} decode errors: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+        let past_the_end = get(
+            &server,
+            &resolve(
+                &playlist_url,
+                &format!(
+                    "iframes/{}/media.m4s?v={}",
+                    entries.len(),
+                    entries[0].rsplit('=').next().unwrap()
+                ),
+            ),
+        );
+        assert_eq!(past_the_end.status, 404, "{asset}: no such keyframe");
+    }
+}
+
+/// The number of keyframes FFprobe finds in the first video stream.
+fn source_keyframes(path: &Path) -> u64 {
+    let output = Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "v:0"])
+        .args(["-show_entries", "packet=flags", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .expect("ffprobe should run");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with('K'))
+        .count() as u64
 }

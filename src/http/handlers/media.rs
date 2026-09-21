@@ -14,6 +14,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use super::parse_track;
 use crate::asset::PackagedAsset;
+use crate::fmp4::PreparedSegment;
 use crate::http::error::{HttpError, HttpResult};
 use crate::http::range::{ByteInterval, range_not_satisfiable, requested_range};
 use crate::http::state::AppState;
@@ -70,7 +71,87 @@ pub(crate) async fn media_segment(
     version.require(&asset)?;
     let key = parse_track(&track)?;
     let etag = entity_tag(&asset, &format!("{track}-segment-{segment_index}"));
+    serve_segment(
+        &state,
+        &method,
+        &headers,
+        asset,
+        etag,
+        key.kind,
+        move |asset| asset.prepare_media_segment(key, segment_index),
+    )
+    .await
+}
+
+/// A sidecar `WebVTT` file, served under both protocols.
+pub(crate) async fn subtitle_file(
+    State(state): State<AppState>,
+    Path((asset_id, language)): Path<(String, String)>,
+    Query(version): Query<VersionQuery>,
+    headers: HeaderMap,
+) -> HttpResult<Response> {
+    let asset = state.asset(&asset_id).await?;
+    version.require(&asset)?;
+    let etag = entity_tag(
+        &asset,
+        &format!("subtitle-{}", language.to_ascii_lowercase()),
+    );
     if not_modified(&headers, &etag) {
+        return not_modified_response(etag, "public, max-age=31536000, immutable");
+    }
+    let bytes = asset.subtitle(&language)?;
+    let total = bytes.len() as u64;
+    let Ok(range) = requested_range(&headers, total, &etag) else {
+        return range_not_satisfiable(total);
+    };
+    let selected = range.unwrap_or(ByteInterval {
+        start: 0,
+        end: total,
+    });
+    let (start, end) = (
+        usize::try_from(selected.start).map_err(|_| HttpError::internal("range".to_owned()))?,
+        usize::try_from(selected.end).map_err(|_| HttpError::internal("range".to_owned()))?,
+    );
+    media_response_builder(total, selected, etag, "text/vtt; charset=utf-8")
+        .body(Body::from(bytes.slice(start..end)))
+        .map_err(|error| HttpError::internal(error.to_string()))
+}
+
+/// One keyframe of the video track as a fragment of its own, for HLS I-frame playlists.
+pub(crate) async fn iframe_segment(
+    State(state): State<AppState>,
+    method: Method,
+    Path((asset_id, frame_index)): Path<(String, u32)>,
+    Query(version): Query<VersionQuery>,
+    headers: HeaderMap,
+) -> HttpResult<Response> {
+    let asset = state.asset(&asset_id).await?;
+    version.require(&asset)?;
+    let etag = entity_tag(&asset, &format!("iframe-{frame_index}"));
+    serve_segment(
+        &state,
+        &method,
+        &headers,
+        asset,
+        etag,
+        TrackKind::Video,
+        move |asset| asset.prepare_iframe(frame_index),
+    )
+    .await
+}
+
+/// Answers a request for a generated fragment: conditional, ranged, and streamed from the source
+/// through a bounded queue.
+async fn serve_segment(
+    state: &AppState,
+    method: &Method,
+    headers: &HeaderMap,
+    asset: Arc<PackagedAsset>,
+    etag: HeaderValue,
+    kind: TrackKind,
+    prepare: impl FnOnce(&PackagedAsset) -> crate::error::Result<PreparedSegment> + Send + 'static,
+) -> HttpResult<Response> {
+    if not_modified(headers, &etag) {
         return not_modified_response(etag, "public, max-age=31536000, immutable");
     }
     let started = Instant::now();
@@ -78,12 +159,12 @@ pub(crate) async fn media_segment(
     // the blocking pool rather than an async worker.
     let prepared = {
         let asset = Arc::clone(&asset);
-        tokio::task::spawn_blocking(move || asset.prepare_media_segment(key, segment_index))
+        tokio::task::spawn_blocking(move || prepare(&asset))
             .await
             .map_err(|error| HttpError::internal(error.to_string()))??
     };
     let total_length = prepared.content_length;
-    let requested_interval = match requested_range(&headers, total_length, &etag) {
+    let requested_interval = match requested_range(headers, total_length, &etag) {
         Ok(range) => range.unwrap_or(ByteInterval {
             start: 0,
             end: total_length,
@@ -97,7 +178,7 @@ pub(crate) async fn media_segment(
             total_length,
             requested_interval,
             etag,
-            segment_content_type(key.kind),
+            segment_content_type(kind),
         )
         .body(Body::empty())
         .map_err(|error| HttpError::internal(error.to_string()));
@@ -122,9 +203,7 @@ pub(crate) async fn media_segment(
     );
     tracing::debug!(
         event = "media_segment_generated",
-        asset.id = %asset_id,
-        media.track = %track,
-        media.segment = segment_index,
+        media.kind = ?kind,
         response.bytes = content_length,
         elapsed_us = started.elapsed().as_micros(),
     );
@@ -132,7 +211,7 @@ pub(crate) async fn media_segment(
         total_length,
         requested_interval,
         etag,
-        segment_content_type(key.kind),
+        segment_content_type(kind),
     )
     .body(Body::from_stream(ReceiverStream::new(receiver)))
     .map_err(|error| HttpError::internal(error.to_string()))

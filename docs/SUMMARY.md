@@ -5,6 +5,8 @@
 # Design
 
 - [Architecture](architecture.md)
+- [Using segmentor](usage.md)
+- [Supported input](supported-input.md)
 - [Deploying](deployment.md)
 - [Operating the origin](operations.md)
 - [Performance budgets](benchmarks.md)

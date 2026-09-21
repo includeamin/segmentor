@@ -429,19 +429,17 @@ impl<'a> Walk<'a> {
         }
         // A cut `mdat` belongs to the `moof` just before it, which now describes samples that are
         // not all there.
-        let mut from = offset;
-        let mut dropped_fragments = 0;
-        if cut == Cut::Mdat
+        let (from, dropped_fragments) = if cut == Cut::Mdat
             && let Some(moof) = self.last_moof.take_if(|start| {
                 self.fragments
                     .last()
                     .is_some_and(|fragment| fragment.offset == *start)
-            })
-        {
+            }) {
             self.fragments.pop();
-            from = moof;
-            dropped_fragments = 1;
-        }
+            (moof, 1)
+        } else {
+            (offset, 0)
+        };
         if self.fragments.is_empty() {
             return Err(invalid(
                 "the file ends before its first fragment is complete",
@@ -615,11 +613,16 @@ mod tests {
         bytes
     }
 
-    /// Writes `bytes` under `target/` and opens it as a source.
+    /// Writes `bytes` under `target/` and opens it as a source. Tests run in parallel and several
+    /// use the same names, so each call gets a file of its own: one test rewriting a file while
+    /// another reads it made `every_kind_of_wrong_sidx_falls_back_to_the_sequential_walk` fail now
+    /// and then.
     fn source(name: &str, bytes: &[u8]) -> MediaSourceKind {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/metadata-tests");
         std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join(name);
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = directory.join(format!("{}-{unique}-{name}", std::process::id()));
         std::fs::write(&path, bytes).unwrap();
         MediaSourceKind::Local(Arc::new(LocalMediaSource::open(path).unwrap()))
     }
@@ -1092,7 +1095,7 @@ mod tests {
             ("zero.mp4", zero, 0),
             ("past.mp4", past_the_end, 0),
             // Media said to start in the middle of a box.
-            ("misaligned.mp4", honest.clone(), 5),
+            ("misaligned.mp4", honest, 5),
         ] {
             let file = with_sidx(&head, &parts, &sizes, first_offset);
 

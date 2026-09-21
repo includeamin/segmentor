@@ -680,7 +680,7 @@ async fn ffmpeg_decodes_hls_and_dash_presentations() {
         eprintln!("skipping media validation because ffmpeg is unavailable");
         return;
     }
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         axum::serve(listener, app()).await.unwrap();

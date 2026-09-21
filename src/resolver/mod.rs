@@ -46,10 +46,23 @@ impl AssetLocation {
     }
 }
 
+/// A sidecar `WebVTT` file the mapper attached to an asset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SubtitleLocation {
+    /// A BCP 47 tag, unique within the asset (case-insensitively). It appears in URLs.
+    pub(crate) language: String,
+    pub(crate) label: String,
+    pub(crate) default: bool,
+    pub(crate) forced: bool,
+    pub(crate) location: AssetLocation,
+}
+
 /// A resolver's answer for one asset.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedAsset {
     pub(crate) location: AssetLocation,
+    /// Sidecar subtitles, in the order the mapper listed them.
+    pub(crate) subtitles: Vec<SubtitleLocation>,
     /// Opaque change token: equal versions mean identical media.
     pub(crate) version: String,
     /// After this instant the answer must be revalidated before use.

@@ -13,12 +13,13 @@ use time::format_description::well_known::Rfc3339;
 use tokio::time::sleep;
 
 use super::policy::{LocationPolicy, validate_relative_path};
-use super::{AssetLocation, Resolution, ResolveError, ResolvedAsset};
+use super::{AssetLocation, Resolution, ResolveError, ResolvedAsset, SubtitleLocation};
 use crate::config::MapperConfig;
 use crate::config::Secret;
 use crate::observability::request_id;
 
 const MAX_VERSION_BYTES: usize = 256;
+const MAX_LABEL_BYTES: usize = 128;
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
@@ -37,6 +38,19 @@ struct Wire {
     version: String,
     ttl_seconds: Option<u64>,
     expires_at: Option<String>,
+    location: WireLocation,
+    #[serde(default)]
+    subtitles: Vec<WireSubtitle>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireSubtitle {
+    language: String,
+    label: Option<String>,
+    #[serde(default)]
+    default: bool,
+    #[serde(default)]
+    forced: bool,
     location: WireLocation,
 }
 
@@ -222,6 +236,72 @@ impl HttpResolver {
         Duration::from_millis(requested.clamp(self.settings.min_ttl_ms, self.settings.max_ttl_ms))
     }
 
+    /// A location, checked against the path rules or the remote-media policy.
+    fn interpret_location(&self, wire: &WireLocation) -> Result<AssetLocation, ResolveError> {
+        match wire {
+            WireLocation::File { path } => Ok(AssetLocation::File(
+                validate_relative_path(path).map_err(ResolveError::Rejected)?,
+            )),
+            WireLocation::Http { url } => {
+                let url = Url::parse(url)
+                    .map_err(|_| ResolveError::Rejected("location URL is not valid".to_owned()))?;
+                self.policy
+                    .check_url(&url)
+                    .map_err(ResolveError::Rejected)?;
+                Ok(AssetLocation::Http(url))
+            }
+        }
+    }
+
+    fn interpret_subtitles(
+        &self,
+        wire: &[WireSubtitle],
+    ) -> Result<Vec<SubtitleLocation>, ResolveError> {
+        let reject = |message: String| Err(ResolveError::Rejected(message));
+        let mut subtitles: Vec<SubtitleLocation> = Vec::with_capacity(wire.len());
+        for entry in wire {
+            if !is_language_tag(&entry.language) {
+                return reject(format!(
+                    "subtitle language `{}` is not a BCP 47 tag of letters, digits and hyphens",
+                    entry.language.escape_default()
+                ));
+            }
+            if subtitles
+                .iter()
+                .any(|known| known.language.eq_ignore_ascii_case(&entry.language))
+            {
+                return reject(format!(
+                    "subtitle language `{}` is listed twice",
+                    entry.language
+                ));
+            }
+            let label = entry
+                .label
+                .clone()
+                .unwrap_or_else(|| entry.language.clone());
+            if label.is_empty()
+                || label.len() > MAX_LABEL_BYTES
+                || label.chars().any(char::is_control)
+            {
+                return reject(format!(
+                    "subtitle `{}` has an empty, overlong, or control-character label",
+                    entry.language
+                ));
+            }
+            subtitles.push(SubtitleLocation {
+                language: entry.language.clone(),
+                label,
+                default: entry.default,
+                forced: entry.forced,
+                location: self.interpret_location(&entry.location)?,
+            });
+        }
+        if subtitles.iter().filter(|subtitle| subtitle.default).count() > 1 {
+            return reject("more than one subtitle is marked default".to_owned());
+        }
+        Ok(subtitles)
+    }
+
     /// Validates a `200` answer against the request and the location policy.
     fn interpret(
         &self,
@@ -242,19 +322,8 @@ impl HttpResolver {
         {
             return reject("mapper version must be 1 to 256 visible ASCII characters");
         }
-        let location = match &wire.location {
-            WireLocation::File { path } => {
-                AssetLocation::File(validate_relative_path(path).map_err(ResolveError::Rejected)?)
-            }
-            WireLocation::Http { url } => {
-                let url = Url::parse(url)
-                    .map_err(|_| ResolveError::Rejected("location URL is not valid".to_owned()))?;
-                self.policy
-                    .check_url(&url)
-                    .map_err(ResolveError::Rejected)?;
-                AssetLocation::Http(url)
-            }
-        };
+        let location = self.interpret_location(&wire.location)?;
+        let subtitles = self.interpret_subtitles(&wire.subtitles)?;
 
         let now = Instant::now();
         let mut valid_until = now + self.ttl(wire.ttl_seconds, max_age_seconds);
@@ -275,6 +344,7 @@ impl HttpResolver {
         }
         Ok(ResolvedAsset {
             location,
+            subtitles,
             version: wire.version,
             valid_until,
             hard_expiry,
@@ -291,4 +361,14 @@ fn max_age(response: &Response) -> Option<u64> {
         .ok()?
         .split(',')
         .find_map(|directive| directive.trim().strip_prefix("max-age=")?.parse().ok())
+}
+
+/// A language tag as it can appear in a URL path: letters, digits, and single hyphens, starting
+/// with a letter, at most 35 characters.
+fn is_language_tag(tag: &str) -> bool {
+    tag.len() <= 35
+        && tag
+            .split('-')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        && tag.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
 }

@@ -262,7 +262,7 @@ impl Metrics {
         .fetch_add(1, Relaxed);
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, reason = "one flat listing of every metric")]
     pub(crate) fn render(&self, dropped_log_lines: usize) -> String {
         let mut out = String::with_capacity(8 * 1024);
         let _ = writeln!(

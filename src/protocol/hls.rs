@@ -3,6 +3,7 @@ use std::fmt::Write;
 use super::Presentation;
 use crate::error::{Error, Result};
 use crate::media::{Track, TrackKey};
+use crate::subtitle::Subtitle;
 
 pub(crate) fn master_playlist(presentation: Presentation<'_>) -> Result<String> {
     let video = presentation.video();
@@ -30,6 +31,10 @@ pub(crate) fn master_playlist(presentation: Presentation<'_>) -> Result<String> 
         }
     }
 
+    for subtitle in presentation.subtitles() {
+        write_subtitle_rendition(&mut playlist, subtitle, version);
+    }
+
     let mut bandwidth = 0u64;
     let mut average_bandwidth = 0u64;
     for track in video.into_iter().chain(audio) {
@@ -46,10 +51,18 @@ pub(crate) fn master_playlist(presentation: Presentation<'_>) -> Result<String> 
         .map_or_else(String::new, |(width, height)| {
             format!(",RESOLUTION={width}x{height}")
         });
+    if let Some(iframes) = iframe_stream(presentation, video)? {
+        playlist.push_str(&iframes);
+    }
     let audio_attribute = if audio_group { ",AUDIO=\"audio\"" } else { "" };
+    let subtitle_attribute = if presentation.subtitles().is_empty() {
+        ""
+    } else {
+        ",SUBTITLES=\"subs\""
+    };
     writeln!(
         playlist,
-        "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={average_bandwidth},CODECS=\"{}\"{resolution}{audio_attribute}",
+        "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={average_bandwidth},CODECS=\"{}\"{resolution}{audio_attribute}{subtitle_attribute}",
         codecs.join(",")
     )
     .expect("writing to a String cannot fail");
@@ -87,6 +100,154 @@ pub(crate) fn media_playlist(presentation: Presentation<'_>, key: TrackKey) -> R
     }
     playlist.push_str("#EXT-X-ENDLIST\n");
     Ok(playlist)
+}
+
+/// The playlist that lists a subtitle file: the whole file as a single segment as long as the
+/// presentation, which is valid for VOD. It is the same for every language, because it names the
+/// file relative to its own location.
+pub(crate) fn subtitle_playlist(presentation: Presentation<'_>) -> String {
+    let seconds = presentation.duration_seconds().max(1);
+    let version = presentation.version();
+    format!(
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{seconds}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:{seconds}.000,\nsub.vtt?v={version}\n#EXT-X-ENDLIST\n"
+    )
+}
+
+/// The I-frame playlist of the video track: one entry per keyframe, each its own one-sample
+/// fragment. `None` for an asset without video.
+pub(crate) fn iframe_playlist(presentation: Presentation<'_>) -> Result<Option<String>> {
+    let Some(track) = presentation.video() else {
+        return Ok(None);
+    };
+    let version = presentation.version();
+    let frames = keyframes(track)?;
+    let target_duration = frames
+        .entries
+        .iter()
+        .map(|frame| frame.interval.div_ceil(u64::from(track.timescale)))
+        .max()
+        .unwrap_or(1);
+    let mut playlist = format!(
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target_duration}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-I-FRAMES-ONLY\n#EXT-X-MAP:URI=\"init.mp4?v={version}\"\n"
+    );
+    for (index, frame) in frames.entries.iter().enumerate() {
+        let milliseconds = frame
+            .interval
+            .checked_mul(1000)
+            .and_then(|interval| interval.checked_div(u64::from(track.timescale)))
+            .ok_or_else(|| Error::InvalidMedia("keyframe interval overflow".to_owned()))?;
+        writeln!(
+            playlist,
+            "#EXTINF:{}.{:03},\niframes/{index}/media.m4s?v={version}",
+            milliseconds / 1000,
+            milliseconds % 1000
+        )
+        .expect("writing to a String cannot fail");
+    }
+    playlist.push_str("#EXT-X-ENDLIST\n");
+    Ok(Some(playlist))
+}
+
+/// The `#EXT-X-I-FRAME-STREAM-INF` line for the video track, or `None` when there is no video.
+fn iframe_stream(presentation: Presentation<'_>, video: Option<&Track>) -> Result<Option<String>> {
+    let Some(track) = video else {
+        return Ok(None);
+    };
+    let frames = keyframes(track)?;
+    let (Some(peak), Some(average)) = (
+        frames.peak_bandwidth(track.timescale),
+        frames.average_bandwidth(track.timescale),
+    ) else {
+        return Ok(None);
+    };
+    let resolution = track
+        .codec
+        .dimensions()
+        .map_or_else(String::new, |(width, height)| {
+            format!(",RESOLUTION={width}x{height}")
+        });
+    Ok(Some(format!(
+        "#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH={peak},AVERAGE-BANDWIDTH={average},CODECS=\"{}\"{resolution},URI=\"video/iframes.m3u8?v={}\"\n",
+        track.codec.codecs(),
+        presentation.version()
+    )))
+}
+
+/// The sync samples of a track: where each is, how long it stays on screen (until the next one),
+/// and how big it is.
+struct Keyframes {
+    entries: Vec<Keyframe>,
+}
+
+struct Keyframe {
+    /// Ticks from this keyframe to the next, or to the end of the track.
+    interval: u64,
+    bytes: u64,
+}
+
+fn keyframes(track: &Track) -> Result<Keyframes> {
+    let overflow = || Error::InvalidMedia("keyframe interval overflow".to_owned());
+    let sync = track
+        .samples
+        .iter()
+        .filter(|sample| sample.is_sync)
+        .collect::<Vec<_>>();
+    let end = track
+        .samples
+        .last()
+        .map(|last| last.decode_time.checked_add(u64::from(last.duration)))
+        .ok_or_else(overflow)?
+        .ok_or_else(overflow)?;
+    let mut entries = Vec::with_capacity(sync.len());
+    for (position, sample) in sync.iter().enumerate() {
+        let next = sync.get(position + 1).map_or(end, |next| next.decode_time);
+        entries.push(Keyframe {
+            interval: next.checked_sub(sample.decode_time).ok_or_else(overflow)?,
+            bytes: u64::from(sample.size),
+        });
+    }
+    Ok(Keyframes { entries })
+}
+
+impl Keyframes {
+    /// The largest keyframe, in bits per second over the interval it stands for.
+    fn peak_bandwidth(&self, timescale: u32) -> Option<u64> {
+        self.entries
+            .iter()
+            .filter_map(|frame| bits_per_second(frame.bytes, frame.interval, timescale))
+            .max()
+    }
+
+    /// All keyframes' bytes over the time they cover.
+    fn average_bandwidth(&self, timescale: u32) -> Option<u64> {
+        let bytes = self.entries.iter().map(|frame| frame.bytes).sum();
+        let ticks = self.entries.iter().map(|frame| frame.interval).sum();
+        bits_per_second(bytes, ticks, timescale)
+    }
+}
+
+fn bits_per_second(bytes: u64, ticks: u64, timescale: u32) -> Option<u64> {
+    bytes
+        .checked_mul(8)?
+        .checked_mul(u64::from(timescale))?
+        .checked_div(ticks)
+}
+
+/// One `#EXT-X-MEDIA:TYPE=SUBTITLES` line. `AUTOSELECT` follows `DEFAULT`, and `FORCED` marks
+/// a track a player should show even when the viewer has not asked for subtitles.
+fn write_subtitle_rendition(playlist: &mut String, subtitle: &Subtitle, version: &str) {
+    let flag = |value: bool| if value { "YES" } else { "NO" };
+    let name = subtitle.label.replace('"', "'");
+    writeln!(
+        playlist,
+        "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"{name}\",LANGUAGE=\"{}\",DEFAULT={},AUTOSELECT={},FORCED={},URI=\"subtitles/{}/index.m3u8?v={version}\"",
+        subtitle.language,
+        flag(subtitle.default),
+        flag(subtitle.default || subtitle.forced),
+        flag(subtitle.forced),
+        subtitle.language
+    )
+    .expect("writing to a String cannot fail");
 }
 
 /// One `#EXT-X-MEDIA` line. Renditions are named by position, because the handler names encoders
@@ -139,6 +300,44 @@ mod tests {
             !playlist.contains('{'),
             "no unexpanded placeholders: {playlist}"
         );
+    }
+
+    #[test]
+    fn the_iframe_playlist_lists_one_fragment_per_keyframe() {
+        let loaded = Loaded::h264_aac();
+        let keyframes = loaded.index.tracks[0]
+            .samples
+            .iter()
+            .filter(|sample| sample.is_sync)
+            .count();
+
+        let playlist = iframe_playlist(loaded.presentation())
+            .expect("playlist should render")
+            .expect("a video asset has one");
+
+        assert!(playlist.contains("#EXT-X-I-FRAMES-ONLY\n"), "{playlist}");
+        assert!(playlist.contains(&format!("#EXT-X-MAP:URI=\"init.mp4?v={}\"", loaded.version)));
+        assert_eq!(playlist.matches("#EXTINF:").count(), keyframes);
+        assert!(playlist.contains(&format!("iframes/{}/media.m4s?v=", keyframes - 1)));
+        let master = master_playlist(loaded.presentation()).expect("master should render");
+        assert!(
+            master.contains("#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH="),
+            "{master}"
+        );
+        assert!(master.contains(&format!("URI=\"video/iframes.m3u8?v={}\"", loaded.version)));
+    }
+
+    #[test]
+    fn an_audio_only_asset_has_no_iframe_playlist() {
+        let loaded = Loaded::fixture("aac-only.m4a");
+
+        assert!(
+            iframe_playlist(loaded.presentation())
+                .expect("rendering should succeed")
+                .is_none()
+        );
+        let master = master_playlist(loaded.presentation()).expect("master should render");
+        assert!(!master.contains("I-FRAME"), "{master}");
     }
 
     #[test]

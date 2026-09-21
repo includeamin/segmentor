@@ -3,7 +3,7 @@
 CARGO ?= cargo
 MDBOOK ?= mdbook
 
-.PHONY: bench test-scripts bench-enforce conformance book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve demo site test deny
+.PHONY: unused-deps bench test-scripts bench-enforce conformance book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve demo site test deny
 
 help: ## Show the available targets
 	@printf '%s\n' \
@@ -29,6 +29,7 @@ help: ## Show the available targets
 		'lint       Run Clippy with warnings denied' \
 		'serve      Run the example HLS service' \
 		'demo       Serve the web player demo on http://127.0.0.1:8080' \
+		'unused-deps Fail on dependencies that nothing uses (needs cargo-machete)' \
 		'deny       Check dependencies for advisories and licences (needs cargo-deny)' \
 		'site       Build mdBook with rustdoc under /api' \
 		'test       Run unit and integration tests'
@@ -75,8 +76,11 @@ fuzz: ## Run media pipeline fuzzing with nightly
 	cp tests/fixtures/*.mp4 fuzz/corpus/media-pipeline/
 	$(CARGO) +nightly fuzz run media-pipeline fuzz/corpus/media-pipeline
 
-lint: ## Run Clippy with warnings denied
+lint: ## Run Clippy with warnings denied (dead code, unused imports, and the lints in Cargo.toml)
 	$(CARGO) clippy --all-features --all-targets -- -D warnings
+
+unused-deps: ## Fail on dependencies nothing uses (needs `cargo install cargo-machete --locked`)
+	cargo machete
 
 test: ## Run unit and integration tests
 	$(CARGO) test --all-features --all-targets

@@ -9,8 +9,8 @@ use tower_http::trace::{DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, T
 use tracing::Level;
 
 use super::handlers::{
-    dash_manifest, health, init_segment, master_playlist, media_playlist, media_segment, metrics,
-    ready,
+    dash_manifest, health, iframe_playlist, iframe_segment, init_segment, master_playlist,
+    media_playlist, media_segment, metrics, ready, subtitle_file, subtitle_playlist,
 };
 use super::middleware::{
     X_REQUEST_ID, enforce_header_limit, record_metrics, request_id, shed_load,
@@ -22,6 +22,11 @@ const READY: &str = "/ready";
 const METRICS: &str = "/metrics";
 const HLS_MASTER: &str = "/hls/{asset_id}/master.m3u8";
 const HLS_MEDIA_PLAYLIST: &str = "/hls/{asset_id}/{track}/index.m3u8";
+const HLS_IFRAME_PLAYLIST: &str = "/hls/{asset_id}/video/iframes.m3u8";
+const HLS_IFRAME_SEGMENT: &str = "/hls/{asset_id}/video/iframes/{frame_index}/media.m4s";
+const HLS_SUBTITLE_PLAYLIST: &str = "/hls/{asset_id}/subtitles/{language}/index.m3u8";
+const HLS_SUBTITLE_FILE: &str = "/hls/{asset_id}/subtitles/{language}/sub.vtt";
+const DASH_SUBTITLE_FILE: &str = "/dash/{asset_id}/subtitles/{language}/sub.vtt";
 const HLS_INIT: &str = "/hls/{asset_id}/{track}/init.mp4";
 const HLS_SEGMENT: &str = "/hls/{asset_id}/{track}/segments/{segment_index}/media.m4s";
 const DASH_MANIFEST: &str = "/dash/{asset_id}/manifest.mpd";
@@ -30,12 +35,17 @@ const DASH_SEGMENT: &str = "/dash/{asset_id}/{track}/segments/{segment_index}/me
 
 /// Every route template, used both to register handlers and to label metrics, so a route
 /// cannot be added to one and forgotten in the other.
-pub(crate) const ROUTES: [&str; 10] = [
+pub(crate) const ROUTES: [&str; 15] = [
     HEALTH,
     READY,
     METRICS,
     HLS_MASTER,
     HLS_MEDIA_PLAYLIST,
+    HLS_IFRAME_PLAYLIST,
+    HLS_IFRAME_SEGMENT,
+    HLS_SUBTITLE_PLAYLIST,
+    HLS_SUBTITLE_FILE,
+    DASH_SUBTITLE_FILE,
     HLS_INIT,
     HLS_SEGMENT,
     DASH_MANIFEST,
@@ -50,6 +60,11 @@ pub(crate) fn router(state: AppState) -> Router {
         .route(METRICS, get(metrics))
         .route(HLS_MASTER, get(master_playlist))
         .route(HLS_MEDIA_PLAYLIST, get(media_playlist))
+        .route(HLS_IFRAME_PLAYLIST, get(iframe_playlist))
+        .route(HLS_IFRAME_SEGMENT, get(iframe_segment))
+        .route(HLS_SUBTITLE_PLAYLIST, get(subtitle_playlist))
+        .route(HLS_SUBTITLE_FILE, get(subtitle_file))
+        .route(DASH_SUBTITLE_FILE, get(subtitle_file))
         .route(HLS_INIT, get(init_segment))
         .route(HLS_SEGMENT, get(media_segment))
         .route(DASH_MANIFEST, get(dash_manifest))

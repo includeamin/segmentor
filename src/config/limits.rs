@@ -30,6 +30,12 @@ pub(crate) struct LimitsConfig {
     pub(crate) max_index_bytes: u64,
     pub(crate) max_connections: usize,
     pub(crate) header_read_timeout_ms: u64,
+    /// Sidecar subtitle files per asset.
+    pub(crate) max_subtitles: usize,
+    /// One subtitle file.
+    pub(crate) max_subtitle_bytes: u64,
+    /// All of one asset's subtitle files together.
+    pub(crate) max_subtitles_total_bytes: u64,
 }
 
 impl LimitsConfig {
@@ -54,6 +60,9 @@ impl LimitsConfig {
             || self.max_index_bytes == 0
             || self.max_connections == 0
             || self.header_read_timeout_ms == 0
+            || self.max_subtitles == 0
+            || self.max_subtitle_bytes == 0
+            || self.max_subtitles_total_bytes == 0
         {
             return Err(Error::Configuration(
                 "all resource limits must be greater than zero".to_owned(),
@@ -87,6 +96,9 @@ impl Default for LimitsConfig {
             max_index_bytes: 4 * 1024 * 1024 * 1024,
             max_connections: 10_000,
             header_read_timeout_ms: 10_000,
+            max_subtitles: 16,
+            max_subtitle_bytes: 2 * 1024 * 1024,
+            max_subtitles_total_bytes: 8 * 1024 * 1024,
         }
     }
 }

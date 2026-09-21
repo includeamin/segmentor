@@ -117,6 +117,7 @@ fn parse_metadata(
         .map(|(edit, track)| (*edit, track.timescale))
         .collect::<Vec<_>>();
     let shifts = edit::timeline_shifts(&timescales, moov.movie_timescale)?;
+    let presentation_offset_ms = edit::shared_offset_millis(&timescales, moov.movie_timescale);
     for ((track, edit), shift) in tracks.iter_mut().zip(edits).zip(shifts) {
         edit::apply(track, edit, shift)?;
     }
@@ -136,6 +137,7 @@ fn parse_metadata(
         source: identity,
         movie_timescale: moov.movie_timescale,
         duration,
+        presentation_offset_ms,
         tracks,
         skipped_tracks,
         fragmentation: moov.fragmented.then(|| crate::media::Fragmentation {
@@ -561,7 +563,7 @@ mod tests {
     use crate::media::CodecConfig;
     use crate::source::LocalMediaSource;
 
-    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    fn block_on<F: Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1228,7 +1230,7 @@ mod tests {
     #[test]
     fn rejects_run_length_entries_that_claim_more_samples_than_stsz() {
         let original = std::fs::read(fixture("h264-aac.mp4")).expect("fixture should read");
-        let mut mutated = original.clone();
+        let mut mutated = original;
         // stts payload: version/flags (4), entry count (4), then (sample_count, delta) pairs.
         let stts = find_type(&mutated, *b"stts");
         mutated[stts + 12..stts + 16].copy_from_slice(&i32::MAX.to_be_bytes());

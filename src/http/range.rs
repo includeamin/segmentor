@@ -31,7 +31,7 @@ pub(crate) fn requested_range(
     headers: &HeaderMap,
     total: u64,
     etag: &HeaderValue,
-) -> std::result::Result<Option<ByteInterval>, ()> {
+) -> Result<Option<ByteInterval>, ()> {
     let Some(value) = headers.get(RANGE) else {
         return Ok(None);
     };

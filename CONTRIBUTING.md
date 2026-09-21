@@ -23,8 +23,11 @@ explains how the code is organised and [testing](docs/internals/testing.md) how 
 - **Bounded by construction.** Anything read from a file or a mapper is untrusted. Check a length
   against the bytes available before allocating, use checked arithmetic, and keep the limits in
   `[limits]` meaningful. `unsafe` is forbidden.
-- **Lint clean.** Clippy runs with `pedantic` and warnings are errors. Prefer fixing the code to
-  allowing the lint, and say why when you allow one.
+- **Lint clean.** `make lint` runs Clippy with `pedantic` and the extra lints in `Cargo.toml`, and
+  warnings are errors. That includes code nothing calls (dead code), unused imports and variables,
+  and leftover `dbg!`, `todo!`, and `unimplemented!`. Delete unused code instead of silencing the
+  warning; when you must allow a lint, use `#[allow(..., reason = "...")]` and say why. CI also
+  runs `make unused-deps` (cargo-machete) to fail on dependencies nothing uses.
 - **Documented.** Behaviour that operators or mapper authors see belongs in the handbook. A change
   that alters an accepted design belongs in a design document first; see below.
 

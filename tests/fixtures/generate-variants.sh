@@ -30,6 +30,15 @@ ffmpeg_quiet \
     -movflags +faststart \
     "$fixture_dir/h264-aac-audio-delay.mp4"
 
+# Video delayed by a second and a half: the video track gets a leading empty edit, so the whole
+# presentation sits on a shifted timeline that sidecar subtitles must follow.
+ffmpeg_quiet \
+    -itsoffset 1.5 -f lavfi -i "$video" -f lavfi -i "$tone_a" \
+    -c:v libx264 -pix_fmt yuv420p -preset medium -g 30 -keyint_min 30 -sc_threshold 0 -bf 2 \
+    -c:a aac -profile:a aac_low -b:a 96k \
+    -movflags +faststart \
+    "$fixture_dir/h264-aac-video-delay.mp4"
+
 # Two audio tracks with different languages.
 ffmpeg_quiet \
     -f lavfi -i "$video" -f lavfi -i "$tone_a" -f lavfi -i "$tone_b" \
