@@ -3144,7 +3144,7 @@
         }
     ],
     "format": {
-        "filename": "/home/includeamin/workspace/vod-module-rs/tests/fixtures/h264-aac.mp4",
+        "filename": "h264-aac.mp4",
         "nb_streams": 2,
         "nb_programs": 0,
         "nb_stream_groups": 0,

@@ -80,12 +80,14 @@ ffmpeg \
     -y \
     "$variable_timing"
 
-ffprobe \
+# Run from the fixture directory on a relative path, so the manifest records `h264-aac.mp4` and
+# not the absolute path of whoever regenerated it.
+(cd "$fixture_dir" && ffprobe \
     -v error \
     -show_format \
     -show_streams \
     -show_packets \
     -of json \
-    "$fixture" > "$probe"
+    h264-aac.mp4) > "$probe"
 
 printf 'Generated MP4 fixtures and %s\n' "$probe"
