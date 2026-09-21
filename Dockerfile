@@ -27,6 +27,7 @@ WORKDIR /src
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY benches ./benches
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
@@ -39,6 +40,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # unit, and stripped debug info.
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY benches ./benches
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     cargo build --release --locked --bin segmentor \
