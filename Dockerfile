@@ -27,6 +27,7 @@ WORKDIR /src
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY benches ./benches
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
@@ -39,6 +40,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 # unit, and stripped debug info.
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY benches ./benches
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     cargo build --release --locked --bin segmentor \
@@ -50,7 +52,7 @@ ARG REVISION=unknown
 LABEL org.opencontainers.image.title="segmentor" \
       org.opencontainers.image.description="On-demand HLS and DASH origin for MP4 files" \
       org.opencontainers.image.source="https://github.com/includeamin/segmentor" \
-      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.licenses="MIT OR Apache-2.0" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}"
 

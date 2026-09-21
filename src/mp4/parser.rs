@@ -138,6 +138,11 @@ fn parse_metadata(
         duration,
         tracks,
         skipped_tracks,
+        fragmentation: moov.fragmented.then(|| crate::media::Fragmentation {
+            fragments: metadata.fragments().len(),
+            discovery: metadata.discovery(),
+            dropped_tail: metadata.dropped_tail(),
+        }),
     })
 }
 

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/includeamin/segmentor/security/advisories/new
+    about: Please report security problems privately, not as a public issue. See SECURITY.md.
+  - name: Ask a question or share how you use it
+    url: https://github.com/includeamin/segmentor/discussions
+    about: For usage questions and ideas that are not yet a concrete request.

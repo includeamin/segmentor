@@ -19,7 +19,7 @@ pub(crate) use http::{
     HttpMediaSource, LocationRefresher, RemoteReader, RemoteSettings, is_public_address,
 };
 pub(crate) use local::LocalMediaSource;
-pub(crate) use metadata::{Fragment, Metadata};
+pub(crate) use metadata::{Discovery, DroppedTail, Fragment, Metadata};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ByteRange {

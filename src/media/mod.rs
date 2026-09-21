@@ -1,3 +1,5 @@
 mod index;
 
-pub(crate) use index::{CodecConfig, MediaIndex, Sample, SkippedTrack, Track, TrackKey, TrackKind};
+pub(crate) use index::{
+    CodecConfig, Fragmentation, MediaIndex, Sample, SkippedTrack, Track, TrackKey, TrackKind,
+};

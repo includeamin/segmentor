@@ -2,11 +2,18 @@
 name = "segmentor"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["Amin Jamal"]
-description = "A video-on-demand application built with Rust"
-license = "MIT"
+description = "On-demand HLS and DASH packaging for MP4 files: serves fragmented MP4 straight from the source, with no pre-generated segments and no transcoding"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/includeamin/segmentor"
+homepage = "https://github.com/includeamin/segmentor"
+documentation = "https://includeamin.github.io/segmentor/"
+readme = "README.md"
+keywords = ["hls", "dash", "video", "mp4", "streaming"]
+categories = ["multimedia::video", "web-programming::http-server"]
+# Fixtures, the handbook, the demo page, and the fuzz crate are large and not needed to build.
+exclude = ["/.github", "/docs", "/demo", "/fuzz", "/tests/fixtures", "/Dockerfile", "/.dockerignore", "/book.toml", "/Makefile"]
 
 [dependencies]
 axum = "0.8"

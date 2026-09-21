@@ -10,6 +10,17 @@ pub(crate) struct MediaIndex {
     pub(crate) tracks: Vec<Track>,
     /// Tracks in the file that are not packaged, with the reason, so the registry can log them.
     pub(crate) skipped_tracks: Vec<SkippedTrack>,
+    /// How a fragmented source's fragments were found; `None` for a progressive file.
+    pub(crate) fragmentation: Option<Fragmentation>,
+}
+
+/// What discovering a fragmented source's fragments involved, for the operator's log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Fragmentation {
+    pub(crate) fragments: usize,
+    pub(crate) discovery: crate::source::Discovery,
+    /// What was left out because the file ends partway through a fragment.
+    pub(crate) dropped_tail: Option<crate::source::DroppedTail>,
 }
 
 /// A track present in the source but left out of the packaged asset.

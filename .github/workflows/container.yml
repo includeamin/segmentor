@@ -1,0 +1,170 @@
+name: Container image
+
+# Builds the image for x86-64 and arm64 on native runners (compiling Rust under emulation would take
+# an hour), publishes one multi-architecture image to the GitHub Container Registry, and signs it.
+# Called by the Release workflow; it can also be run by hand for an existing tag.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Version tag to publish, for example v1.2.0."
+        type: string
+        required: true
+      channel:
+        description: "latest also moves the latest image tag; preview moves the preview tag."
+        type: string
+        default: latest
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to publish, for example v1.2.0."
+        required: true
+      channel:
+        description: "latest also moves the latest image tag; preview moves the preview tag."
+        type: choice
+        options:
+          - latest
+          - preview
+        default: latest
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Name the image
+        run: |
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >>"$GITHUB_ENV"
+          echo "REVISION=$(git rev-parse HEAD)" >>"$GITHUB_ENV"
+          echo "VERSION=${TAG#v}" >>"$GITHUB_ENV"
+        env:
+          TAG: ${{ inputs.tag }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pushed by digest only; the merge job gives the images their tags together.
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            VERSION=${{ env.VERSION }}
+            REVISION=${{ env.REVISION }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # Attestations are made once, for the merged image, below; per-platform attestations
+          # would make each pushed digest an index of indexes.
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=${{ matrix.suffix }}
+          cache-to: type=gha,scope=${{ matrix.suffix }},mode=max
+
+      - name: Export the digest
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "$RUNNER_TEMP/digests/${digest#sha256:}"
+
+      - name: Keep the digest for the merge job
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.suffix }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+
+  merge:
+    name: Publish and sign the multi-architecture image
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ inputs.tag }}
+      CHANNEL: ${{ inputs.channel }}
+    steps:
+      - name: Name the image
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >>"$GITHUB_ENV"
+
+      - name: Download the digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # 0.4.2 is published as 0.4.2 and 0.4, and the channel moves latest or preview. A patch
+      # release never moves a tag it should not: there is no bare `0` tag while the project is 0.x.
+      - name: Create the tagged manifest
+        id: manifest
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          minor="${version%.*}"
+          tags=(-t "$IMAGE:$version" -t "$IMAGE:$minor")
+          if [[ "$CHANNEL" == "preview" ]]; then
+            tags+=(-t "$IMAGE:preview")
+          else
+            tags+=(-t "$IMAGE:latest")
+          fi
+          cd "$RUNNER_TEMP/digests"
+          docker buildx imagetools create "${tags[@]}" $(printf "$IMAGE@sha256:%s " *)
+          digest="$(docker buildx imagetools inspect "$IMAGE:$version" --format '{{json .Manifest}}' | jq -r .digest)"
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          echo "### Published \`$IMAGE\` \`$version\` (\`$digest\`)" >>"$GITHUB_STEP_SUMMARY"
+
+      # Keyless: the signature is bound to this workflow's identity, not to a key someone holds.
+      - name: Sign the image
+        run: cosign sign --yes "$IMAGE@${{ steps.manifest.outputs.digest }}"
+
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true

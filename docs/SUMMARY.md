@@ -16,6 +16,7 @@
   - [Production-grade HTTP API](technical-design/0003-production-grade-http-api.md)
   - [Broader MP4 input support](technical-design/0004-broader-mp4-input-support.md)
   - [Fragmented MP4 input](technical-design/0005-fragmented-mp4-input.md)
+  - [Trick play, subtitles, and adaptive renditions](technical-design/0006-trick-play-subtitles-and-renditions.md)
   - [Technical design template](technical-design/template.md)
 
 # Implementation
