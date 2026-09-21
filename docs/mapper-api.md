@@ -134,7 +134,7 @@ An answer may attach WebVTT subtitle files to the asset:
 
 The server fetches each file when the asset loads and keeps it in memory, so playback never touches the subtitle origin. A file must be UTF-8, must begin with `WEBVTT`, and must have readable cue timing lines. It is limited by `limits.max_subtitle_bytes` (2 MiB), `limits.max_subtitles_total_bytes` (8 MiB per asset), and `limits.max_subtitles` (16). **One bad file fails the whole asset** with the language named, so a viewer never gets a language that is silently missing.
 
-If the media's timeline was moved (an edit list or a late start), the server adds the same offset to every cue, so cues authored against the file's own clock stay in step with the picture. Nothing else in the file changes.
+Cue times are read as times on the source file's own clock, the one its edit lists describe. Packaging can move a file onto a later timeline so that no timestamp is negative (this is what an edit list that trims encoder delay does, and it is typically a few tens of milliseconds), and the server adds that same offset to every cue so they stay in step with the picture. A video that simply starts late, through a leading empty edit, is not an offset: the cues were written against a clock that already includes that gap, so they are left alone. A fragmented file's timeline starts at zero and cues are not moved. Nothing else in the file changes.
 
 **Change `version` when a subtitle file changes.** The server reloads an asset only when its `version` or location changes, so an edited caption under an unchanged version is not picked up until the asset is evicted.
 

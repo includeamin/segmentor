@@ -5,7 +5,7 @@ use bytes::Bytes;
 
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
-use crate::media::{MediaIndex, Sample, Track, TrackKey, TrackKind};
+use crate::media::{MediaIndex, Sample, Track, TrackKey};
 use crate::mp4::ParsedMedia;
 use crate::protocol::{Presentation, dash, hls};
 use crate::segment::{SegmentPlan, TrackSegment};
@@ -338,20 +338,11 @@ impl RenderedManifests {
 /// revision into the version gives such a build new URLs instead.
 const FORMAT_REVISION: u32 = 2;
 
-/// Validates each subtitle file and moves its cues onto the asset's timeline: by the offset the
-/// reference track was shifted by, which is the video track, or the first audio track without one.
+/// Validates each subtitle file and moves its cues onto the asset's timeline, by the offset the
+/// edit lists were resolved with. A track's own delay is not part of it: that is already in the
+/// presentation the cues were written against.
 fn prepare_subtitles(index: &MediaIndex, subtitles: Vec<Subtitle>) -> Result<Vec<Subtitle>> {
-    let reference = index
-        .tracks
-        .iter()
-        .find(|track| track.kind == TrackKind::Video)
-        .or_else(|| index.tracks.first());
-    let offset_ms = reference.map_or(0, |track| {
-        (u128::from(track.timeline_shift) * 1000 + u128::from(track.timescale) / 2)
-            / u128::from(track.timescale)
-    });
-    let offset_ms = u64::try_from(offset_ms)
-        .map_err(|_| Error::InvalidMedia("timeline offset overflow".to_owned()))?;
+    let offset_ms = index.presentation_offset_ms;
     subtitles
         .into_iter()
         .map(|mut subtitle| {

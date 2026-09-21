@@ -129,6 +129,31 @@ fn unsupported(track_id: u32, detail: impl std::fmt::Display) -> Error {
     Error::Unsupported(format!("track {track_id}: {detail}"))
 }
 
+/// The shared offset `O` as a fraction of a second: `(numerator, denominator)`, denominator
+/// positive. Served timestamps are presentation timestamps plus `O`.
+fn shared_offset(edits: &[(TrackEdit, u32)], movie_timescale: u32) -> (i128, i128) {
+    let movie = i128::from(movie_timescale);
+    let mut offset = (0i128, 1i128);
+    for (edit, timescale) in edits {
+        let timescale = i128::from(*timescale);
+        let numerator = i128::from(edit.media_time) * movie - i128::from(edit.delay) * timescale;
+        let denominator = timescale * movie;
+        // numerator/denominator > offset.0/offset.1, without dividing.
+        if numerator * offset.1 > offset.0 * denominator {
+            offset = (numerator, denominator);
+        }
+    }
+    offset
+}
+
+/// `O` in milliseconds, rounded to the nearest: how far later than the source's own clock every
+/// timestamp in the served presentation is. Sidecar subtitles are authored against the source's
+/// clock, so their cues move by this much.
+pub(super) fn shared_offset_millis(edits: &[(TrackEdit, u32)], movie_timescale: u32) -> u64 {
+    let (numerator, denominator) = shared_offset(edits, movie_timescale);
+    u64::try_from((2 * numerator * 1000 + denominator) / (2 * denominator)).unwrap_or(0)
+}
+
 /// One shift per input, in that track's ticks, from the shared offset `O`:
 ///
 /// ```text
@@ -142,17 +167,7 @@ pub(super) fn timeline_shifts(
     movie_timescale: u32,
 ) -> Result<Vec<u64>> {
     let movie = i128::from(movie_timescale);
-    // O as a fraction: (numerator, denominator), denominator positive.
-    let mut offset = (0i128, 1i128);
-    for (edit, timescale) in edits {
-        let timescale = i128::from(*timescale);
-        let numerator = i128::from(edit.media_time) * movie - i128::from(edit.delay) * timescale;
-        let denominator = timescale * movie;
-        // numerator/denominator > offset.0/offset.1, without dividing.
-        if numerator * offset.1 > offset.0 * denominator {
-            offset = (numerator, denominator);
-        }
-    }
+    let offset = shared_offset(edits, movie_timescale);
     edits
         .iter()
         .map(|(edit, timescale)| {

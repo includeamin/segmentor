@@ -117,6 +117,7 @@ fn parse_metadata(
         .map(|(edit, track)| (*edit, track.timescale))
         .collect::<Vec<_>>();
     let shifts = edit::timeline_shifts(&timescales, moov.movie_timescale)?;
+    let presentation_offset_ms = edit::shared_offset_millis(&timescales, moov.movie_timescale);
     for ((track, edit), shift) in tracks.iter_mut().zip(edits).zip(shifts) {
         edit::apply(track, edit, shift)?;
     }
@@ -136,6 +137,7 @@ fn parse_metadata(
         source: identity,
         movie_timescale: moov.movie_timescale,
         duration,
+        presentation_offset_ms,
         tracks,
         skipped_tracks,
         fragmentation: moov.fragmented.then(|| crate::media::Fragmentation {

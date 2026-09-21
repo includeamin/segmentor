@@ -1370,37 +1370,43 @@ async fn invalid_subtitle_entries_from_the_mapper_are_rejected() {
 }
 
 #[tokio::test]
-async fn cues_follow_an_asset_whose_timeline_was_shifted() {
+async fn cues_follow_the_shared_offset_of_the_edit_lists_and_nothing_else() {
     let h = harness().await;
-    h.mapper.state.set(
-        "delayed",
-        Answer::file("v1", "h264-aac-video-delay.mp4").with_subtitle("en", "subtitles-en.vtt"),
-    );
-    h.mapper.state.set(
-        "plain",
-        Answer::file("v1", "h264-aac.mp4").with_subtitle("en", "subtitles-en.vtt"),
-    );
+    for (asset, file) in [
+        // The edit lists trim encoder delay, so everything is served 66.7 ms later than the source.
+        ("edited", "h264-aac-default-edits.mp4"),
+        // The video starts 1.5 s in, which the presentation the cues were written against already
+        // contains: no shift, or the cues would be late by that much.
+        ("delayed", "h264-aac-video-delay.mp4"),
+        ("plain", "h264-aac.mp4"),
+    ] {
+        h.mapper.state.set(
+            asset,
+            Answer::file("v1", file).with_subtitle("en", "subtitles-en.vtt"),
+        );
+    }
 
     let mut served = Vec::new();
-    for asset in ["delayed", "plain"] {
+    for asset in ["edited", "delayed", "plain"] {
         let version = version_in(&fetch(&h.app, &format!("/hls/{asset}/master.m3u8")).await.2);
         let uri = format!("/hls/{asset}/subtitles/en/sub.vtt?v={version}");
         served.push(text(&fetch(&h.app, &uri).await.2));
     }
 
-    // The video starts 1.5 s late, so a cue authored at 0.5 s appears at 2.0 s.
     assert!(
-        served[0].contains("00:00:02.000 --> 00:00:03.000 line:90%"),
+        served[0].contains("00:00:00.567 --> 00:00:01.567 line:90%"),
         "{}",
         served[0]
     );
     assert!(
-        served[0].contains("00:00:03.000 --> 00:00:04.000\nWorld"),
+        served[0].contains("00:00:01.567 --> 00:00:02.567\nWorld"),
         "{}",
         served[0]
     );
-    assert!(
-        served[1].contains("00:00.500 --> 00:01.500 line:90%"),
-        "no shift, no change"
-    );
+    for unchanged in &served[1..] {
+        assert!(
+            unchanged.contains("00:00.500 --> 00:01.500 line:90%"),
+            "{unchanged}"
+        );
+    }
 }

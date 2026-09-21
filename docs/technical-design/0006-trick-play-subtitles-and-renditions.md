@@ -62,7 +62,7 @@ Each I-frame resource, prefixed with the init segment, must decode to exactly on
 
 ## 2. Sidecar WebVTT subtitles
 
-> **Implemented** as designed, with two refinements: an `http` subtitle origin must support ranged requests (it is opened like media, so it gets the same `[remote_media]` and redirect protection), and the size and count limits are `limits.max_subtitle_bytes`, `limits.max_subtitles_total_bytes`, and `limits.max_subtitles`. The version covers subtitle content; a mapper must still change its own `version` when a caption changes, because that is what triggers a reload. Not yet checked in a browser.
+> **Implemented** as designed, with two refinements: an `http` subtitle origin must support ranged requests (it is opened like media, so it gets the same `[remote_media]` and redirect protection), and the size and count limits are `limits.max_subtitle_bytes`, `limits.max_subtitles_total_bytes`, and `limits.max_subtitles`. The version covers subtitle content; a mapper must still change its own `version` when a caption changes, because that is what triggers a reload. Checked in headless Chrome with hls.js and dash.js: cues appear at the right times, including on a file whose edit lists shift the timeline by 67 ms. The shift is the edit lists' shared offset `O`, not a track's own delay (a late-starting video is already part of the presentation the cues were written against), and a fragmented file is not shifted. Not checked in Safari.
 
 ### Mapper answer
 
@@ -80,7 +80,7 @@ An optional `subtitles` list, each entry:
 The file is fetched when the asset loads and is held in memory, so requests never touch the origin:
 
 - **Validation.** UTF-8, at most `limits.max_subtitle_bytes` (default 2 MiB) each and a limit in total, and it must begin with `WEBVTT`. Anything else fails the asset load with a message naming the language.
-- **Timeline correction.** An asset with an edit list or a fragmented start time is moved onto a shifted timeline (see [TDD 0004](0004-broader-mp4-input-support.md)), so a cue authored against the source would appear early or late by that offset. Cue timing lines are shifted by the asset's timeline offset when the file is served. Everything else in the file is passed through unchanged.
+- **Timeline correction.** An asset whose edit lists trim encoder delay is served on a timeline `O` later than the source's clock (see [TDD 0004](0004-broader-mp4-input-support.md)), so a cue authored against the source would appear early by `O`. Cue timing lines are shifted by `O` when the asset loads. A track's own delay is not part of `O`, and a fragmented file, whose timeline starts at zero, is not shifted. Everything else in the file is passed through unchanged.
 - **Version.** The asset version covers the subtitle content, so changing a caption gives new URLs.
 
 ### Output

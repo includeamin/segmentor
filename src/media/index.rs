@@ -7,6 +7,10 @@ pub(crate) struct MediaIndex {
     pub(crate) source: SourceIdentity,
     pub(crate) movie_timescale: u32,
     pub(crate) duration: u64,
+    /// How much later than the source's own clock every served timestamp is, in milliseconds. It
+    /// is the shared offset the edit lists were resolved with; zero for a file without edits and
+    /// for a fragmented file, whose timeline simply starts at zero.
+    pub(crate) presentation_offset_ms: u64,
     pub(crate) tracks: Vec<Track>,
     /// Tracks in the file that are not packaged, with the reason, so the registry can log them.
     pub(crate) skipped_tracks: Vec<SkippedTrack>,
