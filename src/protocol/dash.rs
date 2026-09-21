@@ -4,6 +4,7 @@ use super::Presentation;
 use super::hls::track_language;
 use crate::error::{Error, Result};
 use crate::media::Track;
+use crate::subtitle::Subtitle;
 
 pub(crate) fn manifest(presentation: Presentation<'_>) -> Result<String> {
     let duration = presentation_duration(presentation)?;
@@ -16,6 +17,9 @@ pub(crate) fn manifest(presentation: Presentation<'_>) -> Result<String> {
     }
     for audio in presentation.audio_tracks() {
         write_audio_adaptation(&mut manifest, presentation, audio, version)?;
+    }
+    for subtitle in presentation.subtitles() {
+        write_subtitle_adaptation(&mut manifest, subtitle, version);
     }
     manifest.push_str("  </Period>\n</MPD>\n");
     Ok(manifest)
@@ -69,6 +73,29 @@ fn write_audio_adaptation(
     write_segment_template(manifest, presentation, track, version);
     manifest.push_str("      </Representation>\n    </AdaptationSet>\n");
     Ok(())
+}
+
+/// A sidecar `WebVTT` file as a text adaptation set that names the file directly.
+fn write_subtitle_adaptation(manifest: &mut String, subtitle: &Subtitle, version: &str) {
+    let mut roles = String::new();
+    if subtitle.forced {
+        roles.push_str(
+            "        <Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"forced-subtitle\" />\n",
+        );
+    } else {
+        roles.push_str(
+            "        <Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"subtitle\" />\n",
+        );
+    }
+    if subtitle.default {
+        roles.push_str("        <Role schemeIdUri=\"urn:mpeg:dash:role:2011\" value=\"main\" />\n");
+    }
+    writeln!(
+        manifest,
+        "    <AdaptationSet contentType=\"text\" lang=\"{language}\" mimeType=\"text/vtt\">\n{roles}      <Representation id=\"subtitles-{language}\" bandwidth=\"256\">\n        <BaseURL>subtitles/{language}/sub.vtt?v={version}</BaseURL>\n      </Representation>\n    </AdaptationSet>",
+        language = subtitle.language
+    )
+    .expect("writing to a String cannot fail");
 }
 
 fn write_segment_template(

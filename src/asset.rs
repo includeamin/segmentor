@@ -5,11 +5,12 @@ use bytes::Bytes;
 
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
-use crate::media::{MediaIndex, Sample, Track, TrackKey};
+use crate::media::{MediaIndex, Sample, Track, TrackKey, TrackKind};
 use crate::mp4::ParsedMedia;
 use crate::protocol::{Presentation, dash, hls};
 use crate::segment::{SegmentPlan, TrackSegment};
 use crate::source::{ByteRange, LocalMediaSource, MediaSourceKind};
+use crate::subtitle::{self, Subtitle};
 use crate::{fmp4, mp4, segment};
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ pub(crate) struct PackagedAsset {
     limits: LimitsConfig,
     version: String,
     rendered: RenderedManifests,
+    subtitles: Vec<Subtitle>,
 }
 
 /// Playlists and manifests rendered once at load so requests never walk sample tables.
@@ -30,6 +32,7 @@ struct RenderedManifests {
     hls_master: Bytes,
     hls_media: HashMap<TrackKey, Bytes>,
     hls_iframes: Option<Bytes>,
+    hls_subtitle: Bytes,
     dash: Bytes,
 }
 
@@ -53,10 +56,21 @@ impl PackagedAsset {
         segment_duration_ms: u64,
         limits: &LimitsConfig,
     ) -> Result<Self> {
+        Self::load_with_subtitles(source, Vec::new(), segment_duration_ms, limits).await
+    }
+
+    /// Like [`Self::load`], with sidecar subtitle files already fetched. Each is validated and
+    /// moved onto the asset's timeline; one bad file fails the whole asset.
+    pub(crate) async fn load_with_subtitles(
+        source: MediaSourceKind,
+        subtitles: Vec<Subtitle>,
+        segment_duration_ms: u64,
+        limits: &LimitsConfig,
+    ) -> Result<Self> {
         let parsed = mp4::parse(&source, limits).await?;
         let limits = limits.clone();
         tokio::task::spawn_blocking(move || {
-            Self::assemble(source, parsed, segment_duration_ms, &limits)
+            Self::assemble(source, parsed, subtitles, segment_duration_ms, &limits)
         })
         .await
         .map_err(|error| Error::Io(std::io::Error::other(error)))?
@@ -65,11 +79,13 @@ impl PackagedAsset {
     fn assemble(
         source: MediaSourceKind,
         parsed: ParsedMedia,
+        subtitles: Vec<Subtitle>,
         segment_duration_ms: u64,
         limits: &LimitsConfig,
     ) -> Result<Self> {
         let ParsedMedia { index, metadata } = parsed;
         let plan = segment::plan(&index, segment_duration_ms, limits)?;
+        let subtitles = prepare_subtitles(&index, subtitles)?;
         let init_segments = index
             .tracks
             .iter()
@@ -79,9 +95,10 @@ impl PackagedAsset {
                     .map(|bytes| (track.key, bytes))
             })
             .collect::<Result<HashMap<_, _>>>()?;
-        let version = version_of(&index);
-        let rendered =
-            RenderedManifests::render(Presentation::new(&index.tracks, &plan, &version))?;
+        let version = version_of(&index, &subtitles);
+        let rendered = RenderedManifests::render(
+            Presentation::new(&index.tracks, &plan, &version).with_subtitles(&subtitles),
+        )?;
         Ok(Self {
             source,
             index,
@@ -90,6 +107,7 @@ impl PackagedAsset {
             limits: limits.clone(),
             version,
             rendered,
+            subtitles,
         })
     }
 
@@ -100,6 +118,7 @@ impl PackagedAsset {
     /// The read-only view renderers work from.
     pub(crate) fn presentation(&self) -> Presentation<'_> {
         Presentation::new(&self.index.tracks, &self.plan, &self.version)
+            .with_subtitles(&self.subtitles)
     }
 
     pub(crate) fn init_segment(&self, key: TrackKey) -> Result<Bytes> {
@@ -157,6 +176,21 @@ impl PackagedAsset {
             .checked_add(1)
             .ok_or_else(|| Error::InvalidMedia("sequence number overflow".to_owned()))?;
         fmp4::prepare_media_segment(track, segment, sequence_number, &self.limits)
+    }
+
+    /// The HLS playlist that lists one subtitle file.
+    pub(crate) fn hls_subtitle_playlist(&self, language: &str) -> Result<Bytes> {
+        self.subtitle(language)?;
+        Ok(self.rendered.hls_subtitle.clone())
+    }
+
+    /// A subtitle file, ready to serve.
+    pub(crate) fn subtitle(&self, language: &str) -> Result<Bytes> {
+        self.subtitles
+            .iter()
+            .find(|subtitle| subtitle.language.eq_ignore_ascii_case(language))
+            .map(|subtitle| subtitle.data.clone())
+            .ok_or(Error::NotFound("subtitle does not exist"))
     }
 
     pub(crate) fn dash_manifest(&self) -> Bytes {
@@ -264,9 +298,15 @@ impl PackagedAsset {
                 .values()
                 .map(Bytes::len)
                 .sum::<usize>();
-        (samples.saturating_mul(std::mem::size_of::<Sample>()) as u64)
+        (samples.saturating_mul(size_of::<Sample>()) as u64)
             .saturating_add(init as u64)
             .saturating_add(rendered as u64)
+            .saturating_add(
+                self.subtitles
+                    .iter()
+                    .map(|subtitle| subtitle.data.len() as u64)
+                    .sum(),
+            )
     }
 }
 
@@ -284,6 +324,7 @@ impl RenderedManifests {
             hls_master: Bytes::from(hls::master_playlist(presentation)?),
             hls_media,
             hls_iframes: hls::iframe_playlist(presentation)?.map(Bytes::from),
+            hls_subtitle: Bytes::from(hls::subtitle_playlist(presentation)),
             dash: Bytes::from(dash::manifest(presentation)?),
         })
     }
@@ -297,9 +338,33 @@ impl RenderedManifests {
 /// revision into the version gives such a build new URLs instead.
 const FORMAT_REVISION: u32 = 2;
 
+/// Validates each subtitle file and moves its cues onto the asset's timeline: by the offset the
+/// reference track was shifted by, which is the video track, or the first audio track without one.
+fn prepare_subtitles(index: &MediaIndex, subtitles: Vec<Subtitle>) -> Result<Vec<Subtitle>> {
+    let reference = index
+        .tracks
+        .iter()
+        .find(|track| track.kind == TrackKind::Video)
+        .or_else(|| index.tracks.first());
+    let offset_ms = reference.map_or(0, |track| {
+        (u128::from(track.timeline_shift) * 1000 + u128::from(track.timescale) / 2)
+            / u128::from(track.timescale)
+    });
+    let offset_ms = u64::try_from(offset_ms)
+        .map_err(|_| Error::InvalidMedia("timeline offset overflow".to_owned()))?;
+    subtitles
+        .into_iter()
+        .map(|mut subtitle| {
+            subtitle.data = subtitle::prepare(&subtitle.language, &subtitle.data, offset_ms)?;
+            Ok(subtitle)
+        })
+        .collect()
+}
+
 /// The `v` value in media URLs: a hash of everything the index was built from (`moov`, and every
-/// `moof` of a fragmented file) and [`FORMAT_REVISION`].
-fn version_of(index: &MediaIndex) -> String {
+/// `moof` of a fragmented file), [`FORMAT_REVISION`], and any subtitle files, so changing a
+/// caption gives new URLs.
+fn version_of(index: &MediaIndex, subtitles: &[Subtitle]) -> String {
     use std::fmt::Write;
 
     use sha2::{Digest, Sha256};
@@ -312,6 +377,18 @@ fn version_of(index: &MediaIndex) -> String {
             .expect("parsed assets always have a metadata hash"),
     );
     hasher.update(FORMAT_REVISION.to_be_bytes());
+    // Absent subtitles add nothing, so an asset without them keeps the version it always had.
+    for subtitle in subtitles {
+        for part in [
+            subtitle.language.as_bytes(),
+            subtitle.label.as_bytes(),
+            &[u8::from(subtitle.default), u8::from(subtitle.forced)],
+            &subtitle.data,
+        ] {
+            hasher.update((part.len() as u64).to_be_bytes());
+            hasher.update(part);
+        }
+    }
     hasher
         .finalize()
         .iter()
@@ -349,7 +426,7 @@ mod tests {
         assert!(asset.version().bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_ne!(asset.version(), moov_only);
         assert_eq!(
-            version_of(&asset.index),
+            version_of(&asset.index, &[]),
             asset.version(),
             "and it is stable"
         );

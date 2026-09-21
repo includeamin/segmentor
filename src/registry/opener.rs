@@ -1,11 +1,17 @@
 //! Turns a resolved location into an open media source.
 
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
+
+use bytes::Bytes;
+use reqwest::Url;
 
 use crate::error::{Error, Result};
 use crate::resolver::AssetLocation;
-use crate::source::{LocalMediaSource, LocationRefresher, MediaSourceKind, RemoteReader};
+use crate::source::{
+    ByteRange, LocalMediaSource, LocationRefresher, MediaSourceKind, RemoteReader,
+};
 
 #[derive(Debug)]
 pub(crate) struct SourceOpener {
@@ -42,6 +48,44 @@ impl SourceOpener {
                 Ok(MediaSourceKind::Http(Arc::new(source)))
             }
         }
+    }
+}
+
+impl SourceOpener {
+    /// Reads a whole small object, such as a subtitle file, refusing one over `max_bytes` before
+    /// any of it is read. It goes through the same confinement and remote-media rules as media.
+    pub(crate) async fn read_whole(
+        &self,
+        location: &AssetLocation,
+        max_bytes: u64,
+    ) -> Result<Bytes> {
+        let source = match location {
+            AssetLocation::File(_) => self.open(location, Arc::new(NoRefresh)).await?,
+            AssetLocation::Http(url) => {
+                MediaSourceKind::Http(Arc::new(self.remote.open(url.clone()).await?))
+            }
+        };
+        let length = source.len();
+        if length > max_bytes {
+            return Err(Error::InvalidMedia(format!(
+                "file is {length} bytes, more than the limit of {max_bytes}"
+            )));
+        }
+        source.read_range(ByteRange::new(0, length)).await
+    }
+}
+
+/// For an object that has no signed URL to renew.
+#[derive(Debug)]
+struct NoRefresh;
+
+impl LocationRefresher for NoRefresh {
+    fn refresh(&self) -> Pin<Box<dyn Future<Output = Result<Url>> + Send + '_>> {
+        Box::pin(async {
+            Err(Error::Upstream(
+                "this location cannot be refreshed".to_owned(),
+            ))
+        })
     }
 }
 

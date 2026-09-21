@@ -53,15 +53,27 @@ pub(crate) struct Answer {
     pub(crate) location: Value,
     pub(crate) ttl_seconds: Option<u64>,
     pub(crate) expires_at: Option<String>,
+    pub(crate) subtitles: Vec<Value>,
 }
 
 impl Answer {
+    /// Adds a `file` subtitle entry.
+    pub(crate) fn with_subtitle(mut self, language: &str, path: &str) -> Self {
+        self.subtitles.push(json!({
+            "language": language,
+            "label": language.to_uppercase(),
+            "location": { "type": "file", "path": path },
+        }));
+        self
+    }
+
     pub(crate) fn file(version: &str, path: &str) -> Self {
         Self {
             version: version.to_owned(),
             location: json!({ "type": "file", "path": path }),
             ttl_seconds: Some(300),
             expires_at: None,
+            subtitles: Vec::new(),
         }
     }
 
@@ -71,6 +83,7 @@ impl Answer {
             location: json!({ "type": "http", "url": url }),
             ttl_seconds: Some(300),
             expires_at: None,
+            subtitles: Vec::new(),
         }
     }
 }
@@ -190,6 +203,9 @@ async fn mapper_asset(
         "version": answer.version,
         "location": answer.location,
     });
+    if !answer.subtitles.is_empty() {
+        body["subtitles"] = json!(answer.subtitles);
+    }
     if let Some(ttl) = answer.ttl_seconds {
         body["ttl_seconds"] = json!(ttl);
     }

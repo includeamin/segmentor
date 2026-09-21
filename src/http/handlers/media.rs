@@ -83,6 +83,40 @@ pub(crate) async fn media_segment(
     .await
 }
 
+/// A sidecar `WebVTT` file, served under both protocols.
+pub(crate) async fn subtitle_file(
+    State(state): State<AppState>,
+    Path((asset_id, language)): Path<(String, String)>,
+    Query(version): Query<VersionQuery>,
+    headers: HeaderMap,
+) -> HttpResult<Response> {
+    let asset = state.asset(&asset_id).await?;
+    version.require(&asset)?;
+    let etag = entity_tag(
+        &asset,
+        &format!("subtitle-{}", language.to_ascii_lowercase()),
+    );
+    if not_modified(&headers, &etag) {
+        return not_modified_response(etag, "public, max-age=31536000, immutable");
+    }
+    let bytes = asset.subtitle(&language)?;
+    let total = bytes.len() as u64;
+    let Ok(range) = requested_range(&headers, total, &etag) else {
+        return range_not_satisfiable(total);
+    };
+    let selected = range.unwrap_or(ByteInterval {
+        start: 0,
+        end: total,
+    });
+    let (start, end) = (
+        usize::try_from(selected.start).map_err(|_| HttpError::internal("range".to_owned()))?,
+        usize::try_from(selected.end).map_err(|_| HttpError::internal("range".to_owned()))?,
+    );
+    media_response_builder(total, selected, etag, "text/vtt; charset=utf-8")
+        .body(Body::from(bytes.slice(start..end)))
+        .map_err(|error| HttpError::internal(error.to_string()))
+}
+
 /// One keyframe of the video track as a fragment of its own, for HLS I-frame playlists.
 pub(crate) async fn iframe_segment(
     State(state): State<AppState>,

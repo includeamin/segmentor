@@ -62,6 +62,8 @@ Each I-frame resource, prefixed with the init segment, must decode to exactly on
 
 ## 2. Sidecar WebVTT subtitles
 
+> **Implemented** as designed, with two refinements: an `http` subtitle origin must support ranged requests (it is opened like media, so it gets the same `[remote_media]` and redirect protection), and the size and count limits are `limits.max_subtitle_bytes`, `limits.max_subtitles_total_bytes`, and `limits.max_subtitles`. The version covers subtitle content; a mapper must still change its own `version` when a caption changes, because that is what triggers a reload. Not yet checked in a browser.
+
 ### Mapper answer
 
 An optional `subtitles` list, each entry:

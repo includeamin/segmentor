@@ -29,6 +29,7 @@ impl StaticResolver {
         let path = self.assets.get(asset_id).ok_or(ResolveError::NotFound)?;
         Ok(Resolution::Resolved(ResolvedAsset {
             location: AssetLocation::File(path.clone()),
+            subtitles: Vec::new(),
             version: STATIC_VERSION.to_owned(),
             valid_until: Instant::now() + FOREVER,
             hard_expiry: None,

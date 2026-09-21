@@ -23,6 +23,7 @@ mod registry;
 mod resolver;
 mod segment;
 mod source;
+mod subtitle;
 #[cfg(test)]
 mod testutil;
 

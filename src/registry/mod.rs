@@ -29,8 +29,11 @@ use crate::asset::PackagedAsset;
 use crate::config::{Config, LimitsConfig, is_valid_asset_id};
 use crate::error::{Error, Result};
 use crate::observability::metrics::{CacheEvent, Metrics, ResolverOutcome};
-use crate::resolver::{AssetLocation, AssetResolver, Resolution, ResolveError, ResolvedAsset};
+use crate::resolver::{
+    AssetLocation, AssetResolver, Resolution, ResolveError, ResolvedAsset, SubtitleLocation,
+};
 use crate::source::LocationRefresher;
+use crate::subtitle::Subtitle;
 use cache::LoadedCache;
 pub(crate) use opener::SourceOpener;
 
@@ -546,6 +549,49 @@ impl AssetRegistry {
         }
     }
 
+    /// Fetches every sidecar subtitle file the mapper listed, within the configured limits. A file
+    /// that cannot be read fails the asset, so a viewer never gets a silently missing language.
+    async fn fetch_subtitles(&self, listed: &[SubtitleLocation]) -> Result<Vec<Subtitle>> {
+        if listed.len() > self.limits.max_subtitles {
+            return Err(Error::InvalidMedia(format!(
+                "the mapper listed {} subtitles, more than limits.max_subtitles ({})",
+                listed.len(),
+                self.limits.max_subtitles
+            )));
+        }
+        let mut total = 0u64;
+        let mut subtitles = Vec::with_capacity(listed.len());
+        for entry in listed {
+            let data = self
+                .opener
+                .read_whole(&entry.location, self.limits.max_subtitle_bytes)
+                .await
+                .map_err(|error| match error {
+                    // Only a bad file is named; an outage or a rejected location keeps its kind, so
+                    // it is retried or reported as the mapper's fault and not as broken media.
+                    Error::InvalidMedia(message) => {
+                        Error::InvalidMedia(format!("subtitle `{}`: {message}", entry.language))
+                    }
+                    other => other,
+                })?;
+            total = total.saturating_add(data.len() as u64);
+            if total > self.limits.max_subtitles_total_bytes {
+                return Err(Error::InvalidMedia(format!(
+                    "subtitles exceed limits.max_subtitles_total_bytes ({})",
+                    self.limits.max_subtitles_total_bytes
+                )));
+            }
+            subtitles.push(Subtitle {
+                language: entry.language.clone(),
+                label: entry.label.clone(),
+                default: entry.default,
+                forced: entry.forced,
+                data,
+            });
+        }
+        Ok(subtitles)
+    }
+
     async fn load(
         self: &Arc<Self>,
         asset_id: &str,
@@ -575,7 +621,14 @@ impl AssetRegistry {
                     Arc::clone(&refresher) as Arc<dyn LocationRefresher>,
                 )
                 .await?;
-            PackagedAsset::load(source, self.settings.segment_duration_ms, &self.limits).await
+            let subtitles = self.fetch_subtitles(&resolved.subtitles).await?;
+            PackagedAsset::load_with_subtitles(
+                source,
+                subtitles,
+                self.settings.segment_duration_ms,
+                &self.limits,
+            )
+            .await
         }
         .await;
         if result.is_ok() {

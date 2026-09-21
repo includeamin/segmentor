@@ -3,6 +3,7 @@ use std::fmt::Write;
 use super::Presentation;
 use crate::error::{Error, Result};
 use crate::media::{Track, TrackKey};
+use crate::subtitle::Subtitle;
 
 pub(crate) fn master_playlist(presentation: Presentation<'_>) -> Result<String> {
     let video = presentation.video();
@@ -30,6 +31,10 @@ pub(crate) fn master_playlist(presentation: Presentation<'_>) -> Result<String> 
         }
     }
 
+    for subtitle in presentation.subtitles() {
+        write_subtitle_rendition(&mut playlist, subtitle, version);
+    }
+
     let mut bandwidth = 0u64;
     let mut average_bandwidth = 0u64;
     for track in video.into_iter().chain(audio) {
@@ -50,9 +55,14 @@ pub(crate) fn master_playlist(presentation: Presentation<'_>) -> Result<String> 
         playlist.push_str(&iframes);
     }
     let audio_attribute = if audio_group { ",AUDIO=\"audio\"" } else { "" };
+    let subtitle_attribute = if presentation.subtitles().is_empty() {
+        ""
+    } else {
+        ",SUBTITLES=\"subs\""
+    };
     writeln!(
         playlist,
-        "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={average_bandwidth},CODECS=\"{}\"{resolution}{audio_attribute}",
+        "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={average_bandwidth},CODECS=\"{}\"{resolution}{audio_attribute}{subtitle_attribute}",
         codecs.join(",")
     )
     .expect("writing to a String cannot fail");
@@ -90,6 +100,17 @@ pub(crate) fn media_playlist(presentation: Presentation<'_>, key: TrackKey) -> R
     }
     playlist.push_str("#EXT-X-ENDLIST\n");
     Ok(playlist)
+}
+
+/// The playlist that lists a subtitle file: the whole file as a single segment as long as the
+/// presentation, which is valid for VOD. It is the same for every language, because it names the
+/// file relative to its own location.
+pub(crate) fn subtitle_playlist(presentation: Presentation<'_>) -> String {
+    let seconds = presentation.duration_seconds().max(1);
+    let version = presentation.version();
+    format!(
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{seconds}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:{seconds}.000,\nsub.vtt?v={version}\n#EXT-X-ENDLIST\n"
+    )
 }
 
 /// The I-frame playlist of the video track: one entry per keyframe, each its own one-sample
@@ -210,6 +231,23 @@ fn bits_per_second(bytes: u64, ticks: u64, timescale: u32) -> Option<u64> {
         .checked_mul(8)?
         .checked_mul(u64::from(timescale))?
         .checked_div(ticks)
+}
+
+/// One `#EXT-X-MEDIA:TYPE=SUBTITLES` line. `AUTOSELECT` follows `DEFAULT`, and `FORCED` marks
+/// a track a player should show even when the viewer has not asked for subtitles.
+fn write_subtitle_rendition(playlist: &mut String, subtitle: &Subtitle, version: &str) {
+    let flag = |value: bool| if value { "YES" } else { "NO" };
+    let name = subtitle.label.replace('"', "'");
+    writeln!(
+        playlist,
+        "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"{name}\",LANGUAGE=\"{}\",DEFAULT={},AUTOSELECT={},FORCED={},URI=\"subtitles/{}/index.m3u8?v={version}\"",
+        subtitle.language,
+        flag(subtitle.default),
+        flag(subtitle.default || subtitle.forced),
+        flag(subtitle.forced),
+        subtitle.language
+    )
+    .expect("writing to a String cannot fail");
 }
 
 /// One `#EXT-X-MEDIA` line. Renditions are named by position, because the handler names encoders

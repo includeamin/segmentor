@@ -6,6 +6,7 @@
 use crate::error::{Error, Result};
 use crate::media::{Sample, Track, TrackKey, TrackKind};
 use crate::segment::{SegmentPlan, TrackSegment};
+use crate::subtitle::Subtitle;
 
 /// Bits per second for one track, in the terms HLS and DASH declare them.
 #[derive(Debug, Clone, Copy)]
@@ -20,6 +21,7 @@ pub(crate) struct Presentation<'a> {
     tracks: &'a [Track],
     plan: &'a SegmentPlan,
     version: &'a str,
+    subtitles: &'a [Subtitle],
 }
 
 impl<'a> Presentation<'a> {
@@ -28,7 +30,26 @@ impl<'a> Presentation<'a> {
             tracks,
             plan,
             version,
+            subtitles: &[],
         }
+    }
+
+    /// The same view with the asset's sidecar subtitles.
+    pub(crate) const fn with_subtitles(self, subtitles: &'a [Subtitle]) -> Self {
+        Self { subtitles, ..self }
+    }
+
+    pub(crate) const fn subtitles(&self) -> &'a [Subtitle] {
+        self.subtitles
+    }
+
+    /// The presentation's length in seconds, rounded up: the longest track.
+    pub(crate) fn duration_seconds(&self) -> u64 {
+        self.tracks
+            .iter()
+            .map(|track| track.duration.div_ceil(u64::from(track.timescale)))
+            .max()
+            .unwrap_or(0)
     }
 
     pub(crate) const fn tracks(&self) -> &'a [Track] {

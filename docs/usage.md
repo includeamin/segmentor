@@ -20,7 +20,10 @@ Each asset exposes:
 /hls/{asset}/video/iframes/{n}/media.m4s   (one keyframe as its own fragment)
 /hls/{asset}/{track}/init.mp4
 /hls/{asset}/{track}/segments/{index}/media.m4s
+/hls/{asset}/subtitles/{language}/index.m3u8   (when the mapper lists subtitles)
+/hls/{asset}/subtitles/{language}/sub.vtt
 /dash/{asset}/manifest.mpd
+/dash/{asset}/subtitles/{language}/sub.vtt
 /dash/{asset}/{track}/init.mp4
 /dash/{asset}/{track}/segments/{index}/media.m4s
 /health   liveness

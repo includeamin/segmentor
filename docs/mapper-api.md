@@ -58,6 +58,7 @@ A file on an HTTP origin:
 | `location.type` | Yes | `file` or `http`. Anything else is rejected |
 | `location.path` | For `file` | Relative to `storage.media_root`; no leading `/`, no `.` or `..` components, no NUL, at most 4096 bytes |
 | `location.url` | For `http` | See [Remote locations](#remote-locations) |
+| `subtitles` | No | Sidecar WebVTT files; see [Subtitles](#subtitles) |
 
 ### `304 Not Modified`
 
@@ -104,6 +105,40 @@ Signed query parameters are treated as secrets: they are not logged at `info` an
 - **Recovery on rejection.** If the origin answers `401`, `403`, or `410` to a read (an expired or revoked signature, or clock skew), the server asks the mapper once for a fresh answer, without an `If-None-Match`, and retries the read. Concurrent rejections share one lookup. If the mapper cannot provide a working location, the response ends in an error rather than retrying forever. This recovery is disabled while an asset is first loading; a rejected location at that point is a `502`.
 
 So: set `expires_at` on anything signed, keep the **same `version`** when you only re-sign, and answer unconditional requests (no `If-None-Match`) with a full body and a new signature. A `304` is only appropriate while the current signature is still valid.
+
+## Subtitles
+
+An answer may attach WebVTT subtitle files to the asset:
+
+```json
+{
+  "asset_id": "movie",
+  "version": "2026-09-21-a",
+  "location": { "type": "file", "path": "movie.mp4" },
+  "subtitles": [
+    { "language": "en", "label": "English", "default": true,
+      "location": { "type": "file", "path": "subs/movie.en.vtt" } },
+    { "language": "fr", "label": "Français", "forced": false,
+      "location": { "type": "http", "url": "https://origin.example.net/subs/movie.fr.vtt" } }
+  ]
+}
+```
+
+| Field | Required | Rules |
+| --- | --- | --- |
+| `language` | Yes | A BCP 47 tag of letters, digits, and hyphens, starting with a letter, at most 35 characters. Unique within the asset, ignoring case. It appears in the URLs |
+| `label` | No | What a player shows the viewer. Defaults to the language. At most 128 bytes, no control characters |
+| `default` | No | The player selects this one unless the viewer chose otherwise. At most one entry may set it |
+| `forced` | No | The track is meant to be shown even when the viewer has not asked for subtitles |
+| `location` | Yes | A `file` or `http` location with the same rules as the media's, including the `[remote_media]` policy. An `http` origin must support ranged requests, as media origins do |
+
+The server fetches each file when the asset loads and keeps it in memory, so playback never touches the subtitle origin. A file must be UTF-8, must begin with `WEBVTT`, and must have readable cue timing lines. It is limited by `limits.max_subtitle_bytes` (2 MiB), `limits.max_subtitles_total_bytes` (8 MiB per asset), and `limits.max_subtitles` (16). **One bad file fails the whole asset** with the language named, so a viewer never gets a language that is silently missing.
+
+If the media's timeline was moved (an edit list or a late start), the server adds the same offset to every cue, so cues authored against the file's own clock stay in step with the picture. Nothing else in the file changes.
+
+**Change `version` when a subtitle file changes.** The server reloads an asset only when its `version` or location changes, so an edited caption under an unchanged version is not picked up until the asset is evicted.
+
+The HLS master playlist gains an `#EXT-X-MEDIA:TYPE=SUBTITLES` entry per file, served from `/hls/{asset}/subtitles/{language}/index.m3u8`, and the DASH manifest gains a text adaptation set. Both point at `/{hls|dash}/{asset}/subtitles/{language}/sub.vtt?v={version}`.
 
 ## What a `version` means to the server
 
@@ -164,5 +199,6 @@ Then `curl http://127.0.0.1:3000/hls/movie/master.m3u8`.
 - Removed assets answer `404` or `410`, not `200`.
 - Answers are small (the server's default limit is 16 KiB).
 - The mapper answers quickly: the server's default per-request timeout is two seconds, with two retries.
+- `version` also changes when a subtitle file changes.
 - `expires_at` is set for anything signed, and re-signing keeps the same `version`.
 - The mapper is reachable over `https` in production and requires the bearer token.

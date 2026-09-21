@@ -1164,3 +1164,243 @@ fn locations_that_differ_only_in_their_query_are_the_same_object() {
     assert!(File("a.mp4".into()).same_object(&File("a.mp4".into())));
     assert!(!File("a.mp4".into()).same_object(&url("https://o.example/a.mp4")));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Sidecar subtitles
+// ---------------------------------------------------------------------------------------------
+
+fn text(bytes: &Bytes) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[tokio::test]
+async fn subtitles_from_the_mapper_appear_in_both_protocols_and_are_served() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "movie",
+        Answer::file("v1", "h264-aac.mp4")
+            .with_subtitle("en", "subtitles-en.vtt")
+            .with_subtitle("fr", "subtitles-fr.vtt"),
+    );
+
+    let (status, _, master) = fetch(&h.app, "/hls/movie/master.m3u8").await;
+    let master_text = text(&master);
+    let version = version_in(&master);
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(master_text.contains("TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"EN\",LANGUAGE=\"en\""));
+    assert!(master_text.contains(&format!("URI=\"subtitles/fr/index.m3u8?v={version}\"")));
+    assert!(master_text.contains(",SUBTITLES=\"subs\""), "{master_text}");
+
+    let (status, headers, playlist) = fetch(&h.app, "/hls/movie/subtitles/en/index.m3u8").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "application/vnd.apple.mpegurl");
+    assert!(text(&playlist).contains(&format!("sub.vtt?v={version}")));
+
+    let uri = format!("/hls/movie/subtitles/en/sub.vtt?v={version}");
+    let (status, headers, file) = fetch(&h.app, &uri).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "text/vtt; charset=utf-8");
+    assert!(
+        headers["cache-control"]
+            .to_str()
+            .unwrap()
+            .contains("immutable")
+    );
+    assert!(text(&file).starts_with("WEBVTT"));
+    assert_eq!(
+        fetch(
+            &h.app,
+            &format!("/dash/movie/subtitles/en/sub.vtt?v={version}")
+        )
+        .await
+        .2,
+        file
+    );
+
+    let (_, _, manifest) = fetch(&h.app, "/dash/movie/manifest.mpd").await;
+    let manifest = text(&manifest);
+    assert!(
+        manifest.contains("lang=\"fr\" mimeType=\"text/vtt\""),
+        "{manifest}"
+    );
+    assert!(manifest.contains(&format!(
+        "<BaseURL>subtitles/en/sub.vtt?v={version}</BaseURL>"
+    )));
+}
+
+#[tokio::test]
+async fn subtitle_urls_need_the_current_version_and_a_listed_language() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "movie",
+        Answer::file("v1", "h264-aac.mp4").with_subtitle("en", "subtitles-en.vtt"),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/movie/master.m3u8").await.2);
+
+    for uri in [
+        "/hls/movie/subtitles/en/sub.vtt".to_owned(),
+        "/hls/movie/subtitles/en/sub.vtt?v=stale".to_owned(),
+        format!("/hls/movie/subtitles/de/sub.vtt?v={version}"),
+        "/hls/movie/subtitles/de/index.m3u8".to_owned(),
+    ] {
+        assert_eq!(status(&h.app, &uri).await, StatusCode::NOT_FOUND, "{uri}");
+    }
+    let uri = format!("/hls/movie/subtitles/EN/sub.vtt?v={version}");
+    assert_eq!(
+        status(&h.app, &uri).await,
+        StatusCode::OK,
+        "language matches without case"
+    );
+}
+
+#[tokio::test]
+async fn an_asset_without_subtitles_is_unchanged() {
+    let h = harness().await;
+    h.mapper
+        .state
+        .set("movie", Answer::file("v1", "h264-aac.mp4"));
+
+    let master = text(&fetch(&h.app, "/hls/movie/master.m3u8").await.2);
+
+    assert!(!master.contains("SUBTITLES"), "{master}");
+    assert!(!text(&fetch(&h.app, "/dash/movie/manifest.mpd").await.2).contains("text/vtt"));
+}
+
+#[tokio::test]
+async fn changing_a_caption_gives_the_asset_new_urls() {
+    let h = harness().await;
+    let mut first = Answer::file("v1", "h264-aac.mp4").with_subtitle("en", "subtitles-en.vtt");
+    first.ttl_seconds = Some(0);
+    h.mapper.state.set("movie", first);
+    let old = version_in(&fetch(&h.app, "/hls/movie/master.m3u8").await.2);
+
+    // The mapper changes its version when a caption changes, as its contract says it must.
+    let mut second = Answer::file("v2", "h264-aac.mp4").with_subtitle("en", "subtitles-fr.vtt");
+    second.ttl_seconds = Some(0);
+    h.mapper.state.set("movie", second);
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let new = version_in(&fetch(&h.app, "/hls/movie/master.m3u8").await.2);
+
+    assert_ne!(old, new);
+    assert_eq!(
+        status(&h.app, &format!("/hls/movie/subtitles/en/sub.vtt?v={old}")).await,
+        StatusCode::NOT_FOUND,
+        "the old URL stops resolving"
+    );
+    let file = fetch(&h.app, &format!("/hls/movie/subtitles/en/sub.vtt?v={new}"))
+        .await
+        .2;
+    assert!(text(&file).contains("Bonjour"));
+}
+
+#[tokio::test]
+async fn a_bad_subtitle_fails_the_asset() {
+    for (path, expected) in [
+        // Not WebVTT: the media is fine and the file is not.
+        ("subtitles-bad.srt", StatusCode::INTERNAL_SERVER_ERROR),
+        // Not there: the mapper pointed at something that does not exist.
+        ("missing.vtt", StatusCode::BAD_GATEWAY),
+    ] {
+        let h = harness().await;
+        h.mapper.state.set(
+            "movie",
+            Answer::file("v1", "h264-aac.mp4").with_subtitle("fr", path),
+        );
+
+        assert_eq!(
+            status(&h.app, "/hls/movie/master.m3u8").await,
+            expected,
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn subtitle_limits_are_enforced() {
+    let h = harness_with(|config| config.limits.max_subtitle_bytes = 20).await;
+    h.mapper.state.set(
+        "movie",
+        Answer::file("v1", "h264-aac.mp4").with_subtitle("en", "subtitles-en.vtt"),
+    );
+    assert_ne!(
+        status(&h.app, "/hls/movie/master.m3u8").await,
+        StatusCode::OK,
+        "a file over max_subtitle_bytes fails the asset"
+    );
+
+    let h = harness_with(|config| config.limits.max_subtitles = 1).await;
+    h.mapper.state.set(
+        "movie",
+        Answer::file("v1", "h264-aac.mp4")
+            .with_subtitle("en", "subtitles-en.vtt")
+            .with_subtitle("fr", "subtitles-fr.vtt"),
+    );
+    assert_ne!(
+        status(&h.app, "/hls/movie/master.m3u8").await,
+        StatusCode::OK,
+        "more files than max_subtitles fails the asset"
+    );
+}
+
+#[tokio::test]
+async fn invalid_subtitle_entries_from_the_mapper_are_rejected() {
+    for entries in [
+        // A language that is not a URL-safe tag.
+        r#"[{"language":"../x","location":{"type":"file","path":"subtitles-en.vtt"}}]"#,
+        // The same language twice, differing only in case.
+        r#"[{"language":"en","location":{"type":"file","path":"subtitles-en.vtt"}},{"language":"EN","location":{"type":"file","path":"subtitles-fr.vtt"}}]"#,
+        // Two defaults.
+        r#"[{"language":"en","default":true,"location":{"type":"file","path":"subtitles-en.vtt"}},{"language":"fr","default":true,"location":{"type":"file","path":"subtitles-fr.vtt"}}]"#,
+        // A path that escapes the media root.
+        r#"[{"language":"en","location":{"type":"file","path":"../secret.vtt"}}]"#,
+        // A remote host the policy does not allow.
+        r#"[{"language":"en","location":{"type":"http","url":"http://evil.example/x.vtt"}}]"#,
+    ] {
+        let h = harness().await;
+        *h.mapper.state.raw_body.lock().unwrap() = Some(format!(
+            r#"{{"asset_id":"movie","version":"v1","location":{{"type":"file","path":"h264-aac.mp4"}},"subtitles":{entries}}}"#
+        ));
+        assert_eq!(
+            status(&h.app, "/hls/movie/master.m3u8").await,
+            StatusCode::BAD_GATEWAY,
+            "{entries}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cues_follow_an_asset_whose_timeline_was_shifted() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "delayed",
+        Answer::file("v1", "h264-aac-video-delay.mp4").with_subtitle("en", "subtitles-en.vtt"),
+    );
+    h.mapper.state.set(
+        "plain",
+        Answer::file("v1", "h264-aac.mp4").with_subtitle("en", "subtitles-en.vtt"),
+    );
+
+    let mut served = Vec::new();
+    for asset in ["delayed", "plain"] {
+        let version = version_in(&fetch(&h.app, &format!("/hls/{asset}/master.m3u8")).await.2);
+        let uri = format!("/hls/{asset}/subtitles/en/sub.vtt?v={version}");
+        served.push(text(&fetch(&h.app, &uri).await.2));
+    }
+
+    // The video starts 1.5 s late, so a cue authored at 0.5 s appears at 2.0 s.
+    assert!(
+        served[0].contains("00:00:02.000 --> 00:00:03.000 line:90%"),
+        "{}",
+        served[0]
+    );
+    assert!(
+        served[0].contains("00:00:03.000 --> 00:00:04.000\nWorld"),
+        "{}",
+        served[0]
+    );
+    assert!(
+        served[1].contains("00:00.500 --> 00:01.500 line:90%"),
+        "no shift, no change"
+    );
+}
