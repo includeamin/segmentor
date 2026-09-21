@@ -316,6 +316,43 @@ mod tests {
     }
 
     #[test]
+    fn fragment_discovery_settings_have_safe_defaults_and_can_be_set() {
+        let parse = |limits: &str| {
+            Config::parse(
+                &format!(
+                    "[server]\nlisten = \"127.0.0.1:8080\"\n[storage]\nmedia_root = \".\"\n\
+                     [assets.sample]\npath = \"h264-aac.mp4\"\n[limits]\n{limits}\n"
+                ),
+                &fixture_directory(),
+            )
+        };
+
+        let defaults = parse("").expect("defaults should be valid").limits;
+        assert_eq!(defaults.max_fragments, 20_000);
+        assert_eq!(defaults.metadata_concurrency, 16);
+        assert!(
+            !defaults.tolerate_truncated_tail,
+            "cut files are refused unless asked"
+        );
+
+        let set =
+            parse("max_fragments = 500\nmetadata_concurrency = 4\ntolerate_truncated_tail = true")
+                .expect("explicit values should be valid")
+                .limits;
+        assert_eq!(
+            (
+                set.max_fragments,
+                set.metadata_concurrency,
+                set.tolerate_truncated_tail
+            ),
+            (500, 4, true)
+        );
+
+        assert!(parse("metadata_concurrency = 0").is_err());
+        assert!(parse("max_fragments = 0").is_err());
+    }
+
+    #[test]
     fn rejects_asset_ids_that_are_not_url_safe() {
         let error = Config::parse(
             r#"

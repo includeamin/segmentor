@@ -1,6 +1,6 @@
 # TDD 0005: Fragmented MP4 input
 
-- Status: Accepted; implemented
+- Status: Accepted; implemented, including the two follow-ups below
 - Created: 2026-09-20
 - Updated: 2026-09-20
 - Related ADRs: None
@@ -21,7 +21,29 @@ Implemented as designed, with the open question about a truncated final fragment
 - **Remote cost measured.** A three-fragment file loads from a mock origin in nine requests or fewer, and the packaged output is byte-identical to the local file's. The windowed walk is what keeps it from being one request per box header.
 - **Browsers.** All six layouts play in Chrome through hls.js and dash.js; the 100-second file plays from 0.067 s, as a progressive file with B-frames does.
 
-Not done, and stated in the design: `sidx`-driven parallel discovery for remote sources, and tolerating a truncated final `moof` in a file still being written.
+### Follow-ups: parallel discovery and truncated tails
+
+The two limits the design left open are now handled.
+
+**Parallel discovery through `sidx`.** Measured against a mock origin with injected latency, the sequential walk costs one request per fragment and about 19 ms per fragment at 15 ms of latency (200 fragments: 3.8 s), which is over a minute for an hour of one-second fragments. With a `sidx` and eight fragments fetched at once, 160 fragments at 20 ms took 0.56 s where the sequential walk took 3.83 s, with 161 requests and never more than eight in flight. The design choices:
+
+- The `sidx` is a hint about where to look, never a source of facts. Each subsegment it lists is verified by walking its own boxes from its start to exactly its end, and it must contain a `moof`; a mismatch abandons the fast path and the walk continues box by box.
+- The jump happens only when the sequential walk arrives *exactly* at the start of the region the `sidx` describes. A `first_offset` that skips over boxes would otherwise lose whatever fragments sit in the gap; they are walked instead. The fast path found one such bug during development (fragments found in a gap were replaced instead of extended), which the test for that case caught.
+- A subsegment may hold several `moof`/`mdat` pairs; all are found. A `sidx` covering only the start of the file leaves the rest to the walk.
+- Hierarchical references, zero-sized references, fewer than four references, and more than `max_fragments` are not used. A `sidx` per fragment, as CMAF chunk writers emit, has one reference each and stays sequential.
+- Real `sidx` boxes are messy: FFmpeg itself warns that its `sidx` is incorrect when tracks are written in separate `moof` boxes. That is why verification and the fallback matter more than the speed-up.
+- A test corrupts random bytes of the `sidx` 400 times and requires that discovery either finds exactly the fragments a plain walk finds or falls back; it never found a different set and never failed a load.
+- `limits.metadata_concurrency` (default 16) bounds the fan-out, on top of the remote reader's own `max_inflight_reads`.
+
+**Truncated tails.** A fragmented file that ends inside a `moof` or `mdat` is refused by default, with a message that says what happened and names the setting. `limits.tolerate_truncated_tail = true` serves the complete fragments before the cut instead:
+
+- Only after at least one whole fragment; a file with none is refused either way, as is a cut `moov` or a cut progressive file.
+- A cut `mdat` takes the `moof` before it too, because that `moof` describes samples that are not all there.
+- Only a box that *declares more bytes than remain* counts as cut. A malformed header, such as a size below eight, is corruption and is refused.
+- The load logs `truncated_tail_dropped` with the bytes and fragments left out.
+- The URL version covers exactly the fragments served, so it changes as a growing file completes each fragment, and a CDN never mixes two states of the file. This is not live support: the playlists are built once per load, and a file being appended to needs to be reloaded to show new fragments.
+
+The remaining limit is that a very large remote file with no `sidx` still costs a request per fragment, one at a time. The choice there is between re-muxing at ingest and caching the discovered metadata per version, and neither is needed until a real workload shows it.
 
 ## Summary
 

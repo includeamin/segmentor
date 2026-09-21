@@ -215,6 +215,11 @@ pub(crate) struct OriginState {
     pub(crate) ignore_ranges: AtomicBool,
     /// When non-zero, every request answers with this status.
     pub(crate) forced_status: AtomicU16,
+    /// Milliseconds every request waits before it is answered, to stand in for network latency.
+    pub(crate) delay_ms: AtomicU64,
+    /// Requests being answered right now, and the most there have been at once.
+    pub(crate) in_flight: AtomicUsize,
+    pub(crate) max_in_flight: AtomicUsize,
     /// Every query string seen, in order.
     pub(crate) queries: Mutex<Vec<String>>,
     /// When set, requests whose query differs get `403`, as an expired signature would.
@@ -273,6 +278,15 @@ impl MockOrigin {
     }
 }
 
+/// Counts a request as finished when it is dropped, whichever way the handler returns.
+struct InFlight(Arc<OriginState>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 async fn origin_media(
     State(state): State<Arc<OriginState>>,
     Path(name): Path<String>,
@@ -280,6 +294,13 @@ async fn origin_media(
     headers: HeaderMap,
 ) -> Response {
     state.requests.fetch_add(1, Ordering::SeqCst);
+    let now = state.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+    state.max_in_flight.fetch_max(now, Ordering::SeqCst);
+    let _in_flight = InFlight(Arc::clone(&state));
+    let delay = state.delay_ms.load(Ordering::SeqCst);
+    if delay != 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+    }
     let query = query.unwrap_or_default();
     state.queries.lock().unwrap().push(query.clone());
     if let Some(required) = state.required_query.lock().unwrap().clone()

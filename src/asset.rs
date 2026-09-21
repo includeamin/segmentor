@@ -153,6 +153,22 @@ impl PackagedAsset {
     /// Logs what packaging left out or adjusted, so an operator can see why a file behaves as it
     /// does without inspecting it.
     pub(crate) fn log_load_details(&self, asset_id: &str) {
+        if let Some(fragmentation) = self.index.fragmentation {
+            tracing::info!(
+                event = "fragments_discovered",
+                asset.id = asset_id,
+                media.fragments = fragmentation.fragments,
+                discovery = ?fragmentation.discovery,
+            );
+            if let Some(dropped) = fragmentation.dropped_tail {
+                tracing::warn!(
+                    event = "truncated_tail_dropped",
+                    asset.id = asset_id,
+                    dropped.bytes = dropped.bytes,
+                    dropped.fragments = dropped.fragments,
+                );
+            }
+        }
         for skipped in &self.index.skipped_tracks {
             tracing::info!(
                 event = "track_skipped",
@@ -323,5 +339,68 @@ mod tests {
         assert_ne!(plain.version(), shifted.version());
         let again = load("h264-aac-fragmented.mp4").await;
         assert_eq!(plain.version(), again.version(), "and a version is stable");
+    }
+
+    /// The plain fragmented fixture with its last 20 kB removed: inside the final fragment.
+    fn cut_copy(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let whole = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/h264-aac-fragmented.mp4");
+        let directory =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/asset-tests");
+        std::fs::create_dir_all(&directory).unwrap();
+        let cut = directory.join(name);
+        let bytes = std::fs::read(&whole).unwrap();
+        std::fs::write(&cut, &bytes[..bytes.len() - 20_000]).unwrap();
+        (whole, cut)
+    }
+
+    #[tokio::test]
+    async fn a_cut_fragmented_file_is_refused_by_default_and_served_short_when_tolerated() {
+        let (whole, cut) = cut_copy("cut.mp4");
+        let limits = LimitsConfig::default();
+
+        let refused = PackagedAsset::load_local(&cut, 1000, &limits)
+            .await
+            .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("limits.tolerate_truncated_tail"),
+            "{refused}"
+        );
+
+        let tolerant = LimitsConfig {
+            tolerate_truncated_tail: true,
+            ..LimitsConfig::default()
+        };
+        let short = PackagedAsset::load_local(&cut, 1000, &tolerant)
+            .await
+            .unwrap();
+        let full = PackagedAsset::load_local(&whole, 1000, &tolerant)
+            .await
+            .unwrap();
+
+        assert_eq!(full.plan.segments.len(), 3);
+        assert_eq!(
+            short.plan.segments.len(),
+            2,
+            "the incomplete third fragment is left out"
+        );
+        let dropped = short
+            .index
+            .fragmentation
+            .unwrap()
+            .dropped_tail
+            .expect("a tail was dropped");
+        assert!(dropped.bytes > 0);
+        assert!(full.index.fragmentation.unwrap().dropped_tail.is_none());
+        // Different content, so a different URL: a CDN must not mix the two.
+        assert_ne!(short.version(), full.version());
+        // Every segment it does serve is fully inside the file.
+        for segment in &short.plan.segments {
+            for part in &segment.tracks {
+                assert!(part.end_sample > part.first_sample);
+            }
+        }
     }
 }

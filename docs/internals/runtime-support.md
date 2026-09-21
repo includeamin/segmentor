@@ -33,6 +33,8 @@ Every section uses `#[serde(deny_unknown_fields)]`, so a misspelled key is an er
 | `max_source_bytes` | 1 TiB | `mp4::parse` |
 | `max_metadata_bytes` | 64 MiB | `Metadata::fetch`: `moov` plus every `moof` |
 | `max_fragments` | 20,000 | `Metadata::fetch`: `moof` boxes in one fragmented file |
+| `metadata_concurrency` | 16 | `Metadata::fetch`: fragments fetched at once through a `sidx` |
+| `tolerate_truncated_tail` | off | `Metadata::fetch`: drop a fragment the file is cut off inside, instead of refusing the file |
 | `max_tracks` | 8 | `mp4::parse` |
 | `max_samples_per_track` | 2,000,000 | `mp4::parser::parse_samples` |
 | `max_samples_per_segment` | 100,000 | `segment::plan` |

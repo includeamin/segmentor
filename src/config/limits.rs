@@ -11,6 +11,10 @@ pub(crate) struct LimitsConfig {
     pub(crate) max_source_bytes: u64,
     pub(crate) max_metadata_bytes: u64,
     pub(crate) max_fragments: usize,
+    pub(crate) metadata_concurrency: usize,
+    /// Serve the complete fragments of a fragmented file that ends partway through one, instead
+    /// of refusing it.
+    pub(crate) tolerate_truncated_tail: bool,
     pub(crate) max_tracks: usize,
     pub(crate) max_samples_per_track: usize,
     pub(crate) max_samples_per_segment: usize,
@@ -34,6 +38,7 @@ impl LimitsConfig {
             || self.max_source_bytes == 0
             || self.max_metadata_bytes == 0
             || self.max_fragments == 0
+            || self.metadata_concurrency == 0
             || self.max_tracks == 0
             || self.max_samples_per_track == 0
             || self.max_samples_per_segment == 0
@@ -65,6 +70,8 @@ impl Default for LimitsConfig {
             max_source_bytes: 1024 * 1024 * 1024 * 1024,
             max_metadata_bytes: 64 * 1024 * 1024,
             max_fragments: 20_000,
+            metadata_concurrency: 16,
+            tolerate_truncated_tail: false,
             max_tracks: 8,
             max_samples_per_track: 2_000_000,
             max_samples_per_segment: 100_000,
