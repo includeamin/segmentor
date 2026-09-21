@@ -1,7 +1,8 @@
 name: Release
 
-# Publishes a GitHub release for an existing version tag, with an automated changelog and a
-# Linux binary. Choose whether it is the latest release or a preview.
+# Publishes a GitHub release for an existing version tag: an automated changelog, Linux binaries
+# for x86-64 and arm64 with checksums and build attestations, and a signed multi-architecture
+# container image. Choose whether it is the latest release or a preview.
 on:
   workflow_dispatch:
     inputs:
@@ -18,28 +19,23 @@ on:
         default: latest
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ inputs.tag || 'newest' }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Publish the release
+  prepare:
+    name: Resolve the tag and write the changelog
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-      TARGET: x86_64-unknown-linux-gnu
+    outputs:
+      tag: ${{ steps.tags.outputs.tag }}
     steps:
       - name: Check out with full history and tags
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      # The scripts are copied aside because the build checks out the tag, which may predate them.
-      - name: Keep a copy of the release scripts
-        run: cp -r .github/scripts "$RUNNER_TEMP/scripts"
 
       - name: Resolve the tag and the previous version
         id: tags
@@ -66,40 +62,113 @@ jobs:
           TAG: ${{ steps.tags.outputs.tag }}
           PREVIOUS: ${{ steps.tags.outputs.previous }}
         run: |
-          "$RUNNER_TEMP/scripts/changelog.sh" "$PREVIOUS" "$TAG" \
+          .github/scripts/changelog.sh "$PREVIOUS" "$TAG" \
             "${{ github.server_url }}/${{ github.repository }}" >"$RUNNER_TEMP/notes.md"
           cat "$RUNNER_TEMP/notes.md" >>"$GITHUB_STEP_SUMMARY"
 
+      - name: Keep the changelog for the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes.md
+          if-no-files-found: error
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          # A native arm64 runner avoids cross-compiling the C code in the TLS provider. These
+          # runners are free for public repositories.
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The scripts and licence files are copied aside because the build checks out the tag, which
+      # may predate them.
+      - name: Keep a copy of the release scripts and licences
+        run: |
+          cp -r .github/scripts "$RUNNER_TEMP/scripts"
+          mkdir -p "$RUNNER_TEMP/legal"
+          cp LICENSE-MIT LICENSE-APACHE "$RUNNER_TEMP/legal/"
+
       - name: Check out the tag
-        env:
-          TAG: ${{ steps.tags.outputs.tag }}
         run: git checkout --detach "$TAG"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build the release binary
-        env:
-          TAG: ${{ steps.tags.outputs.tag }}
         run: |
           "$RUNNER_TEMP/scripts/stamp-version.sh" "${TAG#v}"
           cargo build --release --locked --bin segmentor
 
       - name: Package
-        env:
-          TAG: ${{ steps.tags.outputs.tag }}
         run: |
           set -euo pipefail
           name="segmentor-${TAG}-${TARGET}"
           mkdir -p "dist/$name"
-          cp target/release/segmentor LICENSE README.md vod.example.toml "dist/$name/"
+          cp target/release/segmentor README.md vod.example.toml "dist/$name/"
+          cp "$RUNNER_TEMP/legal/LICENSE-MIT" "$RUNNER_TEMP/legal/LICENSE-APACHE" "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")
 
+      - name: Keep the archive for the publish job
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Attest and publish the release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      CHANNEL: ${{ inputs.channel }}
+    steps:
+      - name: Download the archives and the changelog
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Gather the files
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          mv artifacts/*.tar.gz artifacts/*.sha256 dist/
+          ls -l dist artifacts
+
+      # Ties each archive to this workflow run and commit, so a download can be checked with
+      # `gh attestation verify` (see docs/releasing.md).
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tar.gz
+
       - name: Publish the release
-        env:
-          TAG: ${{ steps.tags.outputs.tag }}
-          CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
           if [[ "$CHANNEL" == "preview" ]]; then
@@ -110,9 +179,22 @@ jobs:
             title="$TAG"
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "$title" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"
+            gh release edit "$TAG" --title "$title" --notes-file artifacts/notes.md "${flags[@]}"
             gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber
           else
             gh release create "$TAG" dist/*.tar.gz dist/*.sha256 \
-              --title "$title" --notes-file "$RUNNER_TEMP/notes.md" --verify-tag "${flags[@]}"
+              --title "$title" --notes-file artifacts/notes.md --verify-tag "${flags[@]}"
           fi
+
+  container:
+    name: Publish the container image
+    needs: [prepare, publish]
+    uses: ./.github/workflows/container.yml
+    with:
+      tag: ${{ needs.prepare.outputs.tag }}
+      channel: ${{ inputs.channel }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
