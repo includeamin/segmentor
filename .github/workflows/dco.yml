@@ -1,0 +1,42 @@
+name: DCO
+
+# Every commit in a pull request from a fork must carry a `Signed-off-by:` line, which certifies the
+# Developer Certificate of Origin (https://developercertificate.org). Add it with `git commit -s`.
+# Branches in this repository belong to its maintainers, who have already licensed their work to the
+# project, so they are not checked.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  signoff:
+    name: Signed-off-by
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the pull request with its base
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check every commit
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          missing=0
+          # Merge commits and bot updates are exempt; everything else needs a sign-off.
+          for commit in $(git rev-list --no-merges "$BASE..$HEAD"); do
+            author="$(git log -1 --format='%an' "$commit")"
+            if [[ "$author" == *"[bot]" ]]; then
+              continue
+            fi
+            if ! git log -1 --format='%B' "$commit" | grep -Eq '^Signed-off-by: .+ <.+@.+>$'; then
+              echo "::error::Commit ${commit:0:10} ($(git log -1 --format='%s' "$commit")) has no Signed-off-by line. Amend it with 'git commit --amend -s', or rebase with '--signoff'."
+              missing=1
+            fi
+          done
+          exit "$missing"

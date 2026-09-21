@@ -1,0 +1,42 @@
+name: Bug report
+description: Something segmentor does is wrong, crashes, or is slower than it should be.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. If this could be a **security problem** (a crash or hang from a crafted file, or a way past the `[remote_media]` rules), please do not file it here; see [SECURITY.md](https://github.com/includeamin/segmentor/blob/main/SECURITY.md).
+        If the problem is that **a specific file will not load or play**, use the "File will not load or play" template instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce it
+      description: The smallest configuration and request that shows it. A tiny file that triggers it is ideal.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`segmentor --version`, a release tag, or a commit."
+    validations:
+      required: true
+  - type: dropdown
+    id: how
+    attributes:
+      label: How are you running it?
+      options: ["Release binary", "Container image", "Built from source", "Other"]
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Log lines and configuration
+      description: The relevant lines (`asset_load_failed`, `asset_loaded`, errors), and your `[limits]` and `[remote_media]` sections. Remove tokens and signed URLs.
+      render: text

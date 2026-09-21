@@ -1,0 +1,54 @@
+name: File will not load or play
+description: A media file is rejected, or loads but does not play correctly.
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Files from real encoders are the most useful reports this project can get. The more precise this is, the more likely it can be fixed.
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: What goes wrong?
+      options:
+        - The asset fails to load (an error in the log or a 5xx)
+        - It loads, but a player fails
+        - It plays with wrong audio/video sync, timing, or aspect ratio
+        - It plays, but part of it is missing
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: The error message
+      description: The `asset_load_failed` log line, or the player's error. Segmentor's errors name the track and the box or codec that it objected to.
+      render: text
+  - type: textarea
+    id: ffprobe
+    attributes:
+      label: "`ffprobe` output for the file"
+      description: The output of `ffprobe -v error -show_streams -show_format -of json yourfile.mp4` with the `packets` left out.
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: producer
+    attributes:
+      label: What produced the file?
+      description: An encoder and version, a phone or camera model, an editor, a download tool.
+  - type: dropdown
+    id: layout
+    attributes:
+      label: Layout
+      options: ["Progressive MP4 / M4A", "Fragmented MP4 / CMAF", "QuickTime .mov", "Not sure"]
+  - type: input
+    id: player
+    attributes:
+      label: Player, browser, and version
+      description: Only if it loads but does not play. For example "Safari 18 on iOS 18" or "hls.js 1.5 in Chrome 130".
+  - type: checkboxes
+    id: share
+    attributes:
+      label: Sharing the file
+      options:
+        - label: I can share a short clip (a few seconds cut with `ffmpeg -c copy`) if it helps.
