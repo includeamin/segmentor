@@ -2,6 +2,8 @@
 
 Kaltura's nginx-vod-module is an NGINX module written primarily in C. It is a useful reference architecture for on-demand packaging, but this project does not copy its source or require its runtime.
 
+> **Licence and provenance.** nginx-vod-module is licensed under the **AGPL-3.0**, which is not compatible with this project's licence (MIT or Apache-2.0). This page describes it from its public documentation, listed under [References](#references), and from its observable behaviour. Nothing in segmentor is derived from its source, and the [contributing guide](https://github.com/includeamin/segmentor/blob/main/CONTRIBUTING.md#no-code-from-nginx-vod-module) forbids copying, translating, or adapting it. Design decisions here come from the specifications and from that behaviour.
+
 NGINX supplies the HTTP server, event loop, request routing, file and upstream I/O, buffer chains, and response filters. The module supplies its own media pipeline:
 
 1. Resolve a local path, remote HTTP source, or mapped media-set description.
