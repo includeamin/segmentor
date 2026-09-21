@@ -65,7 +65,7 @@ pub(crate) fn media_playlist(presentation: Presentation<'_>, key: TrackKey) -> R
     let segments = presentation.track_segments(track.id).collect::<Vec<_>>();
     let target_duration = segments
         .iter()
-        .map(|segment| div_ceil(segment.duration, u64::from(track.timescale)))
+        .map(|segment| segment.duration.div_ceil(u64::from(track.timescale)))
         .max()
         .unwrap_or(1);
     let mut playlist = format!(
@@ -117,14 +117,6 @@ pub(super) fn track_language(track: &Track) -> Option<&str> {
         && language.bytes().all(|byte| byte.is_ascii_lowercase())
         && language != "und")
         .then_some(language)
-}
-
-const fn div_ceil(dividend: u64, divisor: u64) -> u64 {
-    if dividend % divisor == 0 {
-        dividend / divisor
-    } else {
-        dividend / divisor + 1
-    }
 }
 
 #[cfg(test)]

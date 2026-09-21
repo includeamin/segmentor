@@ -1,0 +1,26 @@
+name: Dependencies
+
+# Checks the dependency tree against deny.toml: published security advisories, yanked crates,
+# licences the project does not accept, and unexpected sources. It also runs weekly, because a new
+# advisory can make yesterday's passing tree fail without any change here.
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check advisories, licences, bans, and sources
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

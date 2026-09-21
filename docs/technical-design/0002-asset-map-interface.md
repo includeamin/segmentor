@@ -125,7 +125,7 @@ pub(crate) enum ResolveError {
 }
 ```
 
-Dispatch is an enum, not a trait object, because the operation is `async` and the crate targets Rust 1.85 without `async-trait`:
+Dispatch is an enum, not a trait object, because the operation is `async` and the crate targets Rust 1.88 without `async-trait`:
 
 ```rust
 pub(crate) enum AssetResolver {

@@ -2,7 +2,7 @@
 name = "segmentor"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 authors = ["Amin Jamal"]
 description = "On-demand HLS and DASH packaging for MP4 files: serves fragmented MP4 straight from the source, with no pre-generated segments and no transcoding"
 license = "MIT OR Apache-2.0"

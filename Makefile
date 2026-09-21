@@ -3,7 +3,7 @@
 CARGO ?= cargo
 MDBOOK ?= mdbook
 
-.PHONY: bench test-scripts bench-enforce conformance book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve demo site test
+.PHONY: bench test-scripts bench-enforce conformance book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve demo site test deny
 
 help: ## Show the available targets
 	@printf '%s\n' \
@@ -29,6 +29,7 @@ help: ## Show the available targets
 		'lint       Run Clippy with warnings denied' \
 		'serve      Run the example HLS service' \
 		'demo       Serve the web player demo on http://127.0.0.1:8080' \
+		'deny       Check dependencies for advisories and licences (needs cargo-deny)' \
 		'site       Build mdBook with rustdoc under /api' \
 		'test       Run unit and integration tests'
 
@@ -102,6 +103,9 @@ serve: ## Run the example HLS service
 
 demo: ## Serve the web player demo on http://127.0.0.1:8080
 	python3 -m http.server 8080 --bind 127.0.0.1 --directory demo
+
+deny: ## Check dependencies against deny.toml (needs `cargo install cargo-deny --locked`)
+	cargo deny check
 
 ci: fmt-check check lint test test-scripts fuzz-check doc ## Run every CI check
 
