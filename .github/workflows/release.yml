@@ -67,7 +67,7 @@ jobs:
           cat "$RUNNER_TEMP/notes.md" >>"$GITHUB_STEP_SUMMARY"
 
       - name: Keep the changelog for the publish job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-notes
           path: ${{ runner.temp }}/notes.md
@@ -126,7 +126,7 @@ jobs:
           (cd dist && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")
 
       - name: Keep the archive for the publish job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.target }}
           path: |
