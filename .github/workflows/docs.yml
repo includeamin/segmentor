@@ -40,7 +40,7 @@ jobs:
         run: make site
 
       - name: Upload documentation
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: target/book
 
