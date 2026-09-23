@@ -21,6 +21,9 @@
   input, select, button { background:var(--surface); color:var(--ink); border:1px solid var(--border); border-radius:6px; padding:6px 8px; font:inherit; }
   button { cursor:pointer; background:var(--accent); color:#04121b; border:0; font-weight:600; }
   button.ghost { background:var(--surface); color:var(--ink); border:1px solid var(--border); font-weight:500; }
+  .chip { background:var(--page); border:1px solid var(--border); border-radius:99px; padding:2px 10px; color:var(--ink); cursor:pointer; font:inherit; font-size:12px; }
+  .chip:hover { border-color:var(--accent); color:var(--accent); }
+  .chip.current { border-color:var(--accent); color:var(--accent); background:rgba(57,135,229,.14); }
   main { display:grid; grid-template-columns:minmax(0,3fr) minmax(0,2fr); gap:14px; padding:14px 16px; }
   @media (max-width:1000px) { main { grid-template-columns:1fr; } }
   .panel { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:12px; }
@@ -72,6 +75,7 @@
         <label>Protocol<select id="proto"><option value="hls">HLS</option><option value="dash">DASH</option></select></label>
         <button id="load" style="align-self:end">Play</button>
       </div>
+      <div id="try-row" style="margin-bottom:8px;font-size:12px;color:var(--muted)"></div>
       <video id="video" controls muted loop playsinline></video>
       <div id="diag" style="margin-top:8px;font-size:12px"></div>
     </div>
@@ -203,6 +207,18 @@ function markCurrentRow() {
   const current = $('asset').value;
   for (const row of document.querySelectorAll('#cache tbody tr'))
     row.classList.toggle('current', row.dataset.asset === current);
+  for (const chip of document.querySelectorAll('#try-row .chip'))
+    chip.classList.toggle('current', chip.dataset.asset === current);
+}
+
+/// A quick way into playback besides typing a name: the same asset IDs the cache table lists,
+/// right next to the input where a first-time visitor is already looking.
+function renderTryRow(ids) {
+  const row = $('try-row');
+  if (!ids.length) { row.textContent = ''; return; }
+  row.innerHTML = 'Try: ' + ids.map(id => `<button class="chip" data-asset="${escapeHtml(id)}">${escapeHtml(id)}</button>`).join(' ');
+  for (const chip of row.querySelectorAll('.chip')) chip.onclick = () => playAsset(chip.dataset.asset);
+  markCurrentRow();
 }
 
 function renderPlayerStats() {
@@ -333,7 +349,7 @@ function renderCache(cache, knownAssets) {
     : '';
   for (const row of $('cache').tBodies[0].rows)
     row.onclick = () => playAsset(row.dataset.asset);
-  markCurrentRow();
+  renderTryRow([...rows.keys()].sort());
 }
 
 function escapeHtml(s) {

@@ -38,7 +38,7 @@ Configuration, logging, limits, CORS, and shutdown are described in [Operating t
 
 ## Web player demo
 
-`demo/index.html` is a single-file player (hls.js and dash.js, loaded from a CDN) that plays an asset over HLS or DASH and shows live server metrics parsed from `/metrics` next to it: request rate, throughput, per-route latency, errors, and resolver and cache events, plus player-side stats such as buffer, bandwidth, and dropped frames.
+`demo/index.html` is a single-file player (hls.js and dash.js, loaded from a CDN) that plays an asset over HLS or DASH and shows live server metrics parsed from `/metrics` next to it: request rate, throughput, per-route latency, errors, and resolver and cache events, plus player-side stats such as buffer, bandwidth, and dropped frames. Besides typing an asset ID, a "Try:" row under the input lists assets you can click straight into: the static catalog's, and anything already played, from `/admin/status`.
 
 ```sh
 make serve   # terminal 1: the origin on :3000
@@ -49,7 +49,7 @@ The page reads `/metrics` cross-origin, so keep `[cors]` enabled, as in `vod.exa
 
 ## Control panel
 
-`admin/index.html` is a second single-file page, separate from the player demo, for operating a running instance: it polls `/admin/status` for the resolver's live connection state and every asset currently in the loaded-asset cache (version, size, tracks, duration), and `/metrics` for the same request and throughput charts the player demo shows. It also embeds the same HLS/DASH player, so you can play any asset the status view names without leaving the page.
+`admin/index.html` is a second single-file page, separate from the player demo, for operating a running instance: it polls `/admin/status` for the resolver's live connection state and every asset currently in the loaded-asset cache (version, size, tracks, duration), and `/metrics` for the same request and throughput charts the player demo shows. It also embeds the same HLS/DASH player and the same "Try:" row of clickable asset IDs, so you can play anything the status view names without leaving the page.
 
 ```sh
 make serve   # terminal 1: the origin on :3000
