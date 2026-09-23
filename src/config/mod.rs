@@ -11,6 +11,7 @@ mod cors;
 mod limits;
 mod logging;
 mod resolver;
+mod tls;
 
 pub(crate) use cors::CorsConfig;
 pub(crate) use limits::LimitsConfig;
@@ -18,12 +19,17 @@ pub(crate) use logging::{LogFormat, LoggingConfig};
 pub(crate) use resolver::{
     MapperConfig, RegistryConfig, RemoteMediaConfig, ResolverSettings, Secret,
 };
+pub(crate) use tls::TlsConfig;
+#[cfg(test)]
+pub(crate) use tls::for_test as tls_for_test;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
     pub(crate) listen: SocketAddr,
     pub(crate) shutdown_delay_ms: u64,
     pub(crate) shutdown_grace_ms: u64,
+    /// `None` serves plain HTTP, as today. See `docs/operations.md#tls`.
+    pub(crate) tls: Option<TlsConfig>,
     pub(crate) cors: CorsConfig,
     pub(crate) segment_duration_ms: u64,
     pub(crate) assets: BTreeMap<String, PathBuf>,
@@ -48,6 +54,7 @@ impl Config {
             listen: SocketAddr::from(([127, 0, 0, 1], 0)),
             shutdown_delay_ms: 0,
             shutdown_grace_ms: 1000,
+            tls: None,
             cors: CorsConfig::default(),
             segment_duration_ms,
             assets,
@@ -91,6 +98,12 @@ impl Config {
         }
         raw.limits.validate()?;
         raw.server.validate()?;
+        let tls = raw
+            .server
+            .tls
+            .as_ref()
+            .map(|raw_tls| raw_tls.validate(config_directory))
+            .transpose()?;
         raw.cors.validate()?;
         raw.registry.validate()?;
         raw.remote_media.validate()?;
@@ -162,6 +175,7 @@ impl Config {
             listen: raw.server.listen,
             shutdown_delay_ms: raw.server.shutdown_delay_ms,
             shutdown_grace_ms: raw.server.shutdown_grace_ms,
+            tls,
             cors: raw.cors,
             segment_duration_ms: raw.packaging.segment_duration_ms,
             assets,
@@ -229,6 +243,8 @@ struct ServerConfig {
     shutdown_delay_ms: u64,
     #[serde(default = "default_shutdown_grace_ms")]
     shutdown_grace_ms: u64,
+    #[serde(default)]
+    tls: Option<tls::RawTls>,
 }
 
 impl ServerConfig {

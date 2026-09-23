@@ -132,6 +132,7 @@ impl BenchServer {
             listener,
             router(state),
             connection_limits,
+            None,
             Arc::clone(&metrics),
             async move {
                 let _ = signal.await;

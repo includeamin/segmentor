@@ -26,6 +26,12 @@ sha2 = "0.11"
 thiserror = "2"
 time = { version = "0.3.45", features = ["parsing"] }
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+# Already in the tree via reqwest's rustls backend; named directly for the listener's own
+# optional TLS (see docs/operations.md#tls). Its default features already match reqwest's:
+# aws_lc_rs as the crypto provider, so there is only ever one in the binary.
+tokio-rustls = "0.26"
+# `std` is needed to load a certificate and key from disk.
+rustls-pki-types = { version = "1", features = ["std"] }
 tokio-stream = "0.1"
 toml = "1.1"
 tower-http = { version = "0.7", features = ["cors", "timeout", "trace"] }

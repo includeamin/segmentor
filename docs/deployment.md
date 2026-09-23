@@ -14,7 +14,7 @@ The container is the recommended route because the image already carries what th
 
 ## Before you expose it
 
-segmentor has **no TLS and no authentication**. Put a reverse proxy or a CDN in front of it that provides both, and let that layer cache media:
+segmentor has **no authentication**, and by default no TLS. Put a reverse proxy or a CDN in front of it that provides both, and let that layer cache media:
 
 - **TLS.** For a single host, [Caddy](https://caddyserver.com) does it in two lines, and gets certificates on its own:
 
@@ -24,7 +24,7 @@ segmentor has **no TLS and no authentication**. Put a reverse proxy or a CDN in 
   }
   ```
 
-  nginx, Envoy, and a cloud load balancer work equally well. Use HTTP/2 or HTTP/3 to viewers.
+  nginx, Envoy, and a cloud load balancer work equally well. Use HTTP/2 or HTTP/3 to viewers. This remains the recommended way to get TLS: a proxy also gets you HTTP/2, automatic certificate renewal, and access control in the same place. For a deployment with no proxy in front — a single bare binary reachable directly — segmentor can terminate TLS itself with a static certificate and key; see [TLS](operations.md#tls). It does not get you certificates on its own the way Caddy does, so use the proxy route unless you have a specific reason not to.
 - **Caching.** Init and media segment URLs carry a `v` query parameter that changes whenever the media does, and are served `Cache-Control: public, max-age=31536000, immutable`. Playlists and manifests are served with a short `max-age` (60 s). So a CDN should **include the query string in its cache key**, and can then cache segments indefinitely without ever serving stale bytes.
 - **Access control.** If viewers must be authorised, do it at the proxy or CDN, for example with signed URLs or tokens. The origin should be reachable only from that layer.
 - **Per-client limits.** segmentor limits total connections and concurrent requests, but not per client address. Rate-limit at the proxy if clients are untrusted.
