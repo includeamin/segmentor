@@ -43,3 +43,10 @@ and the [control panel](../../admin/) alongside them — a complete local setup 
 a mapper answer's `location` and `subtitles` fields take. The paths are relative to whatever
 `storage.media_root` segmentor is configured with; `docker-compose.dev.yml` mounts the project's
 `tests/fixtures/` there, so the catalog points at files already committed to the repository.
+
+`long` is the exception: at three seconds, the committed fixtures loop too fast to seek or scrub
+through by hand. `make fixtures-long` generates a ~2-minute version once (stream-copied, so it
+costs seconds, not a real encode) at `tests/fixtures/generated/long.mp4`, which the compose mount
+picks up without a restart. It is not committed; requesting `long` before generating it fails like
+any other missing file — a mapper is asked lazily, per asset, so this cannot break startup the way
+a bad entry in a static `[assets.*]` catalog would.
