@@ -21,9 +21,6 @@
   input, select, button { background:var(--surface); color:var(--ink); border:1px solid var(--border); border-radius:6px; padding:6px 8px; font:inherit; }
   button { cursor:pointer; background:var(--accent); color:#04121b; border:0; font-weight:600; }
   button.ghost { background:var(--surface); color:var(--ink); border:1px solid var(--border); font-weight:500; }
-  .chip { background:var(--page); border:1px solid var(--border); border-radius:99px; padding:2px 10px; color:var(--ink); cursor:pointer; font:inherit; font-size:12px; }
-  .chip:hover { border-color:var(--accent); color:var(--accent); }
-  .chip.current { border-color:var(--accent); color:var(--accent); background:rgba(57,135,229,.14); }
   main { display:grid; grid-template-columns:minmax(0,3fr) minmax(0,2fr); gap:14px; padding:14px 16px; }
   @media (max-width:1000px) { main { grid-template-columns:1fr; } }
   .panel { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:12px; }
@@ -71,11 +68,13 @@
     <div class="panel">
       <div class="panel-head"><h2>Player</h2></div>
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px">
+        <label>Known asset
+          <select id="asset-picker"><option value="">— pick one, or type below —</option></select>
+        </label>
         <label>Asset <input id="asset" size="14" value="sample"></label>
         <label>Protocol<select id="proto"><option value="hls">HLS</option><option value="dash">DASH</option></select></label>
         <button id="load" style="align-self:end">Play</button>
       </div>
-      <div id="try-row" style="margin-bottom:8px;font-size:12px;color:var(--muted)"></div>
       <video id="video" controls muted loop playsinline></video>
       <div id="diag" style="margin-top:8px;font-size:12px"></div>
     </div>
@@ -207,17 +206,18 @@ function markCurrentRow() {
   const current = $('asset').value;
   for (const row of document.querySelectorAll('#cache tbody tr'))
     row.classList.toggle('current', row.dataset.asset === current);
-  for (const chip of document.querySelectorAll('#try-row .chip'))
-    chip.classList.toggle('current', chip.dataset.asset === current);
+  // The picker only ever shows a known asset; typing a custom name falls back to its
+  // placeholder rather than pretending one of the listed assets is selected.
+  const picker = $('asset-picker');
+  picker.value = [...picker.options].some(o => o.value === current) ? current : '';
 }
 
-/// A quick way into playback besides typing a name: the same asset IDs the cache table lists,
-/// right next to the input where a first-time visitor is already looking.
-function renderTryRow(ids) {
-  const row = $('try-row');
-  if (!ids.length) { row.textContent = ''; return; }
-  row.innerHTML = 'Try: ' + ids.map(id => `<button class="chip" data-asset="${escapeHtml(id)}">${escapeHtml(id)}</button>`).join(' ');
-  for (const chip of row.querySelectorAll('.chip')) chip.onclick = () => playAsset(chip.dataset.asset);
+/// The dropdown next to the Asset field: every asset ID the cache table lists. Picking one plays
+/// it; typing a name that isn't listed (a mapper asset nobody has requested yet, for example)
+/// keeps working in the text field regardless, since the picker is a convenience, not a gate.
+function renderAssetPicker(ids) {
+  $('asset-picker').innerHTML = '<option value="">— pick one, or type below —</option>'
+    + ids.map(id => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');
   markCurrentRow();
 }
 
@@ -349,7 +349,7 @@ function renderCache(cache, knownAssets) {
     : '';
   for (const row of $('cache').tBodies[0].rows)
     row.onclick = () => playAsset(row.dataset.asset);
-  renderTryRow([...rows.keys()].sort());
+  renderAssetPicker([...rows.keys()].sort());
 }
 
 function escapeHtml(s) {
@@ -405,7 +405,8 @@ async function poll() {
 }
 
 $('load').onclick = load;
-$('asset').addEventListener('change', markCurrentRow);
+$('asset').addEventListener('input', markCurrentRow);
+$('asset-picker').addEventListener('change', () => { if ($('asset-picker').value) playAsset($('asset-picker').value); });
 load();
 clearTimeout(pollTimer);
 poll();

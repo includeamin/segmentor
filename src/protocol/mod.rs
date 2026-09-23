@@ -7,6 +7,7 @@ pub(crate) mod dash;
 pub(crate) mod hls;
 mod presentation;
 
-pub(crate) use presentation::Presentation;
+pub(crate) use hls::{AdaptiveAudio, AdaptiveVideo};
 #[cfg(test)]
 pub(crate) use presentation::fixtures;
+pub(crate) use presentation::{Bandwidth, Presentation};

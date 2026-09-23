@@ -728,6 +728,14 @@ struct TestServer {
 
 impl TestServer {
     async fn start(limits: ConnectionLimits) -> Self {
+        Self::start_with(limits, None).await
+    }
+
+    async fn start_tls(limits: ConnectionLimits, tls: crate::config::TlsConfig) -> Self {
+        Self::start_with(limits, Some(tls)).await
+    }
+
+    async fn start_with(limits: ConnectionLimits, tls: Option<crate::config::TlsConfig>) -> Self {
         let state = state();
         let metrics = Arc::clone(&state.metrics);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -737,6 +745,7 @@ impl TestServer {
             listener,
             router(state),
             limits,
+            tls,
             Arc::clone(&metrics),
             async move {
                 let _ = signal.await;
@@ -911,5 +920,84 @@ async fn admin_status_lists_the_static_catalog_and_what_is_cached() {
         response.headers().get(CACHE_CONTROL).unwrap(),
         "no-store",
         "a live status must never be cached"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// TLS
+// ---------------------------------------------------------------------------------------------
+
+fn tls_fixture(name: &str) -> PathBuf {
+    fixture().parent().unwrap().join("tls").join(name)
+}
+
+fn test_tls_config() -> crate::config::TlsConfig {
+    crate::config::tls_for_test(tls_fixture("cert.pem"), tls_fixture("key.pem"))
+        .expect("the committed test certificate and key should load")
+}
+
+/// A client trusting only the fixture certificate — a stand-in for a real client trusting a real
+/// CA, without needing one for a self-signed test certificate.
+fn tls_connector() -> tokio_rustls::TlsConnector {
+    use rustls_pki_types::pem::PemObject;
+    let der = rustls_pki_types::CertificateDer::from_pem_file(tls_fixture("cert.pem"))
+        .expect("the fixture certificate should parse");
+    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+    roots
+        .add(der)
+        .expect("the fixture certificate should be a valid trust root");
+    let mut config = tokio_rustls::rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    tokio_rustls::TlsConnector::from(Arc::new(config))
+}
+
+#[tokio::test]
+async fn tls_terminates_the_connection_and_serves_a_real_request() {
+    let server = TestServer::start_tls(connection_limits(10, 5_000), test_tls_config()).await;
+    let connector = tls_connector();
+    let name = rustls_pki_types::ServerName::try_from("localhost").unwrap();
+
+    let tcp = server.connect().await;
+    let mut tls = connector
+        .connect(name, tcp)
+        .await
+        .expect("the handshake should succeed");
+    assert_eq!(
+        tls.get_ref().1.alpn_protocol(),
+        Some(b"http/1.1".as_slice()),
+        "the server only ever offers http/1.1"
+    );
+
+    tls.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    tls.read_to_end(&mut response).await.unwrap();
+
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(response.ends_with("ok\n"), "{response}");
+}
+
+#[tokio::test]
+async fn a_plain_tcp_client_cannot_talk_to_a_tls_listener() {
+    let server = TestServer::start_tls(connection_limits(10, 5_000), test_tls_config()).await;
+
+    let mut client = server.connect().await;
+    client
+        .write_all(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    let read = timeout(Duration::from_secs(2), client.read_to_end(&mut response)).await;
+
+    // Either the handshake attempt fails outright, or the server closes without ever answering
+    // in plaintext; either way, no HTTP response comes back.
+    assert!(
+        read.is_err() || !String::from_utf8_lossy(&response).starts_with("HTTP/"),
+        "{:?}",
+        String::from_utf8_lossy(&response)
     );
 }

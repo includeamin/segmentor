@@ -35,6 +35,7 @@ pub(crate) async fn serve(config: Config) -> Result<()> {
     tracing::info!(
         event = "service_starting",
         listen.address = %config.listen,
+        listen.tls = config.tls.is_some(),
         assets.count = config.assets.len(),
         packaging.segment_duration_ms = config.segment_duration_ms,
     );
@@ -58,7 +59,8 @@ pub(crate) async fn serve(config: Config) -> Result<()> {
     let delay = Duration::from_millis(config.shutdown_delay_ms);
     let grace = Duration::from_millis(config.shutdown_grace_ms);
     let (draining, drain_started) = oneshot::channel();
-    let server = serve_connections(listener, app, limits, metrics, async move {
+    let tls = config.tls.clone();
+    let server = serve_connections(listener, app, limits, tls, metrics, async move {
         shutdown_signal().await;
         ready.store(false, Ordering::Relaxed);
         tracing::info!(

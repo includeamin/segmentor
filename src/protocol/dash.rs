@@ -13,10 +13,22 @@ pub(crate) fn manifest(presentation: Presentation<'_>) -> Result<String> {
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"static\" mediaPresentationDuration=\"PT{duration}S\" minBufferTime=\"PT1.5S\" profiles=\"urn:mpeg:dash:profile:isoff-main:2011\">\n  <Period start=\"PT0S\">\n"
     );
     if let Some(video) = presentation.video() {
-        write_video_adaptation(&mut manifest, presentation, video, version)?;
+        write_video_adaptation(
+            &mut manifest,
+            presentation,
+            video,
+            version,
+            &video.key.to_string(),
+        )?;
     }
     for audio in presentation.audio_tracks() {
-        write_audio_adaptation(&mut manifest, presentation, audio, version)?;
+        write_audio_adaptation(
+            &mut manifest,
+            presentation,
+            audio,
+            version,
+            &audio.key.to_string(),
+        )?;
     }
     for subtitle in presentation.subtitles() {
         write_subtitle_adaptation(&mut manifest, subtitle, version);
@@ -25,11 +37,15 @@ pub(crate) fn manifest(presentation: Presentation<'_>) -> Result<String> {
     Ok(manifest)
 }
 
-fn write_video_adaptation(
+/// `id` is the `Representation`'s id and, via `$RepresentationID$` in its `SegmentTemplate`, the
+/// path segment its init and media URLs are served under. For a plain asset that is the track's
+/// own key (`video`); for one video rendition of an adaptive asset it is `video-{rendition id}`.
+pub(crate) fn write_video_adaptation(
     manifest: &mut String,
     presentation: Presentation<'_>,
     track: &Track,
     version: &str,
+    id: &str,
 ) -> Result<()> {
     let (width, height) = track
         .codec
@@ -41,18 +57,21 @@ fn write_video_adaptation(
         "    <AdaptationSet contentType=\"video\" segmentAlignment=\"true\" startWithSAP=\"1\">"
     )
     .expect("writing to a String cannot fail");
-    writeln!(manifest, "      <Representation id=\"{}\" bandwidth=\"{}\" codecs=\"{codec}\" mimeType=\"video/mp4\" width=\"{width}\" height=\"{height}\">", track.key, presentation.bandwidth(track)?.peak)
+    writeln!(manifest, "      <Representation id=\"{id}\" bandwidth=\"{}\" codecs=\"{codec}\" mimeType=\"video/mp4\" width=\"{width}\" height=\"{height}\">", presentation.bandwidth(track)?.peak)
         .expect("writing to a String cannot fail");
     write_segment_template(manifest, presentation, track, version);
     manifest.push_str("      </Representation>\n    </AdaptationSet>\n");
     Ok(())
 }
 
-fn write_audio_adaptation(
+/// See [`write_video_adaptation`] on `id`: for the shared audio group it is `audio-{n}`, which
+/// may already differ from the source file's own numbering.
+pub(crate) fn write_audio_adaptation(
     manifest: &mut String,
     presentation: Presentation<'_>,
     track: &Track,
     version: &str,
+    id: &str,
 ) -> Result<()> {
     let (sample_rate, channels) = track
         .codec
@@ -66,7 +85,7 @@ fn write_audio_adaptation(
         "    <AdaptationSet contentType=\"audio\"{language} segmentAlignment=\"true\">"
     )
     .expect("writing to a String cannot fail");
-    writeln!(manifest, "      <Representation id=\"{}\" bandwidth=\"{}\" codecs=\"{codec}\" mimeType=\"audio/mp4\" audioSamplingRate=\"{sample_rate}\">", track.key, presentation.bandwidth(track)?.peak)
+    writeln!(manifest, "      <Representation id=\"{id}\" bandwidth=\"{}\" codecs=\"{codec}\" mimeType=\"audio/mp4\" audioSamplingRate=\"{sample_rate}\">", presentation.bandwidth(track)?.peak)
         .expect("writing to a String cannot fail");
     writeln!(manifest, "        <AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"{channels}\" />")
         .expect("writing to a String cannot fail");
@@ -75,8 +94,31 @@ fn write_audio_adaptation(
     Ok(())
 }
 
+/// A static MPD header and footer around adaptation sets the caller has already written, for an
+/// adaptive asset whose renditions come from several `Presentation`s.
+pub(crate) fn wrap_manifest(duration_seconds: &str, body: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"static\" mediaPresentationDuration=\"PT{duration_seconds}S\" minBufferTime=\"PT1.5S\" profiles=\"urn:mpeg:dash:profile:isoff-main:2011\">\n  <Period start=\"PT0S\">\n{body}  </Period>\n</MPD>\n"
+    )
+}
+
+/// See [`presentation_duration`], generalized to a single track when there is no whole
+/// `Presentation` to ask (an adaptive asset's renditions each have their own).
+pub(crate) fn track_duration(track: &Track) -> Result<String> {
+    let milliseconds = track
+        .duration
+        .checked_mul(1000)
+        .and_then(|duration| duration.checked_div(u64::from(track.timescale)))
+        .ok_or_else(|| Error::InvalidMedia("track duration overflow".to_owned()))?;
+    Ok(format!(
+        "{}.{:03}",
+        milliseconds / 1000,
+        milliseconds % 1000
+    ))
+}
+
 /// A sidecar `WebVTT` file as a text adaptation set that names the file directly.
-fn write_subtitle_adaptation(manifest: &mut String, subtitle: &Subtitle, version: &str) {
+pub(crate) fn write_subtitle_adaptation(manifest: &mut String, subtitle: &Subtitle, version: &str) {
     let mut roles = String::new();
     if subtitle.forced {
         roles.push_str(

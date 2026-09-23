@@ -13,7 +13,9 @@ use time::format_description::well_known::Rfc3339;
 use tokio::time::sleep;
 
 use super::policy::{LocationPolicy, validate_relative_path};
-use super::{AssetLocation, Resolution, ResolveError, ResolvedAsset, SubtitleLocation};
+use super::{
+    AssetLocation, RenditionLocation, Resolution, ResolveError, ResolvedAsset, SubtitleLocation,
+};
 use crate::config::MapperConfig;
 use crate::config::Secret;
 use crate::observability::request_id;
@@ -21,6 +23,8 @@ use crate::observability::request_id;
 const MAX_VERSION_BYTES: usize = 256;
 const MAX_LABEL_BYTES: usize = 128;
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(1);
+/// A rendition `id` is a path segment (`video-{id}` in a URL), so it is kept short and plain.
+const MAX_RENDITION_ID_BYTES: usize = 32;
 
 #[derive(Debug)]
 pub(crate) struct HttpResolver {
@@ -38,9 +42,20 @@ struct Wire {
     version: String,
     ttl_seconds: Option<u64>,
     expires_at: Option<String>,
-    location: WireLocation,
+    #[serde(default)]
+    location: Option<WireLocation>,
+    /// Several files served as one adaptive asset, instead of `location`. See
+    /// `docs/technical-design/0006-trick-play-subtitles-and-renditions.md`.
+    #[serde(default)]
+    renditions: Vec<WireRendition>,
     #[serde(default)]
     subtitles: Vec<WireSubtitle>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireRendition {
+    id: String,
+    location: WireLocation,
 }
 
 #[derive(Debug, Deserialize)]
@@ -307,6 +322,38 @@ impl HttpResolver {
         Ok(subtitles)
     }
 
+    /// Several files served as one adaptive asset, instead of a single `location`. Classifying
+    /// which are video and which are audio-only waits until each is loaded and its tracks are
+    /// known (`composite::assemble`); here only the wire shape is checked: an `id` for each, and
+    /// no two alike.
+    fn interpret_renditions(
+        &self,
+        wire: &[WireRendition],
+    ) -> Result<Vec<RenditionLocation>, ResolveError> {
+        let reject = |message: String| Err(ResolveError::Rejected(message));
+        let mut renditions = Vec::with_capacity(wire.len());
+        for entry in wire {
+            if !is_rendition_id(&entry.id) {
+                return reject(format!(
+                    "rendition id `{}` must be 1 to {MAX_RENDITION_ID_BYTES} URL-safe characters \
+                     (letters, digits, hyphens)",
+                    entry.id.escape_default()
+                ));
+            }
+            if renditions
+                .iter()
+                .any(|known: &RenditionLocation| known.id == entry.id)
+            {
+                return reject(format!("rendition id `{}` is listed twice", entry.id));
+            }
+            renditions.push(RenditionLocation {
+                id: entry.id.clone(),
+                location: self.interpret_location(&entry.location)?,
+            });
+        }
+        Ok(renditions)
+    }
+
     /// Validates a `200` answer against the request and the location policy.
     fn interpret(
         &self,
@@ -327,7 +374,16 @@ impl HttpResolver {
         {
             return reject("mapper version must be 1 to 256 visible ASCII characters");
         }
-        let location = self.interpret_location(&wire.location)?;
+        let (location, renditions) = match (&wire.location, wire.renditions.is_empty()) {
+            (Some(location), true) => (Some(self.interpret_location(location)?), Vec::new()),
+            (None, false) => (None, self.interpret_renditions(&wire.renditions)?),
+            (Some(_), false) => {
+                return reject("mapper answer must set only one of location or renditions");
+            }
+            (None, true) => {
+                return reject("mapper answer must set one of location or renditions");
+            }
+        };
         let subtitles = self.interpret_subtitles(&wire.subtitles)?;
 
         let now = Instant::now();
@@ -349,6 +405,7 @@ impl HttpResolver {
         }
         Ok(ResolvedAsset {
             location,
+            renditions,
             subtitles,
             version: wire.version,
             valid_until,
@@ -376,4 +433,15 @@ fn is_language_tag(tag: &str) -> bool {
             .split('-')
             .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
         && tag.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+}
+
+/// A rendition id as it appears in a URL path segment (`video-{id}`): letters, digits, and
+/// hyphens, starting with a letter or digit, bounded in length. Unlike a language tag, a hyphen
+/// may repeat or trail, since ids are opaque labels an operator picks, not structured tags.
+fn is_rendition_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_RENDITION_ID_BYTES
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }

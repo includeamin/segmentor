@@ -1,9 +1,102 @@
 use std::fmt::Write;
 
-use super::Presentation;
+use super::{Bandwidth, Presentation};
 use crate::error::{Error, Result};
 use crate::media::{Track, TrackKey};
 use crate::subtitle::Subtitle;
+
+/// One video rendition of an adaptive asset, already resolved to its own track and bandwidth.
+pub(crate) struct AdaptiveVideo<'a> {
+    /// The rendition id, as it appears in `video-{id}` URLs.
+    pub(crate) id: &'a str,
+    pub(crate) track: &'a Track,
+    pub(crate) bandwidth: Bandwidth,
+}
+
+/// One member of the shared audio group: the external key it is served under (`audio-{n}`,
+/// possibly renumbered from the source file's own), and the track that names its codec and
+/// language.
+pub(crate) struct AdaptiveAudio<'a> {
+    pub(crate) key: TrackKey,
+    pub(crate) track: &'a Track,
+}
+
+/// The master playlist for an adaptive asset: one `#EXT-X-STREAM-INF` per video rendition, all
+/// pointing at the one shared audio group, sorted by ascending bandwidth by the caller.
+pub(crate) fn adaptive_master_playlist(
+    version: &str,
+    video: &[AdaptiveVideo<'_>],
+    audio: &[AdaptiveAudio<'_>],
+    subtitles: &[Subtitle],
+    iframe_stream_line: Option<&str>,
+) -> Result<String> {
+    if video.is_empty() {
+        return Err(Error::InvalidMedia(
+            "composite asset has no video renditions".to_owned(),
+        ));
+    }
+    let mut playlist = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
+    for (index, entry) in audio.iter().enumerate() {
+        let language = track_language(entry.track);
+        let name = language.map_or_else(
+            || format!("Audio {}", index + 1),
+            |language| format!("Audio {} ({language})", index + 1),
+        );
+        let language_attribute =
+            language.map_or_else(String::new, |language| format!(",LANGUAGE=\"{language}\""));
+        let default = if index == 0 { "YES" } else { "NO" };
+        writeln!(
+            playlist,
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"{name}\"{language_attribute},DEFAULT={default},AUTOSELECT=YES,URI=\"{}/index.m3u8?v={version}\"",
+            entry.key
+        )
+        .expect("writing to a String cannot fail");
+    }
+    for subtitle in subtitles {
+        write_subtitle_rendition(&mut playlist, subtitle, version);
+    }
+    if let Some(line) = iframe_stream_line {
+        playlist.push_str(line);
+    }
+    let audio_attribute = if audio.is_empty() {
+        ""
+    } else {
+        ",AUDIO=\"audio\""
+    };
+    let subtitle_attribute = if subtitles.is_empty() {
+        ""
+    } else {
+        ",SUBTITLES=\"subs\""
+    };
+    for entry in video {
+        let codecs = audio.first().map_or_else(
+            || entry.track.codec.codecs(),
+            |first| {
+                format!(
+                    "{},{}",
+                    entry.track.codec.codecs(),
+                    first.track.codec.codecs()
+                )
+            },
+        );
+        let resolution = entry
+            .track
+            .codec
+            .dimensions()
+            .map_or_else(String::new, |(width, height)| {
+                format!(",RESOLUTION={width}x{height}")
+            });
+        writeln!(
+            playlist,
+            "#EXT-X-STREAM-INF:BANDWIDTH={},AVERAGE-BANDWIDTH={},CODECS=\"{codecs}\"{resolution}{audio_attribute}{subtitle_attribute}",
+            entry.bandwidth.peak, entry.bandwidth.average
+        )
+        .expect("writing to a String cannot fail");
+        writeln!(playlist, "video-{}/index.m3u8?v={version}", entry.id)
+            .expect("writing to a String cannot fail");
+    }
+    Ok(playlist)
+}
 
 pub(crate) fn master_playlist(presentation: Presentation<'_>) -> Result<String> {
     let video = presentation.video();
@@ -149,7 +242,10 @@ pub(crate) fn iframe_playlist(presentation: Presentation<'_>) -> Result<Option<S
 }
 
 /// The `#EXT-X-I-FRAME-STREAM-INF` line for the video track, or `None` when there is no video.
-fn iframe_stream(presentation: Presentation<'_>, video: Option<&Track>) -> Result<Option<String>> {
+pub(crate) fn iframe_stream(
+    presentation: Presentation<'_>,
+    video: Option<&Track>,
+) -> Result<Option<String>> {
     let Some(track) = video else {
         return Ok(None);
     };
@@ -272,7 +368,7 @@ fn write_audio_rendition(playlist: &mut String, track: &Track, index: usize, ver
 
 /// The track's three-letter language, or `None` when the file leaves it undetermined or holds
 /// something that is not a language code.
-pub(super) fn track_language(track: &Track) -> Option<&str> {
+pub(crate) fn track_language(track: &Track) -> Option<&str> {
     let language = track.language.as_str();
     (language.len() == 3
         && language.bytes().all(|byte| byte.is_ascii_lowercase())

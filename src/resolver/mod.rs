@@ -57,10 +57,22 @@ pub(crate) struct SubtitleLocation {
     pub(crate) location: AssetLocation,
 }
 
+/// One rendition of an adaptive asset: a video file, or an audio-only file supplying (part of)
+/// the shared audio group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RenditionLocation {
+    /// A short URL-safe label, unique within the asset. Appears in URLs as `video-{id}`.
+    pub(crate) id: String,
+    pub(crate) location: AssetLocation,
+}
+
 /// A resolver's answer for one asset.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedAsset {
-    pub(crate) location: AssetLocation,
+    /// A single file. Mutually exclusive with `renditions`; exactly one is non-empty.
+    pub(crate) location: Option<AssetLocation>,
+    /// Several files served as one adaptive asset. Mutually exclusive with `location`.
+    pub(crate) renditions: Vec<RenditionLocation>,
     /// Sidecar subtitles, in the order the mapper listed them.
     pub(crate) subtitles: Vec<SubtitleLocation>,
     /// Opaque change token: equal versions mean identical media.
@@ -70,6 +82,34 @@ pub(crate) struct ResolvedAsset {
     /// After this instant the location itself is dead (for example a signed URL) and must never
     /// be used, even as a stale fallback.
     pub(crate) hard_expiry: Option<Instant>,
+}
+
+impl ResolvedAsset {
+    /// Every location this answer names, single or several, each with the rendition id a
+    /// refresh needs to find its way back to the right one (`None` for the single-file case).
+    pub(crate) fn locations(&self) -> Vec<(Option<&str>, &AssetLocation)> {
+        match &self.location {
+            Some(location) => vec![(None, location)],
+            None => self
+                .renditions
+                .iter()
+                .map(|rendition| (Some(rendition.id.as_str()), &rendition.location))
+                .collect(),
+        }
+    }
+
+    /// The location previously served under `rendition`, for matching a refreshed answer back to
+    /// the one whose signed URL just expired.
+    pub(crate) fn location_for(&self, rendition: Option<&str>) -> Option<&AssetLocation> {
+        match rendition {
+            None => self.location.as_ref(),
+            Some(id) => self
+                .renditions
+                .iter()
+                .find(|candidate| candidate.id == id)
+                .map(|candidate| &candidate.location),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -38,6 +38,28 @@ The service handles `SIGTERM` and `SIGINT`. On either signal it:
 
 Set the orchestrator's termination grace period to at least `shutdown_delay_ms + shutdown_grace_ms` plus a few seconds. In Kubernetes, a `shutdown_delay_ms` of 5000 to 10000 typically covers endpoint propagation.
 
+## TLS
+
+By default the origin speaks plain HTTP; see [Before you expose it](deployment.md#before-you-expose-it) for why a reverse proxy is the recommended way to add TLS. For a deployment with no proxy in front, `[server.tls]` terminates TLS directly on the listener:
+
+```toml
+[server.tls]
+cert_path = "/etc/vod/tls/cert.pem"   # certificate chain, PEM, leaf first
+key_path = "/etc/vod/tls/key.pem"     # private key, PEM, unencrypted
+handshake_timeout_ms = 10000          # default; a stalled handshake is dropped after this long
+```
+
+Both paths are read once at startup; a missing file, a corrupt PEM, or a key that does not match the certificate fails startup with a message naming which. Relative paths resolve against the configuration file's directory, the same as `storage.media_root`.
+
+This is deliberately small, and deliberately not a replacement for a proxy:
+
+- **No ACME, no Let's Encrypt.** There is no automatic issuance or renewal. Get a certificate however you already do (an internal CA, `certbot` run separately, a certificate mounted by the platform) and point `cert_path`/`key_path` at it.
+- **No reload.** A renewed certificate on disk is not picked up; restart the process to load it.
+- **HTTP/1.1 only**, matching what the origin already speaks without TLS. ALPN advertises only `http/1.1`.
+- **One certificate.** There is no SNI-based selection between multiple certificates.
+
+If any of those matter, put a reverse proxy in front instead and leave `[server.tls]` unset — that is still the primary recommendation.
+
 ## CORS
 
 Browser players need CORS. The `[cors]` table configures it, and `enabled = false` turns it off when the proxy or CDN adds the headers instead. Restrict `allowed_origins` to your player origins in production. `allow_credentials = true` requires explicit origins, methods, and headers; the configuration is rejected at startup otherwise. The defaults expose `Content-Length`, `Content-Range`, `Accept-Ranges`, `ETag`, and `X-Request-Id` to scripts and allow the `Range`, `If-None-Match`, and `If-Range` request headers.

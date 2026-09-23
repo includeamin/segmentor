@@ -41,8 +41,9 @@ proportional to the segment asked for, not to the length of the video.
   [planned](docs/technical-design/0006-trick-play-subtitles-and-renditions.md).
 - **No DRM, no live streaming, no MPEG-TS output.** Segments are fragmented MP4. DRM is planned
   after the features above.
-- **No TLS or authentication.** Run it behind a reverse proxy or CDN that provides both; see
-  [operations](docs/operations.md).
+- **No authentication.** Run it behind a reverse proxy or CDN that provides it; see
+  [operations](docs/operations.md). TLS itself is optional but built in ([`[server.tls]`](docs/operations.md#tls))
+  for the case of running with no proxy in front.
 
 ## How it fits with other tools
 

@@ -14,6 +14,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use super::parse_track;
 use crate::asset::PackagedAsset;
+use crate::composite::ServedAsset;
 use crate::fmp4::PreparedSegment;
 use crate::http::error::{HttpError, HttpResult};
 use crate::http::range::{ByteInterval, range_not_satisfiable, requested_range};
@@ -31,8 +32,8 @@ pub(crate) struct VersionQuery {
 impl VersionQuery {
     /// Immutable objects must never be served under a URL naming a different version, or a CDN
     /// would cache new bytes under an old key.
-    fn require(&self, asset: &PackagedAsset) -> HttpResult<()> {
-        if self.v.as_deref() == Some(asset.version()) {
+    fn require(&self, version: &str) -> HttpResult<()> {
+        if self.v.as_deref() == Some(version) {
             Ok(())
         } else {
             Err(HttpError::not_found("asset version does not exist"))
@@ -47,17 +48,17 @@ pub(crate) async fn init_segment(
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
-    version.require(&asset)?;
-    let key = parse_track(&track)?;
-    let etag = entity_tag(&asset, &format!("{track}-init"));
+    version.require(asset.version())?;
+    let requested = parse_track(&track)?;
+    let etag = entity_tag(asset.version(), &format!("{track}-init"));
     if not_modified(&headers, &etag) {
         return not_modified_response(etag, "public, max-age=31536000, immutable");
     }
-    let bytes = asset.init_segment(key)?;
+    let bytes = asset.init_segment(requested.rendition.as_deref(), requested.key)?;
     let Ok(range) = requested_range(&headers, bytes.len() as u64, &etag) else {
         return range_not_satisfiable(bytes.len() as u64);
     };
-    media_response(&bytes, key.kind, etag, range)
+    media_response(&bytes, requested.key.kind, etag, range)
 }
 
 pub(crate) async fn media_segment(
@@ -68,18 +69,13 @@ pub(crate) async fn media_segment(
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
-    version.require(&asset)?;
-    let key = parse_track(&track)?;
-    let etag = entity_tag(&asset, &format!("{track}-segment-{segment_index}"));
-    serve_segment(
-        &state,
-        &method,
-        &headers,
-        asset,
-        etag,
-        key.kind,
-        move |asset| asset.prepare_media_segment(key, segment_index),
-    )
+    version.require(asset.version())?;
+    let requested = parse_track(&track)?;
+    let etag = entity_tag(asset.version(), &format!("{track}-segment-{segment_index}"));
+    let kind = requested.key.kind;
+    serve_segment(&state, &method, &headers, asset, etag, kind, move |asset| {
+        asset.prepare_media_segment(requested.rendition.as_deref(), requested.key, segment_index)
+    })
     .await
 }
 
@@ -91,9 +87,9 @@ pub(crate) async fn subtitle_file(
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
-    version.require(&asset)?;
+    version.require(asset.version())?;
     let etag = entity_tag(
-        &asset,
+        asset.version(),
         &format!("subtitle-{}", language.to_ascii_lowercase()),
     );
     if not_modified(&headers, &etag) {
@@ -126,8 +122,8 @@ pub(crate) async fn iframe_segment(
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
-    version.require(&asset)?;
-    let etag = entity_tag(&asset, &format!("iframe-{frame_index}"));
+    version.require(asset.version())?;
+    let etag = entity_tag(asset.version(), &format!("iframe-{frame_index}"));
     serve_segment(
         &state,
         &method,
@@ -146,18 +142,21 @@ async fn serve_segment(
     state: &AppState,
     method: &Method,
     headers: &HeaderMap,
-    asset: Arc<PackagedAsset>,
+    asset: Arc<ServedAsset>,
     etag: HeaderValue,
     kind: TrackKind,
-    prepare: impl FnOnce(&PackagedAsset) -> crate::error::Result<PreparedSegment> + Send + 'static,
+    prepare: impl FnOnce(&ServedAsset) -> crate::error::Result<(Arc<PackagedAsset>, PreparedSegment)>
+    + Send
+    + 'static,
 ) -> HttpResult<Response> {
     if not_modified(headers, &etag) {
         return not_modified_response(etag, "public, max-age=31536000, immutable");
     }
     let started = Instant::now();
     // Header generation is CPU work proportional to the segment's sample count, so it runs on
-    // the blocking pool rather than an async worker.
-    let prepared = {
+    // the blocking pool rather than an async worker. `source` is the specific underlying asset
+    // (a composite has several) whose bytes the prepared fragment's offsets refer to.
+    let (source, prepared) = {
         let asset = Arc::clone(&asset);
         tokio::task::spawn_blocking(move || prepare(&asset))
             .await
@@ -188,7 +187,7 @@ async fn serve_segment(
     let (sender, receiver) = mpsc::channel(2);
     tokio::spawn(
         StreamJob {
-            asset,
+            asset: source,
             prepared,
             interval: requested_interval,
             first_permit: Some(permit),

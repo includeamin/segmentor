@@ -1,8 +1,8 @@
 # TDD 0006: Trick play, subtitles, and adaptive renditions
 
-- Status: Draft
+- Status: Accepted; implemented
 - Created: 2026-09-21
-- Updated: 2026-09-21
+- Updated: 2026-09-23
 - Related ADRs: None
 - Related designs: [TDD 0002](0002-asset-map-interface.md) (the mapper interface this extends), [TDD 0004](0004-broader-mp4-input-support.md) (the input this builds on)
 
@@ -95,6 +95,8 @@ Subtitles are not tracks of the MP4, so they are held beside the tracks and are 
 Cue-shifting unit tests, including hour rollover and settings after the timing; validation rejects for every bad file; SSRF cases through the existing policy; and Chrome through hls.js and dash.js showing a cue in `video.textTracks` at the shifted time.
 
 ## 3. Adaptive renditions
+
+> **Implemented** as designed. Each rendition loads as its own `PackagedAsset`, unmodified from the single-file path; a new `composite` module classifies renditions by the tracks they actually contain (the wire answer names an id and a location, never a kind), checks alignment, decides the shared audio group, and renders the master playlist and manifest from the constituents' own `Presentation`s under one shared version. Verified against a real two-rung ladder over HTTP: FFprobe and FFmpeg decode both video renditions and the shared audio at their correct resolutions with no errors, and the DASH manifest carries one `Representation` per rendition. The alignment check compares segment start times in milliseconds (not raw ticks, since renditions may not share a timescale), with a tolerance of the coarser rendition's longest single sample — a reasonable reading of "within one sample," not a literal per-track-tick comparison. The open question on I-frame streams per rendition (below) remains open.
 
 ### Mapper answer
 

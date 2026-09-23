@@ -5,10 +5,9 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 
 use super::error::{HttpError, HttpResult};
-use crate::asset::PackagedAsset;
 
-pub(crate) fn entity_tag(asset: &PackagedAsset, resource: &str) -> HeaderValue {
-    HeaderValue::from_str(&format!("\"{}-{resource}\"", asset.version()))
+pub(crate) fn entity_tag(version: &str, resource: &str) -> HeaderValue {
+    HeaderValue::from_str(&format!("\"{version}-{resource}\""))
         .expect("asset versions and internal resource names are valid header values")
 }
 

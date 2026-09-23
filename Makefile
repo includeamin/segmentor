@@ -98,6 +98,7 @@ doc-open: ## Build and open rustdoc documentation
 fixtures: ## Regenerate media test fixtures with FFmpeg
 	sh tests/fixtures/generate.sh
 	sh tests/fixtures/generate-variants.sh
+	sh tests/fixtures/generate-renditions.sh
 
 fixtures-long: ## Generate a ~2-minute asset for manually testing seeking and scrubbing
 	sh tests/fixtures/generate-long.sh

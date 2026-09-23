@@ -17,8 +17,10 @@ use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, sleep, timeout};
+use tokio_rustls::TlsAcceptor;
 
+use crate::config::TlsConfig;
 use crate::observability::metrics::Metrics;
 
 /// Connection-level protections applied by [`serve_connections`].
@@ -31,6 +33,28 @@ pub(crate) struct ConnectionLimits {
     pub(crate) header_read_timeout: Duration,
 }
 
+/// What a freshly accepted connection needs before HTTP can start.
+#[derive(Clone)]
+enum Acceptor {
+    Plain,
+    Tls {
+        acceptor: TlsAcceptor,
+        handshake_timeout: Duration,
+    },
+}
+
+impl From<Option<TlsConfig>> for Acceptor {
+    fn from(tls: Option<TlsConfig>) -> Self {
+        match tls {
+            None => Self::Plain,
+            Some(tls) => Self::Tls {
+                acceptor: TlsAcceptor::from(tls.server_config),
+                handshake_timeout: Duration::from_millis(tls.handshake_timeout_ms),
+            },
+        }
+    }
+}
+
 /// Accepts connections until `shutdown` completes, then drains those still open.
 ///
 /// Returns once every connection has finished. Callers that need a deadline race this future
@@ -39,9 +63,11 @@ pub(crate) async fn serve_connections(
     listener: TcpListener,
     app: Router,
     limits: ConnectionLimits,
+    tls: Option<TlsConfig>,
     metrics: Arc<Metrics>,
     shutdown: impl Future<Output = ()>,
 ) -> io::Result<()> {
+    let acceptor = Acceptor::from(tls);
     let slots = Arc::new(Semaphore::new(limits.max_connections));
     let graceful = GracefulShutdown::new();
     let mut builder = auto::Builder::new(TokioExecutor::new());
@@ -49,6 +75,7 @@ pub(crate) async fn serve_connections(
         .http1()
         .timer(TokioTimer::new())
         .header_read_timeout(limits.header_read_timeout);
+    let builder = Arc::new(builder);
     let mut shutdown = pin!(shutdown);
 
     loop {
@@ -73,16 +100,56 @@ pub(crate) async fn serve_connections(
         };
         let _ = stream.set_nodelay(true);
 
-        let connection = graceful.watch(
-            builder
-                .serve_connection(TokioIo::new(stream), TowerToHyperService::new(app.clone()))
-                .into_owned(),
-        );
+        // Subscribed now, watched once the connection (and, with TLS, its handshake) is ready:
+        // a shutdown signalled in between is still seen, since the channel is already subscribed.
+        let watcher = graceful.watcher();
+        let acceptor = acceptor.clone();
+        let builder = Arc::clone(&builder);
+        let app = app.clone();
         let open = metrics.connection_opened();
         tokio::spawn(async move {
             let _slot = slot;
             let _open = open;
-            if let Err(error) = connection.await {
+            let result = match acceptor {
+                Acceptor::Plain => {
+                    watcher
+                        .watch(
+                            builder
+                                .serve_connection(
+                                    TokioIo::new(stream),
+                                    TowerToHyperService::new(app),
+                                )
+                                .into_owned(),
+                        )
+                        .await
+                }
+                Acceptor::Tls {
+                    acceptor,
+                    handshake_timeout,
+                } => match timeout(handshake_timeout, acceptor.accept(stream)).await {
+                    Ok(Ok(tls_stream)) => {
+                        watcher
+                            .watch(
+                                builder
+                                    .serve_connection(
+                                        TokioIo::new(tls_stream),
+                                        TowerToHyperService::new(app),
+                                    )
+                                    .into_owned(),
+                            )
+                            .await
+                    }
+                    Ok(Err(error)) => {
+                        tracing::debug!(event = "tls_handshake_failed", peer.address = %peer, %error);
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::debug!(event = "tls_handshake_timed_out", peer.address = %peer);
+                        return;
+                    }
+                },
+            };
+            if let Err(error) = result {
                 tracing::debug!(event = "connection_closed_with_error", peer.address = %peer, %error);
             }
         });

@@ -3,6 +3,14 @@ listen = "127.0.0.1:3000"
 shutdown_delay_ms = 0       # keep serving this long after SIGTERM while /ready reports 503
 shutdown_grace_ms = 30000   # then wait at most this long for in-flight streams to finish
 
+# Optional: terminate TLS on the listener itself, for a deployment with no reverse proxy in
+# front. A reverse proxy remains the recommended way to get TLS (it also gets you HTTP/2 and
+# automatic certificate renewal); see docs/operations.md#tls before enabling this.
+# [server.tls]
+# cert_path = "/etc/vod/tls/cert.pem"   # certificate chain, PEM, leaf first
+# key_path = "/etc/vod/tls/key.pem"     # private key, PEM, unencrypted
+# handshake_timeout_ms = 10000          # default
+
 [storage]
 media_root = "tests/fixtures"
 

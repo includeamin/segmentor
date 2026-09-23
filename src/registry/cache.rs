@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::asset::PackagedAsset;
+use crate::composite::ServedAsset;
 
 /// One cached asset, as reported to the admin status endpoint.
 #[derive(Debug, Clone)]
@@ -25,7 +25,7 @@ type Key = (String, String);
 
 #[derive(Debug)]
 struct Entry {
-    asset: Arc<PackagedAsset>,
+    asset: Arc<ServedAsset>,
     weight: u64,
     last_used: u64,
 }
@@ -48,7 +48,7 @@ impl LoadedCache {
         }
     }
 
-    pub(crate) fn get(&mut self, asset_id: &str, version: &str) -> Option<Arc<PackagedAsset>> {
+    pub(crate) fn get(&mut self, asset_id: &str, version: &str) -> Option<Arc<ServedAsset>> {
         self.clock += 1;
         let clock = self.clock;
         let entry = self
@@ -62,7 +62,7 @@ impl LoadedCache {
     ///
     /// An asset heavier than the whole budget is not retained at all: the caller still serves
     /// the request from its `Arc`, and the next request reloads it.
-    pub(crate) fn insert(&mut self, asset_id: &str, version: &str, asset: Arc<PackagedAsset>) {
+    pub(crate) fn insert(&mut self, asset_id: &str, version: &str, asset: Arc<ServedAsset>) {
         let weight = asset.index_bytes();
         if weight > self.budget {
             return;
@@ -129,23 +129,15 @@ impl LoadedCache {
             .entries
             .iter()
             .map(|((asset_id, version), entry)| {
-                let index = &entry.asset.index;
-                let duration_seconds = if index.movie_timescale == 0 {
-                    0.0
-                } else {
-                    f64::from(
-                        u32::try_from(index.duration.min(u64::from(u32::MAX))).unwrap_or(u32::MAX),
-                    ) / f64::from(index.movie_timescale)
-                };
                 (
                     entry.last_used,
                     CachedAsset {
                         asset_id: asset_id.clone(),
                         version: version.clone(),
                         bytes: entry.weight,
-                        tracks: index.tracks.len(),
+                        tracks: entry.asset.track_count(),
                         subtitles: entry.asset.subtitle_count(),
-                        duration_seconds,
+                        duration_seconds: entry.asset.duration_seconds(),
                     },
                 )
             })
