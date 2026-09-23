@@ -184,6 +184,11 @@ impl PackagedAsset {
         Ok(self.rendered.hls_subtitle.clone())
     }
 
+    /// How many sidecar subtitle files this asset has, for status reporting.
+    pub(crate) fn subtitle_count(&self) -> usize {
+        self.subtitles.len()
+    }
+
     /// A subtitle file, ready to serve.
     pub(crate) fn subtitle(&self, language: &str) -> Result<Bytes> {
         self.subtitles

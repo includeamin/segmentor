@@ -868,3 +868,48 @@ async fn shutdown_drains_and_closes_idle_connections() {
         "shutdown should not wait on an idle connection"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Admin status
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn admin_status_lists_the_static_catalog_and_what_is_cached() {
+    let app = app();
+    let empty: serde_json::Value =
+        serde_json::from_slice(&body(get(&app, "/admin/status").await).await).unwrap();
+
+    assert_eq!(empty["resolver"]["kind"], "static");
+    assert_eq!(empty["resolver"]["healthy"], true);
+    assert_eq!(empty["resolver"]["base_url"], serde_json::Value::Null);
+    assert_eq!(
+        empty["resolver"]["known_assets"],
+        serde_json::json!(["sample"])
+    );
+    assert_eq!(empty["cache"]["count"], 0, "nothing has been requested yet");
+
+    get(&app, "/hls/sample/master.m3u8").await;
+    let after: serde_json::Value =
+        serde_json::from_slice(&body(get(&app, "/admin/status").await).await).unwrap();
+
+    assert_eq!(after["cache"]["count"], 1);
+    let cached = &after["cache"]["assets"][0];
+    assert_eq!(cached["asset_id"], "sample");
+    // The static resolver's cache key is a constant, not the content hash `version()` computes
+    // for URLs; the two are different things and only the latter appears in playlist URLs.
+    assert_eq!(cached["version"], "static");
+    assert!(cached["bytes"].as_u64().unwrap() > 0);
+    assert!(cached["tracks"].as_u64().unwrap() >= 1);
+    assert!(cached["duration_seconds"].as_f64().unwrap() > 0.0);
+    assert!(
+        after["cache"]["bytes"].as_u64().unwrap() >= cached["bytes"].as_u64().unwrap(),
+        "the total covers every cached asset"
+    );
+
+    let response = get(&app, "/admin/status").await;
+    assert_eq!(
+        response.headers().get(CACHE_CONTROL).unwrap(),
+        "no-store",
+        "a live status must never be cached"
+    );
+}

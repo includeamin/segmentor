@@ -845,6 +845,55 @@ async fn readiness_follows_mapper_health() {
 }
 
 #[tokio::test]
+async fn admin_status_reflects_the_mapper_live_not_the_background_probe() {
+    // No readiness_probe_interval_ms is set, so the background flag never updates; the status
+    // endpoint must still check the mapper itself rather than trust that stale flag.
+    let h = harness().await;
+    h.mapper
+        .state
+        .set("movie", Answer::file("v1", "h264-aac.mp4"));
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&fetch(&h.app, "/admin/status").await.2).unwrap();
+    assert_eq!(json["resolver"]["kind"], "mapper");
+    assert_eq!(json["resolver"]["healthy"], true);
+    assert!(
+        json["resolver"]["base_url"]
+            .as_str()
+            .unwrap()
+            .contains(&h.mapper.address.port().to_string()),
+        "{json}"
+    );
+    assert_eq!(json["resolver"]["known_assets"], serde_json::Value::Null);
+    assert_eq!(json["cache"]["count"], 0);
+
+    h.mapper.state.unhealthy.store(true, Ordering::SeqCst);
+    let json: serde_json::Value =
+        serde_json::from_slice(&fetch(&h.app, "/admin/status").await.2).unwrap();
+    assert_eq!(json["resolver"]["healthy"], false, "checked live: {json}");
+}
+
+#[tokio::test]
+async fn admin_status_lists_a_loaded_mapper_asset() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "movie",
+        Answer::file("v1", "h264-aac.mp4").with_subtitle("en", "subtitles-en.vtt"),
+    );
+    status(&h.app, "/hls/movie/master.m3u8").await;
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&fetch(&h.app, "/admin/status").await.2).unwrap();
+
+    assert_eq!(json["cache"]["count"], 1);
+    let cached = &json["cache"]["assets"][0];
+    assert_eq!(cached["asset_id"], "movie");
+    assert_eq!(cached["version"], "v1");
+    assert_eq!(cached["subtitles"], 1);
+    assert!(cached["tracks"].as_u64().unwrap() >= 2);
+}
+
+#[tokio::test]
 async fn a_bad_catalog_asset_stops_startup_and_names_the_asset() {
     let directory =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/registry-tests");

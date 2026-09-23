@@ -130,6 +130,11 @@ impl HttpResolver {
         }
     }
 
+    /// The mapper's own base URL, for status reporting.
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// `GET {base}/v1/health`; any `2xx` counts as healthy.
     pub(crate) async fn healthy(&self) -> bool {
         self.authorized(self.client.get(format!("{}/v1/health", self.base_url)))

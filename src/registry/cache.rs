@@ -10,6 +10,17 @@ use std::sync::Arc;
 
 use crate::asset::PackagedAsset;
 
+/// One cached asset, as reported to the admin status endpoint.
+#[derive(Debug, Clone)]
+pub(crate) struct CachedAsset {
+    pub(crate) asset_id: String,
+    pub(crate) version: String,
+    pub(crate) bytes: u64,
+    pub(crate) tracks: usize,
+    pub(crate) subtitles: usize,
+    pub(crate) duration_seconds: f64,
+}
+
 type Key = (String, String);
 
 #[derive(Debug)]
@@ -106,5 +117,40 @@ impl LoadedCache {
 
     pub(crate) fn weight(&self) -> u64 {
         self.total_weight
+    }
+
+    pub(crate) fn budget(&self) -> u64 {
+        self.budget
+    }
+
+    /// Every cached asset, most recently used first.
+    pub(crate) fn snapshot(&self) -> Vec<CachedAsset> {
+        let mut rows = self
+            .entries
+            .iter()
+            .map(|((asset_id, version), entry)| {
+                let index = &entry.asset.index;
+                let duration_seconds = if index.movie_timescale == 0 {
+                    0.0
+                } else {
+                    f64::from(
+                        u32::try_from(index.duration.min(u64::from(u32::MAX))).unwrap_or(u32::MAX),
+                    ) / f64::from(index.movie_timescale)
+                };
+                (
+                    entry.last_used,
+                    CachedAsset {
+                        asset_id: asset_id.clone(),
+                        version: version.clone(),
+                        bytes: entry.weight,
+                        tracks: index.tracks.len(),
+                        subtitles: entry.asset.subtitle_count(),
+                        duration_seconds,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|(last_used, _)| std::cmp::Reverse(*last_used));
+        rows.into_iter().map(|(_, row)| row).collect()
     }
 }

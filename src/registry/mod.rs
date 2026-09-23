@@ -34,7 +34,7 @@ use crate::resolver::{
 };
 use crate::source::LocationRefresher;
 use crate::subtitle::Subtitle;
-use cache::LoadedCache;
+use cache::{CachedAsset, LoadedCache};
 pub(crate) use opener::SourceOpener;
 
 #[cfg(test)]
@@ -51,6 +51,31 @@ pub(crate) enum RegistryError {
     BadUpstream(String),
     /// The media exists but could not be loaded, for example unsupported codecs: `500`.
     LoadFailed(String),
+}
+
+/// A point-in-time view of the registry, for the admin status endpoint.
+#[derive(Debug)]
+pub(crate) struct RegistryStatus {
+    pub(crate) resolver: ResolverStatus,
+    pub(crate) cache: CacheStatus,
+}
+
+#[derive(Debug)]
+pub(crate) struct ResolverStatus {
+    pub(crate) kind: &'static str,
+    pub(crate) healthy: bool,
+    /// The mapper's base URL; `None` for the static catalog.
+    pub(crate) base_url: Option<String>,
+    /// Asset IDs the resolver knows without asking anything: only the static catalog has them.
+    pub(crate) known_assets: Option<Vec<String>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct CacheStatus {
+    pub(crate) count: usize,
+    pub(crate) bytes: u64,
+    pub(crate) budget_bytes: u64,
+    pub(crate) assets: Vec<CachedAsset>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -262,6 +287,28 @@ impl AssetRegistry {
     /// Whether the resolver's backend is reachable, for readiness reporting.
     pub(crate) async fn resolver_healthy(&self) -> bool {
         self.resolver.healthy().await
+    }
+
+    /// A live snapshot for the admin status endpoint: resolver health, checked right now rather
+    /// than from the background probe, and every asset currently held in the loaded-asset cache.
+    pub(crate) async fn status(&self) -> RegistryStatus {
+        let healthy = self.resolver.healthy().await;
+        let known_assets = (self.resolver.kind() == "static").then(|| self.resolver.known_ids());
+        let cache = lock(&self.loaded);
+        RegistryStatus {
+            resolver: ResolverStatus {
+                kind: self.resolver.kind(),
+                healthy,
+                base_url: self.resolver.base_url().map(str::to_owned),
+                known_assets,
+            },
+            cache: CacheStatus {
+                count: cache.len(),
+                bytes: cache.weight(),
+                budget_bytes: cache.budget(),
+                assets: cache.snapshot(),
+            },
+        }
     }
 
     /// Loads every asset the resolver already knows (the static catalog) so a bad file stops

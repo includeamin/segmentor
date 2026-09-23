@@ -109,6 +109,22 @@ impl AssetResolver {
         }
     }
 
+    /// `"static"` for the configuration-file catalog, `"mapper"` for an external mapper service.
+    pub(crate) const fn kind(&self) -> &'static str {
+        match self {
+            Self::Static(_) => "static",
+            Self::Http(_) => "mapper",
+        }
+    }
+
+    /// The mapper's base URL, for status reporting. `None` for the static catalog.
+    pub(crate) fn base_url(&self) -> Option<&str> {
+        match self {
+            Self::Static(_) => None,
+            Self::Http(resolver) => Some(resolver.base_url()),
+        }
+    }
+
     /// Whether the resolver's backend answers a health check. Always true when there is none.
     pub(crate) async fn healthy(&self) -> bool {
         match self {

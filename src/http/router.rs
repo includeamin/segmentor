@@ -9,8 +9,9 @@ use tower_http::trace::{DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, T
 use tracing::Level;
 
 use super::handlers::{
-    dash_manifest, health, iframe_playlist, iframe_segment, init_segment, master_playlist,
-    media_playlist, media_segment, metrics, ready, subtitle_file, subtitle_playlist,
+    admin_status, dash_manifest, health, iframe_playlist, iframe_segment, init_segment,
+    master_playlist, media_playlist, media_segment, metrics, ready, subtitle_file,
+    subtitle_playlist,
 };
 use super::middleware::{
     X_REQUEST_ID, enforce_header_limit, record_metrics, request_id, shed_load,
@@ -18,6 +19,7 @@ use super::middleware::{
 use super::state::AppState;
 
 const HEALTH: &str = "/health";
+const ADMIN_STATUS: &str = "/admin/status";
 const READY: &str = "/ready";
 const METRICS: &str = "/metrics";
 const HLS_MASTER: &str = "/hls/{asset_id}/master.m3u8";
@@ -35,8 +37,9 @@ const DASH_SEGMENT: &str = "/dash/{asset_id}/{track}/segments/{segment_index}/me
 
 /// Every route template, used both to register handlers and to label metrics, so a route
 /// cannot be added to one and forgotten in the other.
-pub(crate) const ROUTES: [&str; 15] = [
+pub(crate) const ROUTES: [&str; 16] = [
     HEALTH,
+    ADMIN_STATUS,
     READY,
     METRICS,
     HLS_MASTER,
@@ -56,6 +59,7 @@ pub(crate) const ROUTES: [&str; 15] = [
 pub(crate) fn router(state: AppState) -> Router {
     let router = Router::new()
         .route(HEALTH, get(health))
+        .route(ADMIN_STATUS, get(admin_status))
         .route(READY, get(ready))
         .route(METRICS, get(metrics))
         .route(HLS_MASTER, get(master_playlist))
