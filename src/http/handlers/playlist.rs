@@ -17,7 +17,7 @@ pub(crate) async fn master_playlist(
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
-    let etag = entity_tag(&asset, "hls-master");
+    let etag = entity_tag(asset.version(), "hls-master");
     if not_modified(&headers, &etag) {
         return not_modified_response(etag, "public, max-age=60");
     }
@@ -30,12 +30,15 @@ pub(crate) async fn media_playlist(
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
-    let key = parse_track(&track)?;
-    let etag = entity_tag(&asset, &format!("hls-{track}-playlist"));
+    let requested = parse_track(&track)?;
+    let etag = entity_tag(asset.version(), &format!("hls-{track}-playlist"));
     if not_modified(&headers, &etag) {
         return not_modified_response(etag, "public, max-age=60");
     }
-    playlist_response(asset.hls_media_playlist(key)?, etag)
+    playlist_response(
+        asset.hls_media_playlist(requested.rendition.as_deref(), requested.key)?,
+        etag,
+    )
 }
 
 pub(crate) async fn iframe_playlist(
@@ -44,7 +47,7 @@ pub(crate) async fn iframe_playlist(
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
-    let etag = entity_tag(&asset, "hls-iframe-playlist");
+    let etag = entity_tag(asset.version(), "hls-iframe-playlist");
     if not_modified(&headers, &etag) {
         return not_modified_response(etag, "public, max-age=60");
     }
@@ -58,7 +61,7 @@ pub(crate) async fn subtitle_playlist(
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
     let etag = entity_tag(
-        &asset,
+        asset.version(),
         &format!("hls-subtitle-{}-playlist", language.to_ascii_lowercase()),
     );
     if not_modified(&headers, &etag) {
@@ -73,7 +76,7 @@ pub(crate) async fn dash_manifest(
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
-    let etag = entity_tag(&asset, "dash-manifest");
+    let etag = entity_tag(asset.version(), "dash-manifest");
     if not_modified(&headers, &etag) {
         return not_modified_response(etag, "public, max-age=60");
     }

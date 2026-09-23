@@ -50,7 +50,9 @@ async fn serve(app: Router) -> SocketAddr {
 #[derive(Debug, Clone)]
 pub(crate) struct Answer {
     pub(crate) version: String,
+    /// Mutually exclusive with `renditions`; `location` is `Value::Null` when renditions are set.
     pub(crate) location: Value,
+    pub(crate) renditions: Vec<Value>,
     pub(crate) ttl_seconds: Option<u64>,
     pub(crate) expires_at: Option<String>,
     pub(crate) subtitles: Vec<Value>,
@@ -71,6 +73,7 @@ impl Answer {
         Self {
             version: version.to_owned(),
             location: json!({ "type": "file", "path": path }),
+            renditions: Vec::new(),
             ttl_seconds: Some(300),
             expires_at: None,
             subtitles: Vec::new(),
@@ -81,6 +84,22 @@ impl Answer {
         Self {
             version: version.to_owned(),
             location: json!({ "type": "http", "url": url }),
+            renditions: Vec::new(),
+            ttl_seconds: Some(300),
+            expires_at: None,
+            subtitles: Vec::new(),
+        }
+    }
+
+    /// An adaptive asset: `renditions` pairs each rendition id with a file path.
+    pub(crate) fn renditions(version: &str, renditions: &[(&str, &str)]) -> Self {
+        Self {
+            version: version.to_owned(),
+            location: Value::Null,
+            renditions: renditions
+                .iter()
+                .map(|(id, path)| json!({ "id": id, "location": { "type": "file", "path": path } }))
+                .collect(),
             ttl_seconds: Some(300),
             expires_at: None,
             subtitles: Vec::new(),
@@ -201,8 +220,12 @@ async fn mapper_asset(
     let mut body = json!({
         "asset_id": id,
         "version": answer.version,
-        "location": answer.location,
     });
+    if answer.renditions.is_empty() {
+        body["location"] = answer.location;
+    } else {
+        body["renditions"] = json!(answer.renditions);
+    }
     if !answer.subtitles.is_empty() {
         body["subtitles"] = json!(answer.subtitles);
     }

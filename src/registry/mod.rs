@@ -26,6 +26,7 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, Semaphore};
 use tokio::time::{Duration, timeout};
 
 use crate::asset::PackagedAsset;
+use crate::composite::{self, ServedAsset};
 use crate::config::{Config, LimitsConfig, is_valid_asset_id};
 use crate::error::{Error, Result};
 use crate::observability::metrics::{CacheEvent, Metrics, ResolverOutcome};
@@ -93,7 +94,9 @@ pub(crate) struct RegistrySettings {
 #[derive(Debug)]
 enum Slot {
     Found {
-        resolved: ResolvedAsset,
+        // Boxed: `ResolvedAsset` grew past `Missing`'s size once renditions were added, and this
+        // variant is already the rare, larger one.
+        resolved: Box<ResolvedAsset>,
         /// When the mapper last answered, used to avoid refreshing a location twice in a burst.
         fetched_at: Instant,
         /// While set and in the future, a stale answer is served without asking the mapper.
@@ -125,7 +128,7 @@ pub(crate) struct AssetRegistry {
 
 /// What a lookup found without doing any work.
 enum Lookup {
-    Hit(Arc<PackagedAsset>),
+    Hit(Arc<ServedAsset>),
     Failed(RegistryError),
     Missing,
     NeedsWork,
@@ -185,7 +188,7 @@ impl AssetRegistry {
     pub(crate) async fn get(
         self: &Arc<Self>,
         asset_id: &str,
-    ) -> std::result::Result<Arc<PackagedAsset>, RegistryError> {
+    ) -> std::result::Result<Arc<ServedAsset>, RegistryError> {
         // Malformed IDs never reach the resolver, so path-like or oversized input is not forwarded.
         if !is_valid_asset_id(asset_id) {
             return Err(RegistryError::NotFound);
@@ -216,25 +219,32 @@ impl AssetRegistry {
     }
 
     /// Re-asks the mapper for `asset_id`'s location after the origin rejected the current URL.
+    /// `rendition` names which one for a composite asset; `None` for a plain asset's only one.
     ///
     /// Concurrent callers share one lookup; a location fetched moments ago is reused instead of
     /// asking again. Fails if the asset changed underneath the caller.
     pub(crate) async fn refresh_location(
         self: &Arc<Self>,
         asset_id: &str,
+        rendition: Option<&str>,
     ) -> std::result::Result<Url, RegistryError> {
         let flight = self.enter_flight(asset_id).await;
         let registry = Arc::clone(self);
         let id = asset_id.to_owned();
+        let rendition = rendition.map(str::to_owned);
         tokio::spawn(async move {
             let _flight = flight;
-            registry.refresh_inner(&id).await
+            registry.refresh_inner(&id, rendition.as_deref()).await
         })
         .await
         .map_err(|error| RegistryError::LoadFailed(format!("refresh task failed: {error}")))?
     }
 
-    async fn refresh_inner(&self, asset_id: &str) -> std::result::Result<Url, RegistryError> {
+    async fn refresh_inner(
+        &self,
+        asset_id: &str,
+        rendition: Option<&str>,
+    ) -> std::result::Result<Url, RegistryError> {
         const RECENT: Duration = Duration::from_secs(2);
         let (old, fetched_at) = match lock(&self.inner).resolutions.get(asset_id) {
             Some(Slot::Found {
@@ -245,7 +255,7 @@ impl AssetRegistry {
             _ => return Err(RegistryError::NotFound),
         };
         if fetched_at.elapsed() < RECENT
-            && let AssetLocation::Http(url) = &old.location
+            && let Some(AssetLocation::Http(url)) = old.location_for(rendition)
         {
             return Ok(url.clone());
         }
@@ -254,12 +264,14 @@ impl AssetRegistry {
             Ok(Resolution::Resolved(new)) => {
                 self.metrics.resolver_result(ResolverOutcome::Ok);
                 self.store_resolution(asset_id, &new, Some(&old));
-                match new.location {
-                    AssetLocation::Http(url)
+                match new.location_for(rendition) {
+                    Some(AssetLocation::Http(url))
                         if new.version == old.version
-                            && old.location.same_object(&AssetLocation::Http(url.clone())) =>
+                            && old.location_for(rendition).is_some_and(|old| {
+                                old.same_object(&AssetLocation::Http(url.clone()))
+                            }) =>
                     {
-                        Ok(url)
+                        Ok(url.clone())
                     }
                     _ => Err(RegistryError::BadUpstream(
                         "asset changed while it was being read".to_owned(),
@@ -339,8 +351,8 @@ impl AssetRegistry {
             tracing::info!(
                 event = "asset_loaded",
                 asset.id = %id,
-                media.tracks = asset.index.tracks.len(),
-                media.segments = asset.plan.segments.len(),
+                media.tracks = asset.track_count(),
+                media.segments = asset.segment_count(),
                 index.bytes = asset.index_bytes(),
                 elapsed_ms = started.elapsed().as_millis(),
             );
@@ -431,7 +443,7 @@ impl AssetRegistry {
     async fn resolve_and_load(
         self: &Arc<Self>,
         asset_id: &str,
-    ) -> std::result::Result<Arc<PackagedAsset>, RegistryError> {
+    ) -> std::result::Result<Arc<ServedAsset>, RegistryError> {
         let resolved = self.ensure_resolved(asset_id).await?;
         self.load(asset_id, &resolved).await
     }
@@ -442,7 +454,7 @@ impl AssetRegistry {
     ) -> std::result::Result<ResolvedAsset, RegistryError> {
         let now = Instant::now();
         let known = match lock(&self.inner).resolutions.get(asset_id) {
-            Some(Slot::Found { resolved, .. }) => Some(resolved.clone()),
+            Some(Slot::Found { resolved, .. }) => Some((**resolved).clone()),
             _ => None,
         };
         if let Some(resolved) = &known {
@@ -480,7 +492,7 @@ impl AssetRegistry {
                 self.put_slot(
                     asset_id,
                     Slot::Found {
-                        resolved: resolved.clone(),
+                        resolved: Box::new(resolved.clone()),
                         fetched_at: Instant::now(),
                         backoff_until: None,
                     },
@@ -511,7 +523,7 @@ impl AssetRegistry {
                     self.put_slot(
                         asset_id,
                         Slot::Found {
-                            resolved: resolved.clone(),
+                            resolved: Box::new(resolved.clone()),
                             // The mapper did not answer, so the entry counts as old: a refresh
                             // triggered by an origin rejection must really ask.
                             fetched_at: now.checked_sub(Duration::from_secs(60)).unwrap_or(now),
@@ -535,27 +547,44 @@ impl AssetRegistry {
 
     fn store_resolution(&self, asset_id: &str, new: &ResolvedAsset, old: Option<&ResolvedAsset>) {
         if let Some(old) = old {
-            if old.version != new.version || !old.location.same_object(&new.location) {
-                // A different version or object: the loaded copy is stale. There is no grace
+            let old_locations = old.locations();
+            let new_locations = new.locations();
+            let same_objects = old.version == new.version
+                && old_locations.len() == new_locations.len()
+                && old_locations.iter().zip(&new_locations).all(
+                    |((old_id, old_loc), (new_id, new_loc))| {
+                        old_id == new_id && old_loc.same_object(new_loc)
+                    },
+                );
+            if !same_objects {
+                // A different version or object set: the loaded copy is stale. There is no grace
                 // period for old versions.
                 lock(&self.loaded).retain_only(asset_id, None);
                 self.publish_loaded();
-            } else if let (AssetLocation::Http(url), true) =
-                (&new.location, old.location != new.location)
-            {
-                // The same object under a fresh signature: keep the loaded asset and point it at
-                // the new URL, so nothing is reparsed and streams in flight simply carry on.
-                if let Some(asset) = lock(&self.loaded).get(asset_id, &new.version) {
-                    asset.update_location(url);
-                    self.metrics.location_rotated();
-                    tracing::debug!(event = "location_rotated", asset.id = asset_id);
+            } else if let Some(asset) = lock(&self.loaded).get(asset_id, &new.version) {
+                // The same objects, possibly under fresh signatures: keep the loaded asset and
+                // point any rotated rendition at its new URL, so nothing is reparsed and streams
+                // in flight simply carry on.
+                for (rendition, new_loc) in &new_locations {
+                    if let (AssetLocation::Http(url), Some(old_loc)) =
+                        (new_loc, old.location_for(*rendition))
+                        && old_loc != *new_loc
+                    {
+                        asset.update_location(*rendition, url);
+                        self.metrics.location_rotated();
+                        tracing::debug!(
+                            event = "location_rotated",
+                            asset.id = asset_id,
+                            rendition = rendition.unwrap_or("-"),
+                        );
+                    }
                 }
             }
         }
         self.put_slot(
             asset_id,
             Slot::Found {
-                resolved: new.clone(),
+                resolved: Box::new(new.clone()),
                 fetched_at: Instant::now(),
                 backoff_until: None,
             },
@@ -643,7 +672,7 @@ impl AssetRegistry {
         self: &Arc<Self>,
         asset_id: &str,
         resolved: &ResolvedAsset,
-    ) -> std::result::Result<Arc<PackagedAsset>, RegistryError> {
+    ) -> std::result::Result<Arc<ServedAsset>, RegistryError> {
         if let Some(asset) = lock(&self.loaded).get(asset_id, &resolved.version) {
             return Ok(asset);
         }
@@ -653,34 +682,11 @@ impl AssetRegistry {
             .map_err(|_| RegistryError::Unavailable("asset loading is shut down".to_owned()))?;
 
         let started = Instant::now();
-        // Disarmed while loading: the load holds this asset's flight lock, which a refresh would
-        // need, and a URL that was just issued should not be rejected.
-        let refresher = Arc::new(AssetRefresher {
-            registry: Arc::downgrade(self),
-            asset_id: asset_id.to_owned(),
-            armed: AtomicBool::new(false),
-        });
-        let result = async {
-            let source = self
-                .opener
-                .open(
-                    &resolved.location,
-                    Arc::clone(&refresher) as Arc<dyn LocationRefresher>,
-                )
-                .await?;
-            let subtitles = self.fetch_subtitles(&resolved.subtitles).await?;
-            PackagedAsset::load_with_subtitles(
-                source,
-                subtitles,
-                self.settings.segment_duration_ms,
-                &self.limits,
-            )
-            .await
-        }
-        .await;
-        if result.is_ok() {
-            refresher.armed.store(true, Ordering::Relaxed);
-        }
+        let result: Result<ServedAsset> = if resolved.renditions.is_empty() {
+            self.load_single(asset_id, resolved).await
+        } else {
+            self.load_composite(asset_id, resolved).await
+        };
         self.metrics.asset_load(result.is_ok(), started.elapsed());
         match result {
             Ok(asset) => {
@@ -695,6 +701,8 @@ impl AssetRegistry {
                 tracing::debug!(
                     event = "asset_loaded",
                     asset.id = asset_id,
+                    media.tracks = asset.track_count(),
+                    media.segments = asset.segment_count(),
                     index.bytes = asset.index_bytes(),
                     elapsed_ms = started.elapsed().as_millis(),
                 );
@@ -707,6 +715,120 @@ impl AssetRegistry {
                 Err(error)
             }
         }
+    }
+
+    async fn load_single(
+        self: &Arc<Self>,
+        asset_id: &str,
+        resolved: &ResolvedAsset,
+    ) -> Result<ServedAsset> {
+        let location = resolved
+            .location
+            .as_ref()
+            .expect("the caller checked resolved.renditions is empty");
+        // Disarmed while loading: the load holds this asset's flight lock, which a refresh would
+        // need, and a URL that was just issued should not be rejected.
+        let refresher = Arc::new(AssetRefresher {
+            registry: Arc::downgrade(self),
+            asset_id: asset_id.to_owned(),
+            rendition: None,
+            armed: AtomicBool::new(false),
+        });
+        let source = self
+            .opener
+            .open(
+                location,
+                Arc::clone(&refresher) as Arc<dyn LocationRefresher>,
+            )
+            .await?;
+        let subtitles = self.fetch_subtitles(&resolved.subtitles).await?;
+        let asset = PackagedAsset::load_with_subtitles(
+            source,
+            subtitles,
+            self.settings.segment_duration_ms,
+            &self.limits,
+        )
+        .await?;
+        refresher.armed.store(true, Ordering::Relaxed);
+        Ok(ServedAsset::Single(Arc::new(asset)))
+    }
+
+    /// Opens and parses every rendition concurrently, each exactly as a plain asset would be,
+    /// then assembles them into one composite. Per TDD 0006 §3, loading is all or nothing: the
+    /// first rendition to fail names itself in the error.
+    async fn load_composite(
+        self: &Arc<Self>,
+        asset_id: &str,
+        resolved: &ResolvedAsset,
+    ) -> Result<ServedAsset> {
+        if resolved.renditions.len() > self.limits.max_renditions {
+            return Err(Error::InvalidMedia(format!(
+                "the mapper listed {} renditions, more than limits.max_renditions ({})",
+                resolved.renditions.len(),
+                self.limits.max_renditions
+            )));
+        }
+        let subtitles = self.fetch_subtitles(&resolved.subtitles).await?;
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for rendition in resolved.renditions.clone() {
+            let registry = Arc::clone(self);
+            let asset_id = asset_id.to_owned();
+            tasks.spawn(async move {
+                let outcome: Result<(PackagedAsset, Arc<AssetRefresher>)> = async {
+                    let refresher = Arc::new(AssetRefresher {
+                        registry: Arc::downgrade(&registry),
+                        asset_id: asset_id.clone(),
+                        rendition: Some(rendition.id.clone()),
+                        armed: AtomicBool::new(false),
+                    });
+                    let source = registry
+                        .opener
+                        .open(
+                            &rendition.location,
+                            Arc::clone(&refresher) as Arc<dyn LocationRefresher>,
+                        )
+                        .await?;
+                    let asset = PackagedAsset::load(
+                        source,
+                        registry.settings.segment_duration_ms,
+                        &registry.limits,
+                    )
+                    .await?;
+                    Ok((asset, refresher))
+                }
+                .await;
+                (rendition.id, outcome)
+            });
+        }
+        let mut loaded = Vec::with_capacity(resolved.renditions.len());
+        while let Some(joined) = tasks.join_next().await {
+            let (id, outcome) = joined.map_err(|error| {
+                Error::Io(std::io::Error::other(format!(
+                    "rendition task failed: {error}"
+                )))
+            })?;
+            let (asset, refresher) = outcome
+                .map_err(|error| Error::InvalidMedia(format!("rendition `{id}`: {error}")))?;
+            refresher.armed.store(true, Ordering::Relaxed);
+            loaded.push((id, asset));
+        }
+        // `JoinSet` completes in whatever order the loads finish; restore the mapper's order so
+        // the version hash (and which rendition is picked for shared audio) is deterministic.
+        loaded.sort_by_key(|(id, _)| {
+            resolved
+                .renditions
+                .iter()
+                .position(|rendition| &rendition.id == id)
+                .unwrap_or(usize::MAX)
+        });
+        let version = resolved.version.clone();
+        tokio::task::spawn_blocking(move || {
+            composite::assemble(loaded, subtitles, &version)
+                .map(|asset| ServedAsset::Composite(Box::new(asset)))
+        })
+        .await
+        .map_err(|error| Error::Io(std::io::Error::other(error)))?
     }
 
     fn publish_loaded(&self) {
@@ -739,6 +861,8 @@ fn describe(error: &RegistryError) -> String {
 struct AssetRefresher {
     registry: Weak<AssetRegistry>,
     asset_id: String,
+    /// Which rendition this refresher answers for; `None` for a plain asset's only location.
+    rendition: Option<String>,
     /// Enabled once the asset has loaded; see `AssetRegistry::load`.
     armed: AtomicBool,
 }
@@ -756,7 +880,7 @@ impl LocationRefresher for AssetRefresher {
                 .upgrade()
                 .ok_or_else(|| Error::Upstream("the asset registry has shut down".to_owned()))?;
             registry
-                .refresh_location(&self.asset_id)
+                .refresh_location(&self.asset_id, self.rendition.as_deref())
                 .await
                 .map_err(|error| match error {
                     RegistryError::Unavailable(message) => Error::UpstreamUnavailable(message),

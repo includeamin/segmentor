@@ -14,8 +14,9 @@ Each asset exposes:
 
 ```text
 /hls/{asset}/master.m3u8
-/hls/{asset}/video/index.m3u8
-/hls/{asset}/audio-{n}/index.m3u8   (one per audio track, numbered from 1)
+/hls/{asset}/video/index.m3u8       (a plain asset)
+/hls/{asset}/video-{id}/index.m3u8  (one per video rendition of an adaptive asset)
+/hls/{asset}/audio-{n}/index.m3u8   (the shared audio group, numbered from 1)
 /hls/{asset}/video/iframes.m3u8     (I-frame playlist, when there is video)
 /hls/{asset}/video/iframes/{n}/media.m4s   (one keyframe as its own fragment)
 /hls/{asset}/{track}/init.mp4

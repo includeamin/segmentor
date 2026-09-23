@@ -59,6 +59,7 @@ A file on an HTTP origin:
 | `location.path` | For `file` | Relative to `storage.media_root`; no leading `/`, no `.` or `..` components, no NUL, at most 4096 bytes |
 | `location.url` | For `http` | See [Remote locations](#remote-locations) |
 | `subtitles` | No | Sidecar WebVTT files; see [Subtitles](#subtitles) |
+| `renditions` | Instead of `location` | Several files served as one adaptive asset; see [Renditions](#renditions). Exactly one of `location` or `renditions` must be set |
 
 ### `304 Not Modified`
 
@@ -140,6 +141,37 @@ Cue times are read as times on the source file's own clock, the one its edit lis
 
 The HLS master playlist gains an `#EXT-X-MEDIA:TYPE=SUBTITLES` entry per file, served from `/hls/{asset}/subtitles/{language}/index.m3u8`, and the DASH manifest gains a text adaptation set. Both point at `/{hls|dash}/{asset}/subtitles/{language}/sub.vtt?v={version}`.
 
+## Renditions
+
+Instead of a single `location`, an answer may give several files as one adaptive asset:
+
+```json
+{
+  "asset_id": "movie",
+  "version": "2026-09-21-a",
+  "renditions": [
+    { "id": "1080p", "location": { "type": "http", "url": "https://origin.example.net/m/1080.mp4" } },
+    { "id": "720p",  "location": { "type": "http", "url": "https://origin.example.net/m/720.mp4" } },
+    { "id": "audio-en", "location": { "type": "http", "url": "https://origin.example.net/m/en.m4a" } }
+  ]
+}
+```
+
+`location` and `renditions` are mutually exclusive: a single-`location` answer is one implicit rendition, so nothing changes for a mapper that never sends `renditions`.
+
+| Field | Required | Rules |
+| --- | --- | --- |
+| `id` | Yes | A short URL-safe label (letters, digits, hyphens), at most 32 bytes, unique within the asset. It appears in URLs as `video-{id}` |
+| `location` | Yes | A `file` or `http` location with the same rules as a single asset's |
+
+The server does not ask what kind a rendition is; it loads every one exactly as it would load a single-file asset, and looks at what tracks came out. **A rendition with a video track is a video rendition. One with only audio, and no video, is an audio rendition** — this is how separate audio files, and several audio languages, are supplied.
+
+**Video renditions must be cut alike.** Every video rendition must have the same number of segments, starting at the same instants (within about one frame of the coarsest rendition), so a player can switch between them at a segment boundary. This falls out of using the same keyframe interval to encode each one; segmentor cannot repair renditions that do not already agree. A mismatch fails the whole asset, naming the two renditions and where they diverge.
+
+**Audio is one shared group, so switching video quality never restarts it.** It comes from the audio renditions when there are any (in the order listed, numbered `audio-1`, `audio-2`, ...), and otherwise from the first video rendition that has audio; the audio of every other video rendition is ignored. **Loading is all or nothing:** if any rendition fails — cannot be fetched, fails to parse, or breaks alignment — the whole asset fails with that rendition named, rather than serving a ladder with a silent gap. At most `limits.max_renditions` (default 8) may be listed; each rendition counts toward `limits.max_index_bytes` like any asset, and the composite's version hashes the mapper's `version` together with every rendition's own content, so replacing one file's bytes under an unchanged mapper `version` is still caught.
+
+A video rendition's own URL is `video-{id}`, for example `/hls/{asset}/video-{id}/index.m3u8`; the shared audio group stays `audio-{n}`, exactly as for a single-file asset. The HLS master playlist gains one `#EXT-X-STREAM-INF` per video rendition, sorted by bandwidth, all pointing at the shared audio group; the DASH manifest gains one `Representation` per video rendition. Sidecar subtitles and HLS I-frame playlists (the latter built from the lowest-bandwidth rendition only) both work the same as for a single-file asset.
+
 ## What a `version` means to the server
 
 The server keeps one loaded copy per asset, keyed by `(asset_id, version)`. A different `version`, or the same version at a different location (a rotated signed URL), makes it reload from the new location. There is **no grace period**: players holding URLs from the old version get `404` and recover by fetching the playlist again. Change `version` only when the media actually changes.
@@ -210,6 +242,7 @@ Then `curl http://127.0.0.1:3000/hls/movie/master.m3u8`.
 - Removed assets answer `404` or `410`, not `200`.
 - Answers are small (the server's default limit is 16 KiB).
 - The mapper answers quickly: the server's default per-request timeout is two seconds, with two retries.
-- `version` also changes when a subtitle file changes.
+- `version` also changes when a subtitle file changes, or when any rendition's file changes.
+- Video renditions are encoded with the same keyframe interval, so their segments align.
 - `expires_at` is set for anything signed, and re-signing keeps the same `version`.
 - The mapper is reachable over `https` in production and requires the bearer token.

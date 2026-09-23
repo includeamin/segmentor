@@ -10,7 +10,7 @@ use tower_http::cors::CorsLayer;
 use super::cors::cors_layer;
 use super::error::{HttpError, HttpResult};
 use super::router::ROUTES;
-use crate::asset::PackagedAsset;
+use crate::composite::ServedAsset;
 use crate::config::{Config, ResolverSettings};
 use crate::error::Result;
 use crate::observability::metrics::Metrics;
@@ -121,7 +121,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(crate) async fn asset(&self, asset_id: &str) -> HttpResult<Arc<PackagedAsset>> {
+    pub(crate) async fn asset(&self, asset_id: &str) -> HttpResult<Arc<ServedAsset>> {
         Ok(self.registry.get(asset_id).await?)
     }
 

@@ -1459,3 +1459,235 @@ async fn cues_follow_the_shared_offset_of_the_edit_lists_and_nothing_else() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Adaptive renditions (TDD 0006 §3)
+// ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_two_rung_ladder_serves_both_renditions_with_shared_audio() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "movie",
+        Answer::renditions(
+            "v1",
+            &[
+                ("720p", "rendition-720p.mp4"),
+                ("480p", "rendition-480p.mp4"),
+            ],
+        ),
+    );
+
+    let master = text(&fetch(&h.app, "/hls/movie/master.m3u8").await.2);
+    let version = version_in(&fetch(&h.app, "/hls/movie/master.m3u8").await.2);
+
+    assert_eq!(
+        master.matches("#EXT-X-STREAM-INF").count(),
+        2,
+        "one variant per rendition: {master}"
+    );
+    // Sorted ascending by bandwidth: 480p (smaller) before 720p.
+    let variant_480 = master.find("video-480p/index.m3u8").unwrap();
+    let variant_720 = master.find("video-720p/index.m3u8").unwrap();
+    assert!(variant_480 < variant_720, "{master}");
+    assert!(master.contains(",AUDIO=\"audio\""), "{master}");
+    // No dedicated audio rendition was listed, so the shared group comes from the first video
+    // rendition that has audio: 720p, listed first in the answer.
+    assert!(
+        master.contains(&format!("URI=\"audio-1/index.m3u8?v={version}\"")),
+        "{master}"
+    );
+    assert_eq!(master.matches("TYPE=AUDIO").count(), 1, "{master}");
+
+    for rendition in ["720p", "480p"] {
+        let playlist = text(
+            &fetch(
+                &h.app,
+                &format!("/hls/movie/video-{rendition}/index.m3u8?v={version}"),
+            )
+            .await
+            .2,
+        );
+        assert!(playlist.contains("init.mp4?v="), "{rendition}: {playlist}");
+        assert_eq!(
+            playlist.matches("#EXTINF:").count(),
+            3,
+            "{rendition}: {playlist}"
+        );
+
+        let init = fetch(
+            &h.app,
+            &format!("/hls/movie/video-{rendition}/init.mp4?v={version}"),
+        )
+        .await;
+        assert_eq!(init.0, StatusCode::OK, "{rendition}");
+        assert_eq!(&init.2[4..8], b"ftyp", "{rendition}");
+
+        let segment = fetch(
+            &h.app,
+            &format!("/hls/movie/video-{rendition}/segments/0/media.m4s?v={version}"),
+        )
+        .await;
+        assert_eq!(segment.0, StatusCode::OK, "{rendition}");
+        assert_eq!(&segment.2[4..8], b"moof", "{rendition}");
+    }
+
+    // The shared audio group is reachable at audio-1 regardless of which rendition supplies it.
+    let audio_segment = fetch(
+        &h.app,
+        &format!("/hls/movie/audio-1/segments/0/media.m4s?v={version}"),
+    )
+    .await;
+    assert_eq!(audio_segment.0, StatusCode::OK);
+    assert_eq!(&audio_segment.2[4..8], b"moof");
+
+    // A rendition-scoped audio URL, or an unrendered video URL, do not exist.
+    assert_eq!(
+        status(&h.app, &format!("/hls/movie/video/index.m3u8?v={version}")).await,
+        StatusCode::NOT_FOUND
+    );
+
+    let manifest = text(&fetch(&h.app, "/dash/movie/manifest.mpd").await.2);
+    assert_eq!(manifest.matches("id=\"video-").count(), 2, "{manifest}");
+    assert!(manifest.contains("id=\"video-720p\""), "{manifest}");
+    assert!(manifest.contains("id=\"video-480p\""), "{manifest}");
+    assert!(manifest.contains("id=\"audio-1\""), "{manifest}");
+}
+
+#[tokio::test]
+async fn dedicated_audio_renditions_replace_each_videos_own_audio() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "movie",
+        Answer::renditions(
+            "v1",
+            &[
+                ("720p", "rendition-720p.mp4"),
+                ("480p", "rendition-480p.mp4"),
+                ("audio-en", "rendition-audio-en.m4a"),
+                ("audio-es", "rendition-audio-es.m4a"),
+            ],
+        ),
+    );
+
+    let master = text(&fetch(&h.app, "/hls/movie/master.m3u8").await.2);
+    let version = version_in(&fetch(&h.app, "/hls/movie/master.m3u8").await.2);
+
+    assert_eq!(master.matches("TYPE=AUDIO").count(), 2, "{master}");
+    assert!(master.contains("URI=\"audio-1/index.m3u8"), "{master}");
+    assert!(master.contains("URI=\"audio-2/index.m3u8"), "{master}");
+    assert!(master.contains("LANGUAGE=\"spa\""), "{master}");
+
+    let audio_1 = fetch(
+        &h.app,
+        &format!("/hls/movie/audio-1/segments/0/media.m4s?v={version}"),
+    )
+    .await;
+    assert_eq!(audio_1.0, StatusCode::OK);
+    let audio_2 = fetch(
+        &h.app,
+        &format!("/hls/movie/audio-2/segments/0/media.m4s?v={version}"),
+    )
+    .await;
+    assert_eq!(audio_2.0, StatusCode::OK);
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&fetch(&h.app, "/admin/status").await.2).unwrap();
+    assert_eq!(json["cache"]["assets"][0]["tracks"], 4, "2 video + 2 audio");
+}
+
+#[tokio::test]
+async fn misaligned_renditions_are_refused_naming_both() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "movie",
+        Answer::renditions(
+            "v1",
+            &[
+                ("720p", "rendition-720p.mp4"),
+                ("bad", "rendition-misaligned.mp4"),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        status(&h.app, "/hls/movie/master.m3u8").await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the real reason, naming both renditions, is in the asset_load_failed log line"
+    );
+}
+
+#[tokio::test]
+async fn a_rendition_count_over_the_limit_is_refused() {
+    let h = harness_with(|config| config.limits.max_renditions = 1).await;
+    h.mapper.state.set(
+        "movie",
+        Answer::renditions(
+            "v1",
+            &[
+                ("720p", "rendition-720p.mp4"),
+                ("480p", "rendition-480p.mp4"),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        status(&h.app, "/hls/movie/master.m3u8").await,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+}
+
+#[tokio::test]
+async fn one_bad_rendition_fails_the_whole_asset() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "movie",
+        Answer::renditions(
+            "v1",
+            &[
+                ("720p", "rendition-720p.mp4"),
+                ("missing", "does-not-exist.mp4"),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        status(&h.app, "/hls/movie/master.m3u8").await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the real reason, naming the rendition, is in the asset_load_failed log line"
+    );
+}
+
+#[tokio::test]
+async fn invalid_rendition_ids_are_rejected() {
+    let h = harness().await;
+    for entries in [
+        // Not URL-safe.
+        r#"[{"id":"720p/x","location":{"type":"file","path":"rendition-720p.mp4"}}]"#,
+        // Listed twice.
+        r#"[{"id":"720p","location":{"type":"file","path":"rendition-720p.mp4"}},{"id":"720p","location":{"type":"file","path":"rendition-480p.mp4"}}]"#,
+    ] {
+        *h.mapper.state.raw_body.lock().unwrap() = Some(format!(
+            r#"{{"asset_id":"movie","version":"v1","renditions":{entries}}}"#
+        ));
+        assert_eq!(
+            status(&h.app, "/hls/movie/master.m3u8").await,
+            StatusCode::BAD_GATEWAY,
+            "{entries}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_mapper_answer_cannot_set_both_location_and_renditions() {
+    let h = harness().await;
+    *h.mapper.state.raw_body.lock().unwrap() = Some(
+        r#"{"asset_id":"movie","version":"v1","location":{"type":"file","path":"rendition-720p.mp4"},"renditions":[{"id":"720p","location":{"type":"file","path":"rendition-720p.mp4"}}]}"#
+            .to_owned(),
+    );
+
+    assert_eq!(
+        status(&h.app, "/hls/movie/master.m3u8").await,
+        StatusCode::BAD_GATEWAY
+    );
+}
