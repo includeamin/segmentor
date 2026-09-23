@@ -74,6 +74,13 @@ ffplay http://127.0.0.1:3000/hls/sample/master.m3u8
 `make demo` starts a web player with live server metrics, and `make help` lists everything else; see
 [Using segmentor](docs/usage.md).
 
+## Screenshots
+
+|                                                          |                                                                    |
+| -------------------------------------------------------- | ------------------------------------------------------------------ |
+| [![The web player demo](docs/assets/screenshots/demo.png)](docs/assets/screenshots/demo.png) | [![The control panel](docs/assets/screenshots/admin.png)](docs/assets/screenshots/admin.png) |
+| `make demo`: plays an asset and shows live server metrics next to it. | `make admin` (or `docker compose -f docker-compose.dev.yml up`): a control panel showing the resolver's live connection, the loaded-asset cache, and metrics, with the same player. |
+
 ## Install
 
 - **Release binaries.** Each [GitHub release](https://github.com/includeamin/segmentor/releases)
