@@ -49,7 +49,7 @@ The page reads `/metrics` cross-origin, so keep `[cors]` enabled, as in `vod.exa
 
 ## Control panel
 
-`admin/index.html` is a second single-file page, separate from the player demo, for operating a running instance: it polls `/admin/status` for the resolver's live connection state and every asset currently in the loaded-asset cache (version, size, tracks, duration), and `/metrics` for the same request and throughput charts the player demo shows. It also embeds the same HLS/DASH player and the same "Try:" row of clickable asset IDs, so you can play anything the status view names without leaving the page.
+`admin/index.html` is a second single-file page, separate from the player demo, for operating a running instance: it polls `/admin/status` for the resolver's live connection state and every asset currently in the loaded-asset cache (version, size, tracks, duration), and `/metrics` for the same request and throughput charts the player demo shows. It also embeds the same HLS/DASH player, with a "Known asset" dropdown next to the Asset field listing everything the status view names, so you can pick a playable asset without leaving the page or typing its ID — the field itself still takes any name, known or not.
 
 ```sh
 make serve   # terminal 1: the origin on :3000
