@@ -21,6 +21,7 @@ help: ## Show the available targets
 		'doc        Build rustdoc documentation' \
 		'doc-open   Build and open rustdoc documentation' \
 		'fixtures   Regenerate media test fixtures with FFmpeg' \
+		'fixtures-long Generate a ~2-minute asset for manually testing seeking and scrubbing' \
 		'fmt        Format Rust sources' \
 		'fmt-check  Verify Rust formatting' \
 		'fuzz       Run media pipeline fuzzing with nightly' \
@@ -97,6 +98,9 @@ doc-open: ## Build and open rustdoc documentation
 fixtures: ## Regenerate media test fixtures with FFmpeg
 	sh tests/fixtures/generate.sh
 	sh tests/fixtures/generate-variants.sh
+
+fixtures-long: ## Generate a ~2-minute asset for manually testing seeking and scrubbing
+	sh tests/fixtures/generate-long.sh
 
 site: book doc ## Build mdBook with rustdoc under /api
 	rm -rf target/book/api

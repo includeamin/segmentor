@@ -14,5 +14,9 @@
   "delayed": {
     "version": "v1",
     "location": { "type": "file", "path": "h264-aac-video-delay.mp4" }
+  },
+  "long": {
+    "version": "v1",
+    "location": { "type": "file", "path": "generated/long.mp4" }
   }
 }

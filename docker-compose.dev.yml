@@ -9,7 +9,9 @@
 #
 # Then open http://127.0.0.1:8081 for the control panel (cache, resolver, and metrics) or
 # http://127.0.0.1:8080 for the plain player demo — both default to this compose's ports already.
-# The example mapper is itself at http://127.0.0.1:9911; see examples/mapper/README.md.
+# The example mapper is itself at http://127.0.0.1:9911; see examples/mapper/README.md. Run
+# `make fixtures-long` first for a ~2-minute asset ("long") worth actually seeking and scrubbing
+# through — the committed fixtures are a few seconds, on purpose, to keep the test suite fast.
 #
 # This is a development setup, not a deployment example: the mapper has no TLS or authentication,
 # and the origin's filesystem is read-only only because tests/fixtures/ already is.
