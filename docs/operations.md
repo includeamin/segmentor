@@ -23,6 +23,9 @@ The service still does not limit connections per client address. Do that on the 
 | `/health` | The process is running | Liveness probe |
 | `/ready` | `200` while serving, `503` once shutdown begins | Readiness probe and load-balancer health check |
 | `/metrics` | Prometheus text | Scraping |
+| `/admin/status` | JSON: the resolver's live health and every asset in the loaded-asset cache | A control panel or an ad hoc check |
+
+`/admin/status` carries the same trust model as `/metrics`: no authentication, meant to be reached only through the reverse proxy this page already asks you to put in front of the origin (see [Before you expose it](deployment.md#before-you-expose-it)). It names asset IDs, versions, and, for a mapper resolver, the mapper's base URL, so keep it off any path a viewer can reach. Unlike `/ready`'s cached health flag, it checks the resolver live on every call, so it costs one resolver round trip (a file resolver answers this immediately). See [the control panel](../admin/) for a page that reads it.
 
 ## Shutdown
 

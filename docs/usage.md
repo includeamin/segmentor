@@ -26,9 +26,10 @@ Each asset exposes:
 /dash/{asset}/subtitles/{language}/sub.vtt
 /dash/{asset}/{track}/init.mp4
 /dash/{asset}/{track}/segments/{index}/media.m4s
-/health   liveness
-/ready    readiness (503 once shutdown begins)
-/metrics  Prometheus text
+/health         liveness
+/ready          readiness (503 once shutdown begins)
+/metrics        Prometheus text
+/admin/status   JSON: resolver health and the loaded-asset cache, checked live (see below)
 ```
 
 Initialization and media responses support single and suffix byte ranges, `If-Range`, strong ETags, and immutable content-versioned URLs. Media URLs must carry the `v` query parameter the playlists emit; a missing or stale version is a `404`. Media payloads are streamed through a bounded, backpressured reader instead of being buffered per request.
@@ -45,6 +46,19 @@ make demo    # terminal 2: the player on http://127.0.0.1:8080
 ```
 
 The page reads `/metrics` cross-origin, so keep `[cors]` enabled, as in `vod.example.toml`.
+
+## Control panel
+
+`admin/index.html` is a second single-file page, separate from the player demo, for operating a running instance: it polls `/admin/status` for the resolver's live connection state and every asset currently in the loaded-asset cache (version, size, tracks, duration), and `/metrics` for the same request and throughput charts the player demo shows. It also embeds the same HLS/DASH player, so you can play any asset the status view names without leaving the page.
+
+```sh
+make serve   # terminal 1: the origin on :3000
+make admin   # terminal 2: the panel on http://127.0.0.1:8081
+```
+
+`/admin/status` has no authentication of its own, the same as `/metrics`; see [Operating the origin](operations.md) for what to put in front of it before this page is reachable by anyone but you.
+
+To see the panel with a mapper resolver instead of the static catalog, `docker compose -f docker-compose.dev.yml up --build` runs segmentor, an [example mapper](https://github.com/includeamin/segmentor/tree/main/examples/mapper), and both web pages together; see [Try it](mapper-api.md#try-it).
 
 ## Packaging from the command line
 

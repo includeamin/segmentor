@@ -1,0 +1,398 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>segmentor control panel</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --page:#0d0d0d; --surface:#1a1a19; --border:rgba(255,255,255,.10);
+    --ink:#ffffff; --ink-2:#c3c2b7; --muted:#898781; --grid:#2c2c2a; --baseline:#383835;
+    --accent:#3987e5;      /* categorical slot 1 - buttons, focus, "requests" series */
+    --series-2:#d95926;    /* categorical slot 2, fixed order - "throughput" series */
+    --good:#0ca30c; --warning:#fab219; --critical:#d03b3b;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--page); color:var(--ink); font:14px/1.4 system-ui,sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:10px; align-items:end; padding:14px 16px; border-bottom:1px solid var(--border); }
+  header h1 { font-size:16px; margin:0 12px 0 0; font-weight:600; }
+  label { display:flex; flex-direction:column; gap:3px; color:var(--muted); font-size:12px; }
+  input, select, button { background:var(--surface); color:var(--ink); border:1px solid var(--border); border-radius:6px; padding:6px 8px; font:inherit; }
+  button { cursor:pointer; background:var(--accent); color:#04121b; border:0; font-weight:600; }
+  button.ghost { background:var(--surface); color:var(--ink); border:1px solid var(--border); font-weight:500; }
+  main { display:grid; grid-template-columns:minmax(0,3fr) minmax(0,2fr); gap:14px; padding:14px 16px; }
+  @media (max-width:1000px) { main { grid-template-columns:1fr; } }
+  .panel { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:12px; }
+  .panel-head { display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom:10px; }
+  .panel h2 { margin:0; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  .panel .now { font-variant-numeric:tabular-nums; font-size:13px; color:var(--ink-2); }
+  video { width:100%; background:#000; border-radius:6px; aspect-ratio:16/9; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:8px; }
+  .tile { background:var(--page); border:1px solid var(--border); border-radius:6px; padding:8px; }
+  .tile .k { color:var(--muted); font-size:11px; }
+  .tile .v { font-size:18px; font-variant-numeric:tabular-nums; }
+  table { width:100%; border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid var(--grid); }
+  th { color:var(--muted); font-weight:500; }
+  td.n, th.n { text-align:right; }
+  tr.playable { cursor:pointer; }
+  tr.playable:hover td { background:rgba(255,255,255,.04); }
+  tr.playable.current td { background:rgba(57,135,229,.12); }
+  .chart-wrap { position:relative; }
+  canvas { width:100%; height:80px; display:block; cursor:crosshair; }
+  .tip { position:absolute; pointer-events:none; background:#000; border:1px solid var(--border); border-radius:5px; padding:4px 7px; font-size:11px; white-space:nowrap; transform:translate(-50%,-100%); top:0; opacity:0; transition:opacity .1s; z-index:2; }
+  .tip .v { color:var(--ink); font-weight:600; }
+  .tip .t { color:var(--muted); }
+  .stack { display:flex; flex-direction:column; gap:14px; }
+  #log { height:130px; overflow:auto; font:11px/1.5 ui-monospace,monospace; color:var(--muted); }
+  #reachability { font-size:12px; color:var(--muted); }
+  .pill { display:inline-flex; align-items:center; gap:5px; padding:2px 8px; border-radius:99px; font-size:12px; font-weight:600; }
+  .pill.good { background:rgba(12,163,12,.16); color:#5fdc5f; }
+  .pill.critical { background:rgba(208,59,59,.16); color:#ff8b8b; }
+  .pill::before { content:''; width:7px; height:7px; border-radius:50%; background:currentColor; }
+  .empty { color:var(--muted); font-style:italic; padding:8px 0; }
+  .warn-text { color:var(--warning); }
+</style>
+</head>
+<body>
+<header>
+  <h1>segmentor control panel</h1>
+  <label>Server <input id="base" size="26" value="http://127.0.0.1:3000"></label>
+  <label>Poll (s) <input id="poll" type="number" min="0.5" step="0.5" value="2" style="width:70px"></label>
+  <span id="reachability"></span>
+</header>
+
+<main>
+  <div class="stack">
+    <div class="panel">
+      <div class="panel-head"><h2>Player</h2></div>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px">
+        <label>Asset <input id="asset" size="14" value="sample"></label>
+        <label>Protocol<select id="proto"><option value="hls">HLS</option><option value="dash">DASH</option></select></label>
+        <button id="load" style="align-self:end">Play</button>
+      </div>
+      <video id="video" controls muted loop playsinline></video>
+      <div id="diag" style="margin-top:8px;font-size:12px"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Player stats</h2></div>
+      <div class="tiles" id="pstats"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Segment log</h2></div>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <div class="stack">
+    <div class="panel">
+      <div class="panel-head"><h2>Resolver</h2><span id="resolver-pill"></span></div>
+      <div id="resolver-detail" style="font-size:12px; color:var(--ink-2)"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Cached assets</h2><span class="now" id="cache-total"></span></div>
+      <table id="cache"><thead><tr><th>Asset</th><th>Version</th><th class="n">Size</th><th class="n">Tracks</th><th class="n">Subs</th><th class="n">Duration</th></tr></thead><tbody></tbody></table>
+      <div id="cache-empty" class="empty" hidden>Nothing loaded yet — play an asset to load it.</div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Requests / s</h2><span class="now" id="now-rps"></span></div>
+      <div class="chart-wrap"><canvas id="c-rps"></canvas><div class="tip" id="tip-rps"><span class="v"></span><br><span class="t"></span></div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Response throughput</h2><span class="now" id="now-bps"></span></div>
+      <div class="chart-wrap"><canvas id="c-bps"></canvas><div class="tip" id="tip-bps"><span class="v"></span><br><span class="t"></span></div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Per route</h2></div>
+      <table id="routes"><thead><tr><th>Route</th><th class="n">Reqs</th><th class="n">Errors</th><th class="n">Avg ms</th><th class="n">p95 ms</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Resolver &amp; cache events</h2></div>
+      <table id="events"><tbody></tbody></table>
+    </div>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<script src="https://cdn.jsdelivr.net/npm/dashjs@4/dist/dash.all.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video');
+let hls = null, dash = null, pollTimer = null, prevMetrics = null;
+const frag = { count: 0, bytes: 0, lastMs: 0 };
+// Each series is [{t: performance.now() ms, v: number}, ...], oldest first.
+const series = { rps: [], bps: [] };
+
+const base = () => $('base').value.replace(/\/+$/, '');
+const log = msg => {
+  const el = $('log');
+  el.insertAdjacentHTML('beforeend', `<div>${new Date().toLocaleTimeString()}  ${msg}</div>`);
+  el.scrollTop = el.scrollHeight;
+};
+const fmtBytes = n => n >= 1073741824 ? (n/1073741824).toFixed(2)+' GiB' : n >= 1048576 ? (n/1048576).toFixed(1)+' MiB' : n >= 1024 ? (n/1024).toFixed(1)+' KiB' : n+' B';
+const fmtDuration = s => !isFinite(s) || s <= 0 ? '–' : s >= 3600 ? (s/3600).toFixed(1)+' h' : s >= 60 ? (s/60).toFixed(1)+' min' : s.toFixed(1)+' s';
+const tile = (k, v, cls='') => `<div class="tile"><div class="k">${k}</div><div class="v ${cls}">${v}</div></div>`;
+
+// ---------- player ----------
+function teardown() {
+  if (hls) { hls.destroy(); hls = null; }
+  if (dash) { dash.reset(); dash = null; }
+  video.removeAttribute('src'); video.load();
+  frag.count = frag.bytes = 0;
+}
+
+function diagnose() {
+  const problems = [];
+  if (typeof Hls === 'undefined') problems.push('hls.js failed to load from the CDN (offline or blocked?)');
+  if (typeof dashjs === 'undefined') problems.push('dash.js failed to load from the CDN (offline or blocked?)');
+  const mse = window.MediaSource || window.ManagedMediaSource;
+  if (!mse) problems.push('this browser has no Media Source Extensions');
+  else if (!mse.isTypeSupported('video/mp4; codecs="avc1.64000d"')) problems.push('this browser cannot decode H.264 (install a build with proprietary codecs, or use Firefox)');
+  $('diag').innerHTML = problems.map(p => `<div class="warn-text">⚠ ${p}</div>`).join('');
+  return problems.length === 0;
+}
+for (const ev of ['error', 'ended', 'stalled', 'waiting', 'playing'])
+  video.addEventListener(ev, () => log(`<span class="${ev === 'error' ? 'warn-text' : ''}">video ${ev}${video.error ? ': ' + video.error.message : ''}</span>`));
+
+function load() {
+  teardown();
+  if (!diagnose()) log('<span class="warn-text">cannot start, see warnings under the player</span>');
+  $('log').innerHTML = '';
+  markCurrentRow();
+  const asset = encodeURIComponent($('asset').value);
+  if ($('proto').value === 'hls') {
+    const url = `${base()}/hls/${asset}/master.m3u8`;
+    log('HLS ' + url);
+    if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+      hls = new Hls({ debug: false });
+      hls.on(Hls.Events.FRAG_LOADED, (_, d) => {
+        const s = d.frag.stats, ms = Math.round(s.loading.end - s.loading.start);
+        frag.count++; frag.bytes += s.total; frag.lastMs = ms;
+        log(`${d.frag.type} #${d.frag.sn}  ${fmtBytes(s.total)}  ${ms} ms`);
+      });
+      hls.on(Hls.Events.ERROR, (_, d) => log(`<span class="warn-text">error ${d.type}/${d.details}${d.fatal ? ' (fatal)' : ''}</span>`));
+      hls.loadSource(url);
+      hls.attachMedia(video);
+    } else {
+      video.src = url; // Safari native HLS
+    }
+  } else {
+    const url = `${base()}/dash/${asset}/manifest.mpd`;
+    log('DASH ' + url);
+    if (typeof dashjs === 'undefined') return;
+    dash = dashjs.MediaPlayer().create();
+    dash.on('fragmentLoadingCompleted', e => {
+      const r = e.request;
+      frag.count++; frag.bytes += r.bytesTotal || 0;
+      log(`${r.mediaType} #${r.index}  ${fmtBytes(r.bytesTotal || 0)}`);
+    });
+    dash.on('error', e => log(`<span class="warn-text">error ${JSON.stringify(e.error && e.error.message)}</span>`));
+    dash.initialize(video, url, true);
+  }
+  video.play().catch(() => {});
+}
+
+/// Plays a row's asset id when a cache or catalog row is clicked, so browsing needs no typing.
+function playAsset(assetId) {
+  $('asset').value = assetId;
+  load();
+}
+
+function markCurrentRow() {
+  const current = $('asset').value;
+  for (const row of document.querySelectorAll('#cache tbody tr'))
+    row.classList.toggle('current', row.dataset.asset === current);
+}
+
+function renderPlayerStats() {
+  const b = video.buffered, t = video.currentTime;
+  let ahead = 0;
+  for (let i = 0; i < b.length; i++) if (b.start(i) <= t && t <= b.end(i)) ahead = b.end(i) - t;
+  const q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : {};
+  const bw = hls && hls.bandwidthEstimate ? (hls.bandwidthEstimate / 1e6).toFixed(1) + ' Mbps'
+           : dash ? Math.round(dash.getAverageThroughput('video') || 0) + ' kbps' : '–';
+  $('pstats').innerHTML =
+    tile('Position', t.toFixed(1) + ' s') +
+    tile('Duration', isFinite(video.duration) ? video.duration.toFixed(1) + ' s' : '–') +
+    tile('Buffer ahead', ahead.toFixed(1) + ' s', ahead < 1 && !video.paused ? 'warn-text' : '') +
+    tile('Resolution', video.videoWidth ? `${video.videoWidth}×${video.videoHeight}` : '–') +
+    tile('Dropped frames', q.droppedVideoFrames ?? '–', q.droppedVideoFrames ? 'warn-text' : '') +
+    tile('Bandwidth est.', bw) +
+    tile('Segments', frag.count) +
+    tile('Segment bytes', fmtBytes(frag.bytes)) +
+    tile('Last segment', frag.lastMs ? frag.lastMs + ' ms' : '–');
+}
+setInterval(renderPlayerStats, 500);
+
+// ---------- metrics parsing ----------
+function parseProm(text) {
+  const out = [];
+  for (const line of text.split('\n')) {
+    if (!line || line[0] === '#') continue;
+    const m = line.match(/^([a-zA-Z_:][\w:]*)(?:\{([^}]*)\})?\s+(\S+)$/);
+    if (!m) continue;
+    const labels = {};
+    if (m[2]) for (const p of m[2].matchAll(/(\w+)="([^"]*)"/g)) labels[p[1]] = p[2];
+    out.push({ name: m[1], labels, value: parseFloat(m[3]) });
+  }
+  return out;
+}
+const sum = (s, name, f = () => true) => s.filter(x => x.name === name && f(x.labels)).reduce((a, x) => a + x.value, 0);
+const one = (s, name) => (s.find(x => x.name === name) || { value: 0 }).value;
+
+// quantile from cumulative histogram buckets for one route (linear interpolation)
+function quantile(s, route, q) {
+  const b = s.filter(x => x.name === 'vod_http_request_duration_seconds_bucket' && x.labels.route === route)
+             .map(x => ({ le: x.labels.le === '+Inf' ? Infinity : parseFloat(x.labels.le), c: x.value }))
+             .sort((a, c) => a.le - c.le);
+  const total = b.length ? b[b.length - 1].c : 0;
+  if (!total) return 0;
+  const rank = q * total;
+  let lo = 0, prevC = 0;
+  for (const x of b) {
+    if (x.c >= rank) {
+      if (x.le === Infinity) return lo;
+      return lo + (x.le - lo) * ((rank - prevC) / Math.max(1, x.c - prevC));
+    }
+    lo = x.le; prevC = x.c;
+  }
+  return lo;
+}
+
+// ---------- sparklines: 2px line, an end-dot marker, and a hover crosshair + tooltip ----------
+const GRIDLINE = '#2c2c2a';
+
+function spark(canvas, tip, points, color) {
+  const dpr = devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const c = canvas.getContext('2d'); c.scale(dpr, dpr);
+  if (points.length < 2) { c.clearRect(0, 0, w, h); return; }
+
+  const max = Math.max(...points.map(p => p.v), 1e-9);
+  const top = 6, bottom = h - 4;
+  const x = i => i / (points.length - 1) * w;
+  const y = v => bottom - (v / max) * (bottom - top);
+
+  const draw = crosshairAt => {
+    c.clearRect(0, 0, w, h);
+    c.strokeStyle = GRIDLINE; c.lineWidth = 1; c.beginPath();
+    c.moveTo(0, bottom + .5); c.lineTo(w, bottom + .5); c.stroke();
+
+    c.strokeStyle = color; c.lineWidth = 2; c.lineJoin = 'round'; c.lineCap = 'round'; c.beginPath();
+    points.forEach((p, i) => { const px = x(i), py = y(p.v); i ? c.lineTo(px, py) : c.moveTo(px, py); });
+    c.stroke();
+
+    const last = points[points.length - 1];
+    c.fillStyle = color; c.beginPath(); c.arc(x(points.length - 1), y(last.v), 4, 0, Math.PI * 2); c.fill();
+
+    if (crosshairAt == null) return;
+    c.strokeStyle = 'rgba(255,255,255,.35)'; c.lineWidth = 1; c.beginPath();
+    c.moveTo(x(crosshairAt) + .5, 0); c.lineTo(x(crosshairAt) + .5, h); c.stroke();
+  };
+  draw(null);
+
+  // Tooltips enhance, never gate: the current value is already in the panel header above.
+  canvas.onpointermove = e => {
+    const rect = canvas.getBoundingClientRect();
+    const i = Math.max(0, Math.min(points.length - 1, Math.round((e.clientX - rect.left) / w * (points.length - 1))));
+    draw(i);
+    const p = points[i];
+    tip.style.opacity = 1;
+    tip.style.left = x(i) + 'px';
+    tip.querySelector('.v').textContent = p.v.toFixed(2);
+    tip.querySelector('.t').textContent = new Date(Date.now() - (performance.now() - p.t)).toLocaleTimeString();
+  };
+  canvas.onpointerleave = () => { tip.style.opacity = 0; draw(null); };
+}
+
+// ---------- /admin/status: resolver health and the loaded-asset cache ----------
+function renderResolver(r) {
+  $('resolver-pill').innerHTML = r.healthy
+    ? '<span class="pill good">reachable</span>' : '<span class="pill critical">unreachable</span>';
+  const kind = r.kind === 'mapper' ? 'Mapper' : 'Static catalog';
+  const url = r.base_url ? ` &middot; <span style="color:var(--ink)">${escapeHtml(r.base_url)}</span>` : '';
+  $('resolver-detail').innerHTML = `${kind}${url} &middot; checked just now`;
+}
+
+function renderCache(cache, knownAssets) {
+  const rows = new Map(cache.assets.map(a => [a.asset_id, a]));
+  // Assets the static catalog knows about but nothing has requested yet are still playable.
+  for (const id of knownAssets || []) if (!rows.has(id)) rows.set(id, null);
+
+  const body = [...rows.entries()].map(([id, a]) => {
+    const cells = a
+      ? `<td>${escapeHtml(a.version)}</td><td class="n">${fmtBytes(a.bytes)}</td><td class="n">${a.tracks}</td><td class="n">${a.subtitles}</td><td class="n">${fmtDuration(a.duration_seconds)}</td>`
+      : `<td colspan="4" class="empty" style="padding:4px 6px">not loaded — click to play</td>`;
+    return `<tr class="playable" data-asset="${escapeHtml(id)}"><td>${escapeHtml(id)}</td>${cells}</tr>`;
+  }).join('');
+  $('cache').tBodies[0].innerHTML = body;
+  $('cache-empty').hidden = rows.size > 0;
+  $('cache-total').textContent = cache.count
+    ? `${cache.count} loaded · ${fmtBytes(cache.bytes)} / ${fmtBytes(cache.budget_bytes)}`
+    : '';
+  for (const row of $('cache').tBodies[0].rows)
+    row.onclick = () => playAsset(row.dataset.asset);
+  markCurrentRow();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+}
+
+// ---------- the poll loop ----------
+async function poll() {
+  const interval = Math.max(0.5, parseFloat($('poll').value) || 2);
+  try {
+    const [mres, sres] = await Promise.all([
+      fetch(base() + '/metrics'),
+      fetch(base() + '/admin/status'),
+    ]);
+    const s = parseProm(await mres.text()), status = await sres.json(), now = performance.now();
+    $('reachability').innerHTML = '<span style="color:var(--good)">● reachable</span>';
+
+    renderResolver(status.resolver);
+    renderCache(status.cache, status.resolver.known_assets);
+
+    const reqs = sum(s, 'vod_http_requests_total', l => l.route !== '/metrics' && l.route !== '/admin/status');
+    const bytes = one(s, 'vod_http_response_bytes_total');
+    if (prevMetrics) {
+      const dt = (now - prevMetrics.t) / 1000;
+      series.rps.push({ t: now, v: Math.max(0, (reqs - prevMetrics.reqs) / dt) });
+      series.bps.push({ t: now, v: Math.max(0, (bytes - prevMetrics.bytes) / dt / 1024) });
+      for (const k of ['rps', 'bps']) if (series[k].length > 120) series[k].shift();
+    }
+    prevMetrics = { t: now, reqs, bytes };
+    if (series.rps.length) $('now-rps').textContent = series.rps[series.rps.length - 1].v.toFixed(1) + '/s';
+    if (series.bps.length) $('now-bps').textContent = series.bps[series.bps.length - 1].v.toFixed(1) + ' KiB/s';
+    spark($('c-rps'), $('tip-rps'), series.rps, '#3987e5');
+    spark($('c-bps'), $('tip-bps'), series.bps, '#d95926');
+
+    const routes = [...new Set(s.filter(x => x.name === 'vod_http_requests_total').map(x => x.labels.route))];
+    $('routes').tBodies[0].innerHTML = routes.map(r => {
+      const n = sum(s, 'vod_http_requests_total', l => l.route === r);
+      const e = sum(s, 'vod_http_requests_total', l => l.route === r && (+l.status >= 400 || l.status === 'other'));
+      const total = sum(s, 'vod_http_request_duration_seconds_count', l => l.route === r);
+      const avg = total ? sum(s, 'vod_http_request_duration_seconds_sum', l => l.route === r) / total * 1000 : 0;
+      return { r, n, e, avg, p95: quantile(s, r, 0.95) * 1000 };
+    }).filter(x => x.n).sort((a, b) => b.n - a.n).map(x =>
+      `<tr><td>${escapeHtml(x.r)}</td><td class="n">${x.n}</td><td class="n ${x.e ? 'warn-text' : ''}">${x.e}</td><td class="n">${x.avg.toFixed(2)}</td><td class="n">${x.p95.toFixed(1)}</td></tr>`).join('');
+
+    const ev = s.filter(x => x.name === 'vod_resolver_requests_total' || x.name === 'vod_resolution_cache_events_total');
+    $('events').tBodies[0].innerHTML = ev.map(x =>
+      `<tr><td>${escapeHtml(x.name.replace('vod_', '').replace('_total', ''))}: ${escapeHtml(x.labels.outcome || x.labels.event)}</td><td class="n">${x.value}</td></tr>`).join('');
+  } catch (e) {
+    $('reachability').innerHTML = '<span style="color:var(--critical)">● unreachable</span>';
+    log(`<span class="warn-text">poll failed: ${escapeHtml(e.message)}</span>`);
+  }
+  pollTimer = setTimeout(poll, interval * 1000);
+}
+
+$('load').onclick = load;
+$('asset').addEventListener('change', markCurrentRow);
+load();
+clearTimeout(pollTimer);
+poll();
+</script>
+</body>
+</html>

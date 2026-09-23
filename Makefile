@@ -3,7 +3,7 @@
 CARGO ?= cargo
 MDBOOK ?= mdbook
 
-.PHONY: unused-deps bench test-scripts bench-enforce conformance book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve demo site test deny
+.PHONY: unused-deps admin dev-up dev-down bench test-scripts bench-enforce conformance book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve demo site test deny
 
 help: ## Show the available targets
 	@printf '%s\n' \
@@ -29,6 +29,9 @@ help: ## Show the available targets
 		'lint       Run Clippy with warnings denied' \
 		'serve      Run the example HLS service' \
 		'demo       Serve the web player demo on http://127.0.0.1:8080' \
+		'admin      Serve the control panel on http://127.0.0.1:8081' \
+		'dev-up     Run segmentor, an example mapper, and both web pages in Docker Compose' \
+		'dev-down   Stop and remove the docker-compose.dev.yml stack' \
 		'unused-deps Fail on dependencies that nothing uses (needs cargo-machete)' \
 		'deny       Check dependencies for advisories and licences (needs cargo-deny)' \
 		'site       Build mdBook with rustdoc under /api' \
@@ -108,6 +111,15 @@ serve: ## Run the example HLS service
 
 demo: ## Serve the web player demo on http://127.0.0.1:8080
 	python3 -m http.server 8080 --bind 127.0.0.1 --directory demo
+
+admin: ## Serve the control panel (cache, resolver, and metrics) on http://127.0.0.1:8081
+	python3 -m http.server 8081 --bind 127.0.0.1 --directory admin
+
+dev-up: ## Run segmentor, an example mapper, and both web pages in Docker Compose
+	docker compose -f docker-compose.dev.yml up --build
+
+dev-down: ## Stop and remove the docker-compose.dev.yml stack
+	docker compose -f docker-compose.dev.yml down
 
 deny: ## Check dependencies against deny.toml (needs `cargo install cargo-deny --locked`)
 	cargo deny check
