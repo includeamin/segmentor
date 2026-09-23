@@ -1,0 +1,29 @@
+# segmentor configuration for docker-compose.dev.yml: resolves assets from the example mapper
+# instead of a static [assets.*] catalog. See vod.example.toml for every setting.
+
+[server]
+listen = "0.0.0.0:3000"     # inside a container this must not be 127.0.0.1
+shutdown_delay_ms = 0
+shutdown_grace_ms = 5000
+
+[storage]
+media_root = "/srv/vod"
+
+[packaging]
+segment_duration_ms = 2000
+
+[logging]
+level = "info"
+format = "json"
+
+[cors]
+enabled = true
+allowed_origins = ["*"]     # the demo and control panel pages read this cross-origin
+
+[resolver]
+type = "http"
+
+[resolver.http]
+base_url = "http://mapper:9911"   # the mapper service name on the compose network
+allow_insecure_mapper = true      # fine on a private compose network; a real mapper needs https
+readiness_probe_interval_ms = 2000

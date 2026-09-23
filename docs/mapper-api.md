@@ -146,7 +146,18 @@ The server keeps one loaded copy per asset, keyed by `(asset_id, version)`. A di
 
 ## Try it
 
-A minimal mapper for local development, using only Python's standard library:
+[`examples/mapper/`](https://github.com/includeamin/segmentor/tree/main/examples/mapper) is a
+runnable version of the mapper below, and
+[`docker-compose.dev.yml`](https://github.com/includeamin/segmentor/blob/main/docker-compose.dev.yml)
+at the repository root wires it up to segmentor and to the [demo player](../demo/) and
+[control panel](../admin/) with one command:
+
+```sh
+docker compose -f docker-compose.dev.yml up --build
+curl http://127.0.0.1:3000/hls/sample/master.m3u8
+```
+
+The mapper itself, using only Python's standard library:
 
 ```python
 import json

@@ -1,0 +1,60 @@
+# Runs segmentor against a real mapper instead of a static [assets.*] catalog, so the mapper API
+# and the control panel can be tried out without writing a mapper or configuring anything by hand.
+# Unlike deploy/docker-compose.yml (the production example, which runs the published image), this
+# builds segmentor from the local source tree, so it also doubles as a quick way to try local
+# changes end to end.
+#
+#   docker compose -f docker-compose.dev.yml up --build
+#   curl http://127.0.0.1:3000/hls/sample/master.m3u8
+#
+# Then open http://127.0.0.1:8081 for the control panel (cache, resolver, and metrics) or
+# http://127.0.0.1:8080 for the plain player demo — both default to this compose's ports already.
+# The example mapper is itself at http://127.0.0.1:9911; see examples/mapper/README.md.
+#
+# This is a development setup, not a deployment example: the mapper has no TLS or authentication,
+# and the origin's filesystem is read-only only because tests/fixtures/ already is.
+services:
+  mapper:
+    build: examples/mapper
+    ports:
+      - "9911:9911"   # exposed so you can curl it directly while trying the protocol out
+    volumes:
+      - ./examples/mapper/catalog.json:/app/catalog.json:ro
+    restart: unless-stopped
+
+  segmentor:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./examples/mapper/vod.toml:/etc/vod/vod.toml:ro
+      - ./tests/fixtures:/srv/vod:ro
+    depends_on:
+      - mapper
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 10s
+    # No healthcheck: the image has no shell or curl. Probe GET /health and GET /ready from outside.
+
+  demo:
+    image: python:3-slim
+    working_dir: /site
+    volumes:
+      - ./demo:/site:ro
+    command: [python3, -m, http.server, "8080", --bind, 0.0.0.0]
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+
+  admin:
+    image: python:3-slim
+    working_dir: /site
+    volumes:
+      - ./admin:/site:ro
+    command: [python3, -m, http.server, "8081", --bind, 0.0.0.0]
+    ports:
+      - "8081:8081"
+    restart: unless-stopped

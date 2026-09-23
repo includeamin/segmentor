@@ -1,0 +1,18 @@
+{
+  "sample": {
+    "version": "v1",
+    "location": { "type": "file", "path": "h264-aac.mp4" },
+    "subtitles": [
+      { "language": "en", "label": "English", "default": true, "location": { "type": "file", "path": "subtitles-en.vtt" } },
+      { "language": "fr", "label": "Français", "location": { "type": "file", "path": "subtitles-fr.vtt" } }
+    ]
+  },
+  "hevc": {
+    "version": "v1",
+    "location": { "type": "file", "path": "hevc-aac.mp4" }
+  },
+  "delayed": {
+    "version": "v1",
+    "location": { "type": "file", "path": "h264-aac-video-delay.mp4" }
+  }
+}
