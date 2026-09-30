@@ -25,7 +25,8 @@ struct ResolverJson {
     /// `readiness_probe_interval_ms` is `0`.
     healthy: bool,
     base_url: Option<String>,
-    /// Every asset ID the resolver can name without being asked; only the static catalog can.
+    /// Asset IDs to offer: the static catalog's, or what a mapper lists at its optional
+    /// `GET /v1/assets`; `null` when there is no list.
     known_assets: Option<Vec<String>>,
 }
 

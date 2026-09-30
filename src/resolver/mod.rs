@@ -218,7 +218,17 @@ impl AssetResolver {
         }
     }
 
-    /// Asset IDs known without asking a remote service (only the static catalog has them).
+    /// Asset IDs a control panel can offer: the static catalog's, or whatever a mapper lists at
+    /// its optional `GET /v1/assets` (`None` when it lists nothing). At most `max` of them.
+    pub(crate) async fn listed_ids(&self, max: usize) -> Option<Vec<String>> {
+        match self {
+            Self::Static(resolver) => Some(resolver.ids()),
+            Self::Http(resolver) => resolver.list(max).await,
+        }
+    }
+
+    /// Asset IDs known without asking a remote service (only the static catalog has them); these
+    /// are what startup preloads, so a mapper's listing is never among them.
     pub(crate) fn known_ids(&self) -> Vec<String> {
         match self {
             Self::Static(resolver) => resolver.ids(),
