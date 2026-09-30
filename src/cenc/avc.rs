@@ -55,6 +55,19 @@ pub(crate) struct AvcParameters {
 }
 
 impl AvcParameters {
+    /// No parameter sets yet (for the fuzz entry point).
+    pub(crate) fn empty(nal_length_size: usize) -> Self {
+        Self {
+            nal_length_size,
+            sps: HashMap::new(),
+            pps: HashMap::new(),
+            #[cfg(test)]
+            raw_sps: Vec::new(),
+            #[cfg(test)]
+            raw_pps: Vec::new(),
+        }
+    }
+
     /// Reads `avcC` from a visual sample entry's payload.
     pub(crate) fn from_sample_entry(entry: &[u8]) -> Result<Self> {
         let (_, _, children) = visual_entry(entry)?;

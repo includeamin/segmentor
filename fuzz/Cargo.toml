@@ -18,3 +18,10 @@ path = "fuzz_targets/media_pipeline.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "avc-slice-header"
+path = "fuzz_targets/avc_slice_header.rs"
+test = false
+doc = false
+bench = false

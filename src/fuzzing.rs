@@ -67,3 +67,11 @@ async fn exercise(path: &Path) {
 pub fn max_input_bytes() -> u64 {
     LimitsConfig::default().max_metadata_bytes
 }
+
+/// Feeds arbitrary bytes to the H.264 parameter-set and slice-header parsers used for `cbcs`:
+/// the first byte picks how many of the following bytes are an SPS, the rest is a PPS-then-slice
+/// split at the midpoint. Errors are expected; panics and hangs are the bugs.
+#[doc(hidden)]
+pub fn exercise_avc_slice_header(data: &[u8]) {
+    crate::cenc::fuzz_avc(data);
+}

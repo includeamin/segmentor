@@ -1,10 +1,5 @@
 //! Common Encryption (ISO/IEC 23001-7) in the `cbcs` scheme, and the DRM signalling that goes with
 //! it. See `docs/technical-design/0009-common-encryption-and-drm.md`.
-#![allow(
-    dead_code,
-    unused_imports,
-    reason = "TEMPORARY: wired in by later tasks of the DRM plan"
-)]
 
 mod avc;
 mod bits;
@@ -13,14 +8,24 @@ mod keys;
 mod segment;
 mod signal;
 
-pub(crate) use avc::AvcParameters;
-pub(crate) use cipher::{Cipher, Pattern};
-pub(crate) use keys::{
-    CLEARKEY, ContentKey, DrmSystem, Encryption, FAIRPLAY, KeyBytes, Keys, PLAYREADY, WIDEVINE,
-    WireEncryption, hex_string, pssh_data, uuid_string,
-};
-pub(crate) use segment::{AssetProtection, PendingEncryption, TrackProtection};
+pub(crate) use keys::{Encryption, WireEncryption};
+pub(crate) use segment::{AssetProtection, PendingEncryption};
 pub(crate) use signal::{dash_content_protection, hls_key_lines, hls_session_keys};
+
+/// See `fuzzing::exercise_avc_slice_header`.
+pub(crate) fn fuzz_avc(data: &[u8]) {
+    let Some((&split, rest)) = data.split_first() else {
+        return;
+    };
+    let split = usize::from(split).min(rest.len());
+    let (sps, rest) = rest.split_at(split);
+    let (pps, slice) = rest.split_at(rest.len() / 2);
+    let mut parameters = avc::AvcParameters::empty(4);
+    let _ = parameters.update(sps);
+    let _ = parameters.update(pps);
+    let _ = parameters.clear_bytes(slice);
+    let _ = segment::avc_subsamples(&parameters, slice);
+}
 
 #[cfg(test)]
 pub(crate) mod tests_support {
