@@ -1,17 +1,42 @@
 use std::fmt::Write;
 
-use super::Presentation;
 use super::hls::track_language;
+use super::{Presentation, SequenceClip};
 use crate::error::{Error, Result};
 use crate::media::Track;
 use crate::subtitle::Subtitle;
 
+/// How a `SegmentTemplate` addresses its init and media segments.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Addressing {
+    /// The number of the track's first segment.
+    pub(crate) start_number: u32,
+    /// The clip whose init segment this is, for a sequence; `None` for a plain `init.mp4`.
+    pub(crate) clip: Option<usize>,
+    /// The media time at the Period's start, in the track's ticks; `None` leaves it out.
+    pub(crate) presentation_time_offset: Option<u64>,
+}
+
+impl Addressing {
+    /// A single file or an adaptive asset: one Period, numbered from zero.
+    pub(crate) const PLAIN: Self = Self {
+        start_number: 0,
+        clip: None,
+        presentation_time_offset: None,
+    };
+}
+
+fn mpd_open(duration_seconds: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"static\" mediaPresentationDuration=\"PT{duration_seconds}S\" minBufferTime=\"PT1.5S\" profiles=\"urn:mpeg:dash:profile:isoff-main:2011\">\n"
+    )
+}
+
 pub(crate) fn manifest(presentation: Presentation<'_>) -> Result<String> {
     let duration = presentation_duration(presentation)?;
     let version = presentation.version();
-    let mut manifest = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"static\" mediaPresentationDuration=\"PT{duration}S\" minBufferTime=\"PT1.5S\" profiles=\"urn:mpeg:dash:profile:isoff-main:2011\">\n  <Period start=\"PT0S\">\n"
-    );
+    let mut manifest = mpd_open(&duration);
+    manifest.push_str("  <Period start=\"PT0S\">\n");
     if let Some(video) = presentation.video() {
         write_video_adaptation(
             &mut manifest,
@@ -19,6 +44,7 @@ pub(crate) fn manifest(presentation: Presentation<'_>) -> Result<String> {
             video,
             version,
             &video.key.to_string(),
+            Addressing::PLAIN,
         )?;
     }
     for audio in presentation.audio_tracks() {
@@ -28,6 +54,7 @@ pub(crate) fn manifest(presentation: Presentation<'_>) -> Result<String> {
             audio,
             version,
             &audio.key.to_string(),
+            Addressing::PLAIN,
         )?;
     }
     for subtitle in presentation.subtitles() {
@@ -46,6 +73,7 @@ pub(crate) fn write_video_adaptation(
     track: &Track,
     version: &str,
     id: &str,
+    addressing: Addressing,
 ) -> Result<()> {
     let (width, height) = track
         .codec
@@ -59,7 +87,7 @@ pub(crate) fn write_video_adaptation(
     .expect("writing to a String cannot fail");
     writeln!(manifest, "      <Representation id=\"{id}\" bandwidth=\"{}\" codecs=\"{codec}\" mimeType=\"video/mp4\" width=\"{width}\" height=\"{height}\">", presentation.bandwidth(track)?.peak)
         .expect("writing to a String cannot fail");
-    write_segment_template(manifest, presentation, track, version);
+    write_segment_template(manifest, presentation, track, version, addressing);
     manifest.push_str("      </Representation>\n    </AdaptationSet>\n");
     Ok(())
 }
@@ -72,6 +100,7 @@ pub(crate) fn write_audio_adaptation(
     track: &Track,
     version: &str,
     id: &str,
+    addressing: Addressing,
 ) -> Result<()> {
     let (sample_rate, channels) = track
         .codec
@@ -89,7 +118,7 @@ pub(crate) fn write_audio_adaptation(
         .expect("writing to a String cannot fail");
     writeln!(manifest, "        <AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"{channels}\" />")
         .expect("writing to a String cannot fail");
-    write_segment_template(manifest, presentation, track, version);
+    write_segment_template(manifest, presentation, track, version, addressing);
     manifest.push_str("      </Representation>\n    </AdaptationSet>\n");
     Ok(())
 }
@@ -98,7 +127,8 @@ pub(crate) fn write_audio_adaptation(
 /// adaptive asset whose renditions come from several `Presentation`s.
 pub(crate) fn wrap_manifest(duration_seconds: &str, body: &str) -> String {
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"static\" mediaPresentationDuration=\"PT{duration_seconds}S\" minBufferTime=\"PT1.5S\" profiles=\"urn:mpeg:dash:profile:isoff-main:2011\">\n  <Period start=\"PT0S\">\n{body}  </Period>\n</MPD>\n"
+        "{}  <Period start=\"PT0S\">\n{body}  </Period>\n</MPD>\n",
+        mpd_open(duration_seconds)
     )
 }
 
@@ -145,8 +175,18 @@ fn write_segment_template(
     presentation: Presentation<'_>,
     track: &Track,
     version: &str,
+    addressing: Addressing,
 ) {
-    writeln!(manifest, "        <SegmentTemplate timescale=\"{}\" startNumber=\"0\" initialization=\"$RepresentationID$/init.mp4?v={version}\" media=\"$RepresentationID$/segments/$Number$/media.m4s?v={version}\">", track.timescale)
+    let init = addressing.clip.map_or_else(
+        || "$RepresentationID$/init.mp4".to_owned(),
+        |clip| format!("$RepresentationID$/clips/{clip}/init.mp4"),
+    );
+    let offset = addressing
+        .presentation_time_offset
+        .map_or_else(String::new, |offset| {
+            format!(" presentationTimeOffset=\"{offset}\"")
+        });
+    writeln!(manifest, "        <SegmentTemplate timescale=\"{}\"{offset} startNumber=\"{}\" initialization=\"{init}?v={version}\" media=\"$RepresentationID$/segments/$Number$/media.m4s?v={version}\">", track.timescale, addressing.start_number)
         .expect("writing to a String cannot fail");
     manifest.push_str("          <SegmentTimeline>\n");
     for (index, segment) in presentation.track_segments(track.id).enumerate() {
@@ -165,6 +205,79 @@ fn write_segment_template(
         .expect("writing to a String cannot fail");
     }
     manifest.push_str("          </SegmentTimeline>\n        </SegmentTemplate>\n");
+}
+
+/// A static MPD with one `Period` per clip of a sequence (TDD 0008, DASH). Each Period starts at
+/// its clip's position on the sequence timeline, and each `presentationTimeOffset` is that same
+/// position in the track's own ticks, because the clips' timestamps continue from one to the next.
+#[allow(
+    dead_code,
+    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
+)]
+pub(crate) fn sequence_manifest(
+    clips: &[SequenceClip<'_>],
+    total_nanos: u64,
+    version: &str,
+) -> Result<String> {
+    let mut manifest = mpd_open(&nanos_as_seconds(total_nanos));
+    for (position, clip) in clips.iter().enumerate() {
+        writeln!(
+            manifest,
+            "  <Period id=\"clip-{position}\" start=\"PT{}S\">",
+            nanos_as_seconds(clip.start_nanos)
+        )
+        .expect("writing to a String cannot fail");
+        let presentation = clip.presentation;
+        if let Some(video) = presentation.video() {
+            write_video_adaptation(
+                &mut manifest,
+                presentation,
+                video,
+                version,
+                &video.key.to_string(),
+                clip_addressing(clip, position, video)?,
+            )?;
+        }
+        for audio in presentation.audio_tracks() {
+            write_audio_adaptation(
+                &mut manifest,
+                presentation,
+                audio,
+                version,
+                &audio.key.to_string(),
+                clip_addressing(clip, position, audio)?,
+            )?;
+        }
+        manifest.push_str("  </Period>\n");
+    }
+    manifest.push_str("</MPD>\n");
+    Ok(manifest)
+}
+
+/// The clip's start in `track`'s ticks, rounded down exactly as `clip::trim` places the clip, so
+/// the offset and the first fragment's decode time agree.
+#[allow(
+    dead_code,
+    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
+)]
+fn clip_addressing(clip: &SequenceClip<'_>, position: usize, track: &Track) -> Result<Addressing> {
+    let offset =
+        u64::try_from(u128::from(clip.start_nanos) * u128::from(track.timescale) / 1_000_000_000)
+            .map_err(|_| Error::InvalidMedia("period offset overflow".to_owned()))?;
+    Ok(Addressing {
+        start_number: clip.first_segment,
+        clip: Some(position),
+        presentation_time_offset: Some(offset),
+    })
+}
+
+#[allow(
+    dead_code,
+    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
+)]
+fn nanos_as_seconds(nanos: u64) -> String {
+    let milliseconds = nanos / 1_000_000;
+    format!("{}.{:03}", milliseconds / 1000, milliseconds % 1000)
 }
 
 fn presentation_duration(presentation: Presentation<'_>) -> Result<String> {
@@ -287,6 +400,70 @@ mod tests {
             manifest.matches("<S d=").count(),
             4,
             "later segments omit t"
+        );
+    }
+
+    use crate::protocol::SequenceClip;
+
+    #[test]
+    fn a_sequence_manifest_has_one_period_per_clip_placed_on_the_timeline() {
+        let (first, second) = (Loaded::h264_aac(), Loaded::h264_aac());
+        let clips = [
+            SequenceClip {
+                presentation: first.presentation(),
+                first_segment: 0,
+                start_nanos: 0,
+            },
+            SequenceClip {
+                presentation: second.presentation(),
+                first_segment: 3,
+                start_nanos: 3_066_666_666,
+            },
+        ];
+
+        let manifest = sequence_manifest(&clips, 6_133_333_332, "v").unwrap();
+
+        assert_eq!(manifest.matches("<Period ").count(), 2, "{manifest}");
+        assert!(
+            manifest.contains("<Period id=\"clip-0\" start=\"PT0.000S\">"),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains("<Period id=\"clip-1\" start=\"PT3.066S\">"),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains("mediaPresentationDuration=\"PT6.133S\""),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains(
+                "startNumber=\"3\" initialization=\"$RepresentationID$/clips/1/init.mp4?v=v\""
+            ),
+            "{manifest}"
+        );
+        // 3.066666666 s at 15360 ticks per second, rounded down.
+        assert!(
+            manifest.contains("timescale=\"15360\" presentationTimeOffset=\"47103\""),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains(
+                "presentationTimeOffset=\"0\" startNumber=\"0\" initialization=\"$RepresentationID$/clips/0/init.mp4"
+            ),
+            "{manifest}"
+        );
+    }
+
+    #[test]
+    fn a_plain_manifest_has_no_presentation_time_offset() {
+        let loaded = Loaded::h264_aac();
+
+        let manifest = manifest(loaded.presentation()).unwrap();
+
+        assert!(!manifest.contains("presentationTimeOffset"), "{manifest}");
+        assert!(
+            manifest.contains("startNumber=\"0\" initialization=\"$RepresentationID$/init.mp4?v=")
         );
     }
 }

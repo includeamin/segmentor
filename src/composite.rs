@@ -728,6 +728,7 @@ fn render_dash_body(
             track,
             version,
             &format!("video-{}", entry.id),
+            dash::Addressing::PLAIN,
         )?;
     }
     for (entry, &(key, track)) in audio.iter().zip(audio_views) {
@@ -737,6 +738,7 @@ fn render_dash_body(
             track,
             version,
             &key.to_string(),
+            dash::Addressing::PLAIN,
         )?;
     }
     for subtitle in subtitles {

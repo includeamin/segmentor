@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use super::{Bandwidth, Presentation};
+use super::{Bandwidth, Presentation, SequenceClip};
 use crate::error::{Error, Result};
 use crate::media::{Track, TrackKey};
 use crate::subtitle::Subtitle;
@@ -168,31 +168,236 @@ pub(crate) fn master_playlist(presentation: Presentation<'_>) -> Result<String> 
 pub(crate) fn media_playlist(presentation: Presentation<'_>, key: TrackKey) -> Result<String> {
     let track = presentation.track(key)?;
     let version = presentation.version();
-    let segments = presentation.track_segments(track.id).collect::<Vec<_>>();
-    let target_duration = segments
-        .iter()
-        .map(|segment| segment.duration.div_ceil(u64::from(track.timescale)))
-        .max()
-        .unwrap_or(1);
+    let target_duration = target_duration(presentation, track);
     let mut playlist = format!(
         "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target_duration}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"init.mp4?v={version}\"\n"
     );
-    for (index, segment) in segments.iter().enumerate() {
+    write_segment_entries(&mut playlist, presentation, track, 0, version)?;
+    playlist.push_str("#EXT-X-ENDLIST\n");
+    Ok(playlist)
+}
+
+/// The longest segment of `track`, in whole seconds rounded up, as `#EXT-X-TARGETDURATION` needs.
+fn target_duration(presentation: Presentation<'_>, track: &Track) -> u64 {
+    presentation
+        .track_segments(track.id)
+        .map(|segment| segment.duration.div_ceil(u64::from(track.timescale)))
+        .max()
+        .unwrap_or(1)
+}
+
+/// One `#EXTINF` and URI per segment of `track`, numbered from `first_number`.
+fn write_segment_entries(
+    playlist: &mut String,
+    presentation: Presentation<'_>,
+    track: &Track,
+    first_number: u32,
+    version: &str,
+) -> Result<()> {
+    for (offset, segment) in presentation.track_segments(track.id).enumerate() {
         let milliseconds = segment
             .duration
             .checked_mul(1000)
             .and_then(|duration| duration.checked_div(u64::from(track.timescale)))
             .ok_or_else(|| Error::InvalidMedia("segment duration overflow".to_owned()))?;
+        let number = u64::try_from(offset)
+            .ok()
+            .and_then(|offset| offset.checked_add(u64::from(first_number)))
+            .ok_or_else(|| Error::InvalidMedia("segment number overflow".to_owned()))?;
         writeln!(
             playlist,
-            "#EXTINF:{}.{:03},\nsegments/{index}/media.m4s?v={version}",
+            "#EXTINF:{}.{:03},\nsegments/{number}/media.m4s?v={version}",
             milliseconds / 1000,
             milliseconds % 1000
         )
         .expect("writing to a String cannot fail");
     }
+    Ok(())
+}
+
+/// One track's playlist across every clip of a sequence: each clip names its own init segment,
+/// and a discontinuity separates it from the one before, since the encoding may change there.
+#[allow(
+    dead_code,
+    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
+)]
+pub(crate) fn sequence_media_playlist(
+    clips: &[SequenceClip<'_>],
+    key: TrackKey,
+    version: &str,
+) -> Result<String> {
+    let mut target = 1;
+    for clip in clips {
+        target = target.max(target_duration(
+            clip.presentation,
+            clip.presentation.track(key)?,
+        ));
+    }
+    let mut playlist = format!(
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n"
+    );
+    for (position, clip) in clips.iter().enumerate() {
+        let track = clip.presentation.track(key)?;
+        if position > 0 {
+            playlist.push_str("#EXT-X-DISCONTINUITY\n");
+        }
+        writeln!(
+            playlist,
+            "#EXT-X-MAP:URI=\"clips/{position}/init.mp4?v={version}\""
+        )
+        .expect("writing to a String cannot fail");
+        write_segment_entries(
+            &mut playlist,
+            clip.presentation,
+            track,
+            clip.first_segment,
+            version,
+        )?;
+    }
     playlist.push_str("#EXT-X-ENDLIST\n");
     Ok(playlist)
+}
+
+/// What the one `#EXT-X-STREAM-INF` of a sequence declares, covering every clip.
+#[allow(
+    dead_code,
+    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
+)]
+struct SequenceVariant {
+    peak: u64,
+    average: u64,
+    codecs: String,
+    resolution: Option<(u16, u16)>,
+}
+
+/// The master playlist of a sequence: one variant whose attributes cover every clip, since a
+/// player reads them once for the whole stream (TDD 0008, HLS). No I-frame playlist is offered.
+#[allow(
+    dead_code,
+    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
+)]
+pub(crate) fn sequence_master_playlist(
+    clips: &[SequenceClip<'_>],
+    version: &str,
+) -> Result<String> {
+    let first = clips
+        .first()
+        .ok_or_else(|| Error::InvalidMedia("a sequence has no clips".to_owned()))?
+        .presentation;
+    let video_key = first.video().map(|track| track.key);
+    let audio_keys = first
+        .audio_tracks()
+        .map(|track| track.key)
+        .collect::<Vec<_>>();
+    let audio_group = !audio_keys.is_empty() && (video_key.is_some() || audio_keys.len() > 1);
+
+    let mut playlist = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
+    if audio_group {
+        for (index, key) in audio_keys.iter().enumerate() {
+            // The first clip whose track names a language labels the rendition, so an unlabelled
+            // pre-roll does not hide the main content's language.
+            let track = match clips
+                .iter()
+                .filter_map(|clip| clip.presentation.track(*key).ok())
+                .find(|track| track_language(track).is_some())
+            {
+                Some(track) => track,
+                None => first.track(*key)?,
+            };
+            write_audio_rendition(&mut playlist, track, index, version);
+        }
+    }
+    let variant = sequence_variant(clips)?;
+    let resolution = variant
+        .resolution
+        .map_or_else(String::new, |(width, height)| {
+            format!(",RESOLUTION={width}x{height}")
+        });
+    let audio_attribute = if audio_group { ",AUDIO=\"audio\"" } else { "" };
+    writeln!(
+        playlist,
+        "#EXT-X-STREAM-INF:BANDWIDTH={},AVERAGE-BANDWIDTH={},CODECS=\"{}\"{resolution}{audio_attribute}",
+        variant.peak, variant.average, variant.codecs
+    )
+    .expect("writing to a String cannot fail");
+    let entry = video_key
+        .or_else(|| audio_keys.first().copied())
+        .unwrap_or(TrackKey::VIDEO);
+    writeln!(playlist, "{entry}/index.m3u8?v={version}").expect("writing to a String cannot fail");
+    Ok(playlist)
+}
+
+/// The highest peak of any clip; the average weighted by each clip's duration; every distinct
+/// codec string ("every media format present in any Media Segment", RFC 8216); and the largest
+/// clip's resolution. Like the single-file master, it counts video plus the default audio.
+#[allow(
+    dead_code,
+    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
+)]
+fn sequence_variant(clips: &[SequenceClip<'_>]) -> Result<SequenceVariant> {
+    let overflow = || Error::InvalidMedia("bandwidth overflow".to_owned());
+    let (mut peak, mut weighted, mut total_ms) = (0u64, 0u128, 0u128);
+    let (mut video_codecs, mut audio_codecs) = (Vec::<String>::new(), Vec::<String>::new());
+    let mut resolution: Option<(u16, u16)> = None;
+    for clip in clips {
+        let presentation = clip.presentation;
+        let video = presentation.video();
+        let audio = presentation.audio_tracks().next();
+        let (mut clip_peak, mut clip_average) = (0u64, 0u64);
+        for track in video.into_iter().chain(audio) {
+            let bandwidth = presentation.bandwidth(track)?;
+            clip_peak = clip_peak.checked_add(bandwidth.peak).ok_or_else(overflow)?;
+            clip_average = clip_average
+                .checked_add(bandwidth.average)
+                .ok_or_else(overflow)?;
+        }
+        peak = peak.max(clip_peak);
+        let reference = video
+            .or(audio)
+            .ok_or_else(|| Error::InvalidMedia("a clip has no tracks".to_owned()))?;
+        let milliseconds = u128::from(reference.duration) * 1000 / u128::from(reference.timescale);
+        weighted = weighted
+            .checked_add(u128::from(clip_average) * milliseconds)
+            .ok_or_else(overflow)?;
+        total_ms = total_ms.checked_add(milliseconds).ok_or_else(overflow)?;
+        if let Some(track) = video {
+            push_distinct(&mut video_codecs, track.codec.codecs());
+            if let Some((width, height)) = track.codec.dimensions()
+                && resolution.is_none_or(|(best_width, best_height)| {
+                    u32::from(width) * u32::from(height)
+                        > u32::from(best_width) * u32::from(best_height)
+                })
+            {
+                resolution = Some((width, height));
+            }
+        }
+        if let Some(track) = audio {
+            push_distinct(&mut audio_codecs, track.codec.codecs());
+        }
+    }
+    let average =
+        u64::try_from(weighted.checked_div(total_ms).unwrap_or(0)).map_err(|_| overflow())?;
+    let codecs = video_codecs
+        .into_iter()
+        .chain(audio_codecs)
+        .collect::<Vec<_>>()
+        .join(",");
+    Ok(SequenceVariant {
+        peak,
+        average,
+        codecs,
+        resolution,
+    })
+}
+
+#[allow(
+    dead_code,
+    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
+)]
+fn push_distinct(list: &mut Vec<String>, value: String) {
+    if !list.contains(&value) {
+        list.push(value);
+    }
 }
 
 /// The playlist that lists a subtitle file: the whole file as a single segment as long as the
@@ -565,5 +770,126 @@ mod tests {
             .expect_err("audio is absent from the view");
 
         assert!(matches!(error, Error::NotFound(_)));
+    }
+
+    use crate::protocol::SequenceClip;
+
+    fn clip(loaded: &Loaded, first_segment: u32, start_nanos: u64) -> SequenceClip<'_> {
+        SequenceClip {
+            presentation: loaded.presentation(),
+            first_segment,
+            start_nanos,
+        }
+    }
+
+    #[test]
+    fn a_sequence_playlist_maps_each_clip_and_marks_each_boundary() {
+        let (first, second) = (Loaded::h264_aac(), Loaded::h264_aac());
+        let clips = [clip(&first, 0, 0), clip(&second, 3, 3_000_000_000)];
+
+        let playlist = sequence_media_playlist(&clips, TrackKey::VIDEO, "v").unwrap();
+
+        assert_eq!(playlist.matches("#EXT-X-MAP:").count(), 2, "{playlist}");
+        assert_eq!(
+            playlist.matches("#EXT-X-DISCONTINUITY").count(),
+            1,
+            "{playlist}"
+        );
+        let boundary = playlist.find("#EXT-X-DISCONTINUITY\n").unwrap();
+        assert!(playlist.find("segments/2/media.m4s").unwrap() < boundary);
+        let second_map = playlist
+            .find("#EXT-X-MAP:URI=\"clips/1/init.mp4?v=v\"")
+            .unwrap();
+        assert!(boundary < second_map);
+        assert!(second_map < playlist.find("segments/3/media.m4s").unwrap());
+        assert!(playlist.contains("#EXT-X-MAP:URI=\"clips/0/init.mp4?v=v\""));
+        assert_eq!(playlist.matches("#EXTINF:").count(), 6);
+        assert!(playlist.contains("segments/5/media.m4s?v=v"));
+        assert!(playlist.ends_with("#EXT-X-ENDLIST\n"));
+    }
+
+    #[test]
+    fn a_sequence_master_covers_every_clip() {
+        let small = Loaded::h264_aac();
+        let large = Loaded::fixture("rendition-720p.mp4");
+        let hevc = Loaded::fixture("hevc-aac.mp4");
+        let clips = [
+            clip(&small, 0, 0),
+            clip(&large, 3, 3_000_000_000),
+            clip(&hevc, 6, 6_000_000_000),
+        ];
+
+        let playlist = sequence_master_playlist(&clips, "v").unwrap();
+
+        assert_eq!(
+            playlist.matches("#EXT-X-STREAM-INF").count(),
+            1,
+            "{playlist}"
+        );
+        assert!(
+            playlist.contains("RESOLUTION=640x360"),
+            "the largest clip: {playlist}"
+        );
+        assert!(playlist.contains("hvc1.1.6.L60.90"), "{playlist}");
+        assert_eq!(
+            playlist.matches("avc1.64000d").count(),
+            1,
+            "each codec once: {playlist}"
+        );
+        assert_eq!(playlist.matches("mp4a.40.2").count(), 1, "{playlist}");
+        assert!(!playlist.contains("I-FRAME"), "{playlist}");
+        let peak = clips
+            .iter()
+            .map(|clip| {
+                let presentation = clip.presentation;
+                presentation
+                    .video()
+                    .into_iter()
+                    .chain(presentation.audio_tracks().next())
+                    .map(|track| presentation.bandwidth(track).unwrap().peak)
+                    .sum::<u64>()
+            })
+            .max()
+            .unwrap();
+        assert!(
+            playlist.contains(&format!("BANDWIDTH={peak},")),
+            "the burstiest clip: {playlist}"
+        );
+    }
+
+    #[test]
+    fn the_first_labelled_clip_names_a_sequences_audio() {
+        let (unlabelled, labelled) = (
+            Loaded::h264_aac(),
+            Loaded::fixture("h264-aac-two-audio.mp4"),
+        );
+        let clips = [clip(&unlabelled, 0, 0), clip(&labelled, 3, 3_000_000_000)];
+
+        let playlist = sequence_master_playlist(&clips, "v").unwrap();
+
+        assert!(
+            playlist.contains("NAME=\"Audio 1 (eng)\",LANGUAGE=\"eng\""),
+            "{playlist}"
+        );
+    }
+
+    #[test]
+    fn an_audio_only_sequence_is_one_audio_variant() {
+        let (first, second) = (
+            Loaded::fixture("aac-only.m4a"),
+            Loaded::fixture("aac-only.m4a"),
+        );
+        let clips = [clip(&first, 0, 0), clip(&second, 3, 3_000_000_000)];
+
+        let master = sequence_master_playlist(&clips, "v").unwrap();
+        let media = sequence_media_playlist(&clips, TrackKey::audio(1), "v").unwrap();
+
+        assert!(master.contains("\naudio-1/index.m3u8?v=v\n"), "{master}");
+        assert!(!master.contains("RESOLUTION"), "{master}");
+        assert!(
+            !master.contains("EXT-X-MEDIA"),
+            "a lone track is the variant: {master}"
+        );
+        assert_eq!(media.matches("#EXT-X-DISCONTINUITY").count(), 1, "{media}");
     }
 }
