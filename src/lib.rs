@@ -11,6 +11,7 @@ use std::process::ExitCode;
 
 mod asset;
 mod cli;
+mod clip;
 mod composite;
 mod config;
 mod error;
