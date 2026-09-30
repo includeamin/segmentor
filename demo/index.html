@@ -31,16 +31,16 @@
   #log { height:150px; overflow:auto; font:11px/1.5 ui-monospace,monospace; color:var(--dim); }
   #status { font-size:12px; color:var(--dim); }
   .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
-  .chip { background:var(--panel); border:1px solid var(--line); border-radius:99px; padding:2px 10px; color:var(--fg); cursor:pointer; font:inherit; font-size:12px; }
-  .chip:hover { border-color:var(--acc); color:var(--acc); }
-  .chip.current { border-color:var(--acc); color:var(--acc); background:rgba(76,194,255,.12); }
 </style>
 </head>
 <body>
 <header>
   <h1>segmentor demo</h1>
   <label>Server <input id="base" size="26" value="http://127.0.0.1:3000"></label>
-  <label>Asset <input id="asset" size="12" value="sample"></label>
+<label>Asset
+    <select id="asset-pick"><option value="sample">sample</option><option value="">Custom…</option></select>
+  </label>
+  <label id="asset-custom" hidden>Name <input id="asset" size="14" placeholder="asset id"></label>
   <label>Protocol
     <select id="proto"><option value="hls">HLS</option><option value="dash">DASH</option></select>
   </label>
@@ -48,7 +48,6 @@
   <button id="load">Load</button>
   <span id="status"></span>
 </header>
-<div id="try-row" style="padding:0 16px 10px;font-size:12px;color:var(--dim)"></div>
 
 <main>
   <div class="stack">
@@ -106,23 +105,45 @@ const fmtBytes = n => n >= 1073741824 ? (n/1073741824).toFixed(2)+' GiB' : n >= 
 const tile = (k, v, cls='') => `<div class="tile"><div class="k">${k}</div><div class="v ${cls}">${v}</div></div>`;
 const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 
-// ---------- assets to try ----------
-// A quick way in besides typing a name: whatever the static catalog lists (if any) plus whatever
-// has already been played (any resolver). /admin/status has the same trust model as /metrics,
-// which this page already reads, so nothing new is exposed by also reading this.
-async function refreshTryRow() {
+// ---------- asset dropdown ----------
+// Every asset the server can name (its static catalog, or a mapper's optional listing) plus
+// whatever it has loaded, then "Custom…" for any other name. Asset IDs are never empty, so the
+// empty value marks "Custom…" without colliding with one.
+const assetId = () => $('asset-pick').value || $('asset').value.trim();
+
+function showCustomField() {
+  $('asset-custom').hidden = $('asset-pick').value !== '';
+}
+
+/// Rebuilds the options from `ids`, keeping the current choice: a selected asset stays selected
+/// even when the list no longer names it, and "Custom…" stays chosen with its text intact.
+function renderAssetOptions(ids) {
+  const pick = $('asset-pick'), selected = pick.value;
+  const all = [...new Set(selected ? [...ids, selected] : ids)].sort();
+  pick.innerHTML = all.map(id => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('')
+    + '<option value="">Custom…</option>';
+  pick.value = selected;
+  showCustomField();
+}
+
+/// Selects `id`, adding it to the dropdown if it is not listed yet.
+function selectAsset(id) {
+  const pick = $('asset-pick');
+  if (![...pick.options].some(option => option.value === id))
+    pick.add(new Option(id, id), pick.options.length - 1);
+  pick.value = id;
+  showCustomField();
+}
+
+// /admin/status has the same trust model as /metrics, which this page already reads, so nothing
+// new is exposed by also reading it.
+async function refreshAssets() {
   try {
     const status = await (await fetch(base() + '/admin/status')).json();
-    const ids = [...new Set([...(status.resolver.known_assets || []), ...status.cache.assets.map(a => a.asset_id)])].sort();
-    const row = $('try-row');
-    if (!ids.length) { row.textContent = ''; return; }
-    const current = $('asset').value;
-    row.innerHTML = 'Try: ' + ids.map(id =>
-      `<button class="chip${id === current ? ' current' : ''}" data-asset="${escapeHtml(id)}">${escapeHtml(id)}</button>`).join(' ');
-    for (const chip of row.querySelectorAll('.chip')) chip.onclick = () => { $('asset').value = chip.dataset.asset; load(); };
-  } catch { /* the try row is a convenience; leave it as it was if the origin is unreachable */ }
+    renderAssetOptions([...(status.resolver.known_assets || []), ...status.cache.assets.map(a => a.asset_id)]);
+  } catch { /* the list is a convenience; keep it as it was if the origin is unreachable */ }
 }
-setInterval(refreshTryRow, 10000);
+setInterval(refreshAssets, 10000);
 
 // ---------- player ----------
 function teardown() {
@@ -149,7 +170,7 @@ function load() {
   teardown();
   if (!diagnose()) log('<span class="bad">cannot start, see warnings under the player</span>');
   $('log').innerHTML = '';
-  const asset = encodeURIComponent($('asset').value);
+  const asset = encodeURIComponent(assetId());
   if ($('proto').value === 'hls') {
     const url = `${base()}/hls/${asset}/master.m3u8`;
     log('HLS ' + url);
@@ -300,8 +321,11 @@ async function poll() {
   pollTimer = setTimeout(poll, interval * 1000);
 }
 
-$('load').onclick = () => { load(); clearTimeout(pollTimer); prev = null; poll(); setTimeout(refreshTryRow, 1200); };
-load(); poll(); refreshTryRow();
+function start() { load(); clearTimeout(pollTimer); prev = null; poll(); setTimeout(refreshAssets, 1200); }
+$('load').onclick = start;
+$('asset-pick').addEventListener('change', () => { showCustomField(); if ($('asset-pick').value) start(); else $('asset').focus(); });
+$('asset').addEventListener('keydown', event => { if (event.key === 'Enter') start(); });
+load(); poll(); refreshAssets();
 </script>
 </body>
 </html>
