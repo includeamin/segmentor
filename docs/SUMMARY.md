@@ -21,6 +21,7 @@
   - [Fragmented MP4 input](technical-design/0005-fragmented-mp4-input.md)
   - [Trick play, subtitles, and adaptive renditions](technical-design/0006-trick-play-subtitles-and-renditions.md)
   - [Viewer authorization](technical-design/0007-viewer-authorization.md)
+  - [Clipping and concatenation](technical-design/0008-clipping-and-concatenation.md)
   - [Technical design template](technical-design/template.md)
 
 # Implementation
