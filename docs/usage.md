@@ -39,7 +39,7 @@ Configuration, logging, limits, CORS, and shutdown are described in [Operating t
 
 ## Web player demo
 
-`demo/index.html` is a single-file player (hls.js and dash.js, loaded from a CDN) that plays an asset over HLS or DASH and shows live server metrics parsed from `/metrics` next to it: request rate, throughput, per-route latency, errors, and resolver and cache events, plus player-side stats such as buffer, bandwidth, and dropped frames. Besides typing an asset ID, a "Try:" row under the input lists assets you can click straight into: the static catalog's, and anything already played, from `/admin/status`.
+`demo/index.html` is a single-file player (hls.js and dash.js, loaded from a CDN) that plays an asset over HLS or DASH and shows live server metrics parsed from `/metrics` next to it: request rate, throughput, per-route latency, errors, and resolver and cache events, plus player-side stats such as buffer, bandwidth, and dropped frames. The Asset dropdown lists every asset `/admin/status` names (the static catalog, or what a mapper returns from its optional [asset listing](mapper-api.md#list-assets), plus anything already loaded); picking one plays it, and its last entry, "Custom…", takes any other ID.
 
 ```sh
 make serve   # terminal 1: the origin on :3000
@@ -50,7 +50,7 @@ The page reads `/metrics` cross-origin, so keep `[cors]` enabled, as in `vod.exa
 
 ## Control panel
 
-`admin/index.html` is a second single-file page, separate from the player demo, for operating a running instance: it polls `/admin/status` for the resolver's live connection state and every asset currently in the loaded-asset cache (version, size, tracks, duration), and `/metrics` for the same request and throughput charts the player demo shows. It also embeds the same HLS/DASH player, with a "Known asset" dropdown next to the Asset field listing everything the status view names, so you can pick a playable asset without leaving the page or typing its ID — the field itself still takes any name, known or not.
+`admin/index.html` is a second single-file page, separate from the player demo, for operating a running instance: it polls `/admin/status` for the resolver's live connection state and every asset currently in the loaded-asset cache (version, size, tracks, duration), and `/metrics` for the same request and throughput charts the player demo shows. It also embeds the same HLS/DASH player, with the same Asset dropdown as the player demo: everything the status view names, then "Custom…" for any other ID. Clicking a row in the cache table plays that asset too.
 
 ```sh
 make serve   # terminal 1: the origin on :3000
