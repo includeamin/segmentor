@@ -9,6 +9,7 @@ mod catalog;
 mod mapper;
 mod policy;
 
+use std::fmt;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -66,6 +67,29 @@ pub(crate) struct RenditionLocation {
     pub(crate) location: AssetLocation,
 }
 
+/// Which of an answer's locations something refers to: the single file, one rendition, or one
+/// clip. A signed-URL refresh uses it to find the matching location in a newer answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LocationKey {
+    Main,
+    Rendition(String),
+    #[allow(
+        dead_code,
+        reason = "TEMPORARY: first constructed by load_clips (plan Task 6)"
+    )]
+    Clip(usize),
+}
+
+impl fmt::Display for LocationKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Main => formatter.write_str("-"),
+            Self::Rendition(id) => formatter.write_str(id),
+            Self::Clip(position) => write!(formatter, "clip-{position}"),
+        }
+    }
+}
+
 /// A resolver's answer for one asset.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedAsset {
@@ -85,29 +109,35 @@ pub(crate) struct ResolvedAsset {
 }
 
 impl ResolvedAsset {
-    /// Every location this answer names, single or several, each with the rendition id a
-    /// refresh needs to find its way back to the right one (`None` for the single-file case).
-    pub(crate) fn locations(&self) -> Vec<(Option<&str>, &AssetLocation)> {
+    /// Every location this answer names, each with the key a refresh needs to find its way back
+    /// to the right one.
+    pub(crate) fn locations(&self) -> Vec<(LocationKey, &AssetLocation)> {
         match &self.location {
-            Some(location) => vec![(None, location)],
+            Some(location) => vec![(LocationKey::Main, location)],
             None => self
                 .renditions
                 .iter()
-                .map(|rendition| (Some(rendition.id.as_str()), &rendition.location))
+                .map(|rendition| {
+                    (
+                        LocationKey::Rendition(rendition.id.clone()),
+                        &rendition.location,
+                    )
+                })
                 .collect(),
         }
     }
 
-    /// The location previously served under `rendition`, for matching a refreshed answer back to
-    /// the one whose signed URL just expired.
-    pub(crate) fn location_for(&self, rendition: Option<&str>) -> Option<&AssetLocation> {
-        match rendition {
-            None => self.location.as_ref(),
-            Some(id) => self
+    /// The location previously served under `key`, for matching a refreshed answer back to the
+    /// one whose signed URL just expired.
+    pub(crate) fn location_for(&self, key: &LocationKey) -> Option<&AssetLocation> {
+        match key {
+            LocationKey::Main => self.location.as_ref(),
+            LocationKey::Rendition(id) => self
                 .renditions
                 .iter()
-                .find(|candidate| candidate.id == id)
+                .find(|candidate| &candidate.id == id)
                 .map(|candidate| &candidate.location),
+            LocationKey::Clip(_) => None,
         }
     }
 }

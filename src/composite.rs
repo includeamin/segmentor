@@ -17,6 +17,7 @@ use crate::error::{Error, Result};
 use crate::fmp4;
 use crate::media::{Track, TrackKey, TrackKind};
 use crate::protocol::{AdaptiveAudio, AdaptiveVideo, Bandwidth, Presentation, dash, hls};
+use crate::resolver::LocationKey;
 use crate::subtitle::Subtitle;
 
 /// What `state.asset()` serves: one file, or several renditions served as one title.
@@ -147,16 +148,15 @@ impl ServedAsset {
         }
     }
 
-    /// Points a remote rendition at a re-signed URL for the same object. `None` for a plain
-    /// asset, or the video rendition id for a composite; the shared audio group is never
-    /// rotated this way because it is never itself the `location` a mapper answer names.
-    pub(crate) fn update_location(&self, rendition: Option<&str>, url: &reqwest::Url) {
-        match (self, rendition) {
-            (Self::Single(asset), None) => asset.update_location(url),
-            (Self::Composite(asset), Some(id)) => {
-                if let Some(entry) = asset.video.iter().find(|entry| entry.id == id) {
+    /// Points a remote location at a re-signed URL for the same object. The shared audio group
+    /// is never rotated this way because it is never itself the `location` a mapper answer names.
+    pub(crate) fn update_location(&self, key: &LocationKey, url: &reqwest::Url) {
+        match (self, key) {
+            (Self::Single(asset), LocationKey::Main) => asset.update_location(url),
+            (Self::Composite(asset), LocationKey::Rendition(id)) => {
+                if let Some(entry) = asset.video.iter().find(|entry| &entry.id == id) {
                     entry.asset.update_location(url);
-                } else if let Some(entry) = asset.audio_only.iter().find(|entry| entry.id == id) {
+                } else if let Some(entry) = asset.audio_only.iter().find(|entry| &entry.id == id) {
                     entry.asset.update_location(url);
                 }
             }
