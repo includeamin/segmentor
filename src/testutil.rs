@@ -422,3 +422,13 @@ async fn origin_media(
         }
     }
 }
+
+/// The base media decode time in a fragment's `tfdt` box (version 1: a 64-bit time after the
+/// box type and four bytes of version and flags).
+pub(crate) fn tfdt(fragment: &[u8]) -> u64 {
+    let at = fragment
+        .windows(4)
+        .position(|window| window == b"tfdt")
+        .expect("a fragment has a tfdt box");
+    u64::from_be_bytes(fragment[at + 8..at + 16].try_into().unwrap())
+}

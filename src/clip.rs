@@ -5,17 +5,16 @@
 //! found, with its decode times moved. The planner, init segments, and fragment writer then treat
 //! the result exactly like a whole file.
 
-#![allow(
-    dead_code,
-    reason = "TEMPORARY: first called by sequence::build (plan Task 5)"
-)]
-
 use crate::error::{Error, Result};
 use crate::media::{MediaIndex, Sample, Track, TrackKind};
 use crate::source::SourceIdentity;
 
 /// The largest `from_ms` or `to_ms` accepted (`2^32 − 1`): every conversion to ticks then fits
 /// a `u64` at any 32-bit timescale.
+#[allow(
+    dead_code,
+    reason = "TEMPORARY: first used by the mapper client (plan Task 6)"
+)]
 pub(crate) const MAX_CLIP_MS: u64 = 4_294_967_295;
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;
@@ -36,6 +35,7 @@ pub(crate) struct TimelinePosition(u64);
 impl TimelinePosition {
     pub(crate) const ZERO: Self = Self(0);
 
+    #[cfg(test)]
     pub(crate) const fn from_nanos(nanos: u64) -> Self {
         Self(nanos)
     }

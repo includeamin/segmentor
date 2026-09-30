@@ -18,13 +18,16 @@ use crate::fmp4;
 use crate::media::{Track, TrackKey, TrackKind};
 use crate::protocol::{AdaptiveAudio, AdaptiveVideo, Bandwidth, Presentation, dash, hls};
 use crate::resolver::LocationKey;
+use crate::sequence::SequenceAsset;
 use crate::subtitle::Subtitle;
 
-/// What `state.asset()` serves: one file, or several renditions served as one title.
+/// What `state.asset()` serves: one file, several renditions served as one title, or several
+/// clips played back to back (TDD 0008).
 #[derive(Debug)]
 pub(crate) enum ServedAsset {
     Single(Arc<PackagedAsset>),
     Composite(Box<CompositeAsset>),
+    Sequence(Box<SequenceAsset>),
 }
 
 impl ServedAsset {
@@ -32,6 +35,7 @@ impl ServedAsset {
         match self {
             Self::Single(asset) => asset.version(),
             Self::Composite(asset) => &asset.version,
+            Self::Sequence(asset) => asset.version(),
         }
     }
 
@@ -39,6 +43,7 @@ impl ServedAsset {
         match self {
             Self::Single(asset) => asset.hls_master_playlist(),
             Self::Composite(asset) => asset.rendered.hls_master.clone(),
+            Self::Sequence(asset) => asset.hls_master(),
         }
     }
 
@@ -46,6 +51,7 @@ impl ServedAsset {
         match self {
             Self::Single(asset) => asset.dash_manifest(),
             Self::Composite(asset) => asset.rendered.dash.clone(),
+            Self::Sequence(asset) => asset.dash(),
         }
     }
 
@@ -57,6 +63,7 @@ impl ServedAsset {
                 .hls_iframes
                 .clone()
                 .ok_or(Error::NotFound("asset has no video track")),
+            Self::Sequence(_) => Err(Error::NotFound("a sequence has no I-frame playlist")),
         }
     }
 
@@ -73,6 +80,7 @@ impl ServedAsset {
                 let prepared = source.prepare_iframe(frame_index)?;
                 Ok((source, prepared))
             }
+            Self::Sequence(_) => Err(Error::NotFound("a sequence has no I-frame playlist")),
         }
     }
 
@@ -83,6 +91,7 @@ impl ServedAsset {
                 asset.subtitle(language)?;
                 Ok(asset.rendered.hls_subtitle.clone())
             }
+            Self::Sequence(_) => Err(Error::NotFound("subtitle does not exist")),
         }
     }
 
@@ -90,6 +99,7 @@ impl ServedAsset {
         match self {
             Self::Single(asset) => asset.subtitle(language),
             Self::Composite(asset) => asset.subtitle(language),
+            Self::Sequence(_) => Err(Error::NotFound("subtitle does not exist")),
         }
     }
 
@@ -104,6 +114,25 @@ impl ServedAsset {
                 asset.init_segment(key)
             }
             Self::Composite(asset) => asset.resolve(rendition, key)?.0.init_segment(key),
+            Self::Sequence(_) => Err(Error::NotFound("a sequence's init segments are per clip")),
+        }
+    }
+
+    /// One clip's init segment, served at `{track}/clips/{clip}/init.mp4`. Only a sequence has
+    /// them; its clips may be encoded differently, so each has its own (TDD 0008, "URLs").
+    #[allow(
+        dead_code,
+        reason = "TEMPORARY: first used by the clip init route (plan Task 7)"
+    )]
+    pub(crate) fn clip_init_segment(
+        &self,
+        rendition: Option<&str>,
+        key: TrackKey,
+        clip: usize,
+    ) -> Result<Bytes> {
+        match self {
+            Self::Sequence(asset) if rendition.is_none() => asset.clip_init_segment(key, clip),
+            _ => Err(Error::NotFound("track does not exist")),
         }
     }
 
@@ -120,6 +149,12 @@ impl ServedAsset {
                 asset.hls_media_playlist(key)
             }
             Self::Composite(asset) => asset.media_playlist(rendition, key),
+            Self::Sequence(asset) => {
+                if rendition.is_some() {
+                    return Err(Error::NotFound("track does not exist"));
+                }
+                asset.media_playlist(key)
+            }
         }
     }
 
@@ -145,6 +180,12 @@ impl ServedAsset {
                 let prepared = source.prepare_media_segment(key, segment_index)?;
                 Ok((source, prepared))
             }
+            Self::Sequence(asset) => {
+                if rendition.is_some() {
+                    return Err(Error::NotFound("track does not exist"));
+                }
+                asset.prepare_segment(key, segment_index)
+            }
         }
     }
 
@@ -152,7 +193,13 @@ impl ServedAsset {
     /// is never rotated this way because it is never itself the `location` a mapper answer names.
     pub(crate) fn update_location(&self, key: &LocationKey, url: &reqwest::Url) {
         match (self, key) {
-            (Self::Single(asset), LocationKey::Main) => asset.update_location(url),
+            // A one-clip answer is served as `Single`.
+            (Self::Single(asset), LocationKey::Main | LocationKey::Clip(0)) => {
+                asset.update_location(url);
+            }
+            (Self::Sequence(asset), LocationKey::Clip(position)) => {
+                asset.update_location(*position, url);
+            }
             (Self::Composite(asset), LocationKey::Rendition(id)) => {
                 if let Some(entry) = asset.video.iter().find(|entry| &entry.id == id) {
                     entry.asset.update_location(url);
@@ -179,6 +226,7 @@ impl ServedAsset {
                         .log_load_details(&format!("{asset_id}/{}", entry.id));
                 }
             }
+            Self::Sequence(asset) => asset.log_load_details(asset_id),
         }
     }
 
@@ -205,6 +253,7 @@ impl ServedAsset {
                     .saturating_add(rendered as u64)
                     .saturating_add(asset.subtitles.iter().map(|s| s.data.len() as u64).sum())
             }
+            Self::Sequence(asset) => asset.index_bytes(),
         }
     }
 
@@ -213,6 +262,7 @@ impl ServedAsset {
         match self {
             Self::Single(asset) => asset.presentation().tracks().len(),
             Self::Composite(asset) => asset.video.len() + asset.audio.len(),
+            Self::Sequence(asset) => asset.track_count(),
         }
     }
 
@@ -225,6 +275,7 @@ impl ServedAsset {
                 .video
                 .first()
                 .map_or(0, |entry| entry.asset.plan.segments.len()),
+            Self::Sequence(asset) => asset.segment_count(),
         }
     }
 
@@ -232,6 +283,7 @@ impl ServedAsset {
         match self {
             Self::Single(asset) => asset.subtitle_count(),
             Self::Composite(asset) => asset.subtitles.len(),
+            Self::Sequence(_) => 0,
         }
     }
 
@@ -244,6 +296,7 @@ impl ServedAsset {
                 .video
                 .first()
                 .map_or(0.0, |entry| index_duration_seconds(&entry.asset.index)),
+            Self::Sequence(asset) => asset.duration_seconds(),
         }
     }
 }

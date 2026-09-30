@@ -210,10 +210,6 @@ fn write_segment_template(
 /// A static MPD with one `Period` per clip of a sequence (TDD 0008, DASH). Each Period starts at
 /// its clip's position on the sequence timeline, and each `presentationTimeOffset` is that same
 /// position in the track's own ticks, because the clips' timestamps continue from one to the next.
-#[allow(
-    dead_code,
-    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
-)]
 pub(crate) fn sequence_manifest(
     clips: &[SequenceClip<'_>],
     total_nanos: u64,
@@ -256,10 +252,6 @@ pub(crate) fn sequence_manifest(
 
 /// The clip's start in `track`'s ticks, rounded down exactly as `clip::trim` places the clip, so
 /// the offset and the first fragment's decode time agree.
-#[allow(
-    dead_code,
-    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
-)]
 fn clip_addressing(clip: &SequenceClip<'_>, position: usize, track: &Track) -> Result<Addressing> {
     let offset =
         u64::try_from(u128::from(clip.start_nanos) * u128::from(track.timescale) / 1_000_000_000)
@@ -271,10 +263,6 @@ fn clip_addressing(clip: &SequenceClip<'_>, position: usize, track: &Track) -> R
     })
 }
 
-#[allow(
-    dead_code,
-    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
-)]
 fn nanos_as_seconds(nanos: u64) -> String {
     let milliseconds = nanos / 1_000_000;
     format!("{}.{:03}", milliseconds / 1000, milliseconds % 1000)

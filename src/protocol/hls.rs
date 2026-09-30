@@ -217,10 +217,6 @@ fn write_segment_entries(
 
 /// One track's playlist across every clip of a sequence: each clip names its own init segment,
 /// and a discontinuity separates it from the one before, since the encoding may change there.
-#[allow(
-    dead_code,
-    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
-)]
 pub(crate) fn sequence_media_playlist(
     clips: &[SequenceClip<'_>],
     key: TrackKey,
@@ -259,10 +255,6 @@ pub(crate) fn sequence_media_playlist(
 }
 
 /// What the one `#EXT-X-STREAM-INF` of a sequence declares, covering every clip.
-#[allow(
-    dead_code,
-    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
-)]
 struct SequenceVariant {
     peak: u64,
     average: u64,
@@ -272,10 +264,6 @@ struct SequenceVariant {
 
 /// The master playlist of a sequence: one variant whose attributes cover every clip, since a
 /// player reads them once for the whole stream (TDD 0008, HLS). No I-frame playlist is offered.
-#[allow(
-    dead_code,
-    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
-)]
 pub(crate) fn sequence_master_playlist(
     clips: &[SequenceClip<'_>],
     version: &str,
@@ -330,10 +318,6 @@ pub(crate) fn sequence_master_playlist(
 /// The highest peak of any clip; the average weighted by each clip's duration; every distinct
 /// codec string ("every media format present in any Media Segment", RFC 8216); and the largest
 /// clip's resolution. Like the single-file master, it counts video plus the default audio.
-#[allow(
-    dead_code,
-    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
-)]
 fn sequence_variant(clips: &[SequenceClip<'_>]) -> Result<SequenceVariant> {
     let overflow = || Error::InvalidMedia("bandwidth overflow".to_owned());
     let (mut peak, mut weighted, mut total_ms) = (0u64, 0u128, 0u128);
@@ -390,10 +374,6 @@ fn sequence_variant(clips: &[SequenceClip<'_>]) -> Result<SequenceVariant> {
     })
 }
 
-#[allow(
-    dead_code,
-    reason = "TEMPORARY: first used by sequence.rs (plan Task 5)"
-)]
 fn push_distinct(list: &mut Vec<String>, value: String) {
     if !list.contains(&value) {
         list.push(value);
