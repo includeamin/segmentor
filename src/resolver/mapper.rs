@@ -14,8 +14,10 @@ use tokio::time::sleep;
 
 use super::policy::{LocationPolicy, validate_relative_path};
 use super::{
-    AssetLocation, RenditionLocation, Resolution, ResolveError, ResolvedAsset, SubtitleLocation,
+    AssetLocation, ClipLocation, RenditionLocation, Resolution, ResolveError, ResolvedAsset,
+    SubtitleLocation,
 };
+use crate::clip::{ClipWindow, MAX_CLIP_MS};
 use crate::config::MapperConfig;
 use crate::config::Secret;
 use crate::observability::request_id;
@@ -33,6 +35,8 @@ pub(crate) struct HttpResolver {
     token: Option<Secret>,
     settings: MapperConfig,
     policy: LocationPolicy,
+    /// `limits.max_clips`: an answer listing more is malformed.
+    max_clips: usize,
 }
 
 /// The JSON body of a `200` answer. Unknown fields are ignored so the contract can grow.
@@ -48,8 +52,19 @@ struct Wire {
     /// `docs/technical-design/0006-trick-play-subtitles-and-renditions.md`.
     #[serde(default)]
     renditions: Vec<WireRendition>,
+    /// Several files, or windows of them, played back to back, instead of `location`. See
+    /// `docs/technical-design/0008-clipping-and-concatenation.md`.
+    #[serde(default)]
+    clips: Vec<WireClip>,
     #[serde(default)]
     subtitles: Vec<WireSubtitle>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireClip {
+    location: WireLocation,
+    from_ms: Option<u64>,
+    to_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +111,7 @@ impl HttpResolver {
     pub(crate) fn new(
         settings: &MapperConfig,
         policy: LocationPolicy,
+        max_clips: usize,
     ) -> crate::error::Result<Self> {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -112,6 +128,7 @@ impl HttpResolver {
             token: settings.bearer_token.clone(),
             settings: settings.clone(),
             policy,
+            max_clips,
         })
     }
 
@@ -354,6 +371,41 @@ impl HttpResolver {
         Ok(renditions)
     }
 
+    /// A sequence of clips instead of one `location`. Windows are checked here; whether a window
+    /// holds any media waits until its file is parsed (`clip::trim`).
+    fn interpret_clips(&self, wire: &[WireClip]) -> Result<Vec<ClipLocation>, ResolveError> {
+        if wire.len() > self.max_clips {
+            return Err(ResolveError::Rejected(format!(
+                "mapper listed {} clips, more than limits.max_clips ({})",
+                wire.len(),
+                self.max_clips
+            )));
+        }
+        wire.iter()
+            .enumerate()
+            .map(|(position, clip)| {
+                let from_ms = clip.from_ms.unwrap_or(0);
+                if from_ms > MAX_CLIP_MS || clip.to_ms.is_some_and(|to_ms| to_ms > MAX_CLIP_MS) {
+                    return Err(ResolveError::Rejected(format!(
+                        "clip {position}: times must be at most {MAX_CLIP_MS} ms"
+                    )));
+                }
+                if clip.to_ms.is_some_and(|to_ms| to_ms <= from_ms) {
+                    return Err(ResolveError::Rejected(format!(
+                        "clip {position}: to_ms must be later than from_ms"
+                    )));
+                }
+                Ok(ClipLocation {
+                    location: self.interpret_location(&clip.location)?,
+                    window: ClipWindow {
+                        from_ms,
+                        to_ms: clip.to_ms,
+                    },
+                })
+            })
+            .collect()
+    }
+
     /// Validates a `200` answer against the request and the location policy.
     fn interpret(
         &self,
@@ -374,16 +426,24 @@ impl HttpResolver {
         {
             return reject("mapper version must be 1 to 256 visible ASCII characters");
         }
-        let (location, renditions) = match (&wire.location, wire.renditions.is_empty()) {
-            (Some(location), true) => (Some(self.interpret_location(location)?), Vec::new()),
-            (None, false) => (None, self.interpret_renditions(&wire.renditions)?),
-            (Some(_), false) => {
-                return reject("mapper answer must set only one of location or renditions");
-            }
-            (None, true) => {
-                return reject("mapper answer must set one of location or renditions");
-            }
-        };
+        let alternatives = usize::from(wire.location.is_some())
+            + usize::from(!wire.renditions.is_empty())
+            + usize::from(!wire.clips.is_empty());
+        if alternatives != 1 {
+            return reject("mapper answer must set exactly one of location, renditions, or clips");
+        }
+        let location = wire
+            .location
+            .as_ref()
+            .map(|location| self.interpret_location(location))
+            .transpose()?;
+        let renditions = self.interpret_renditions(&wire.renditions)?;
+        let clips = self.interpret_clips(&wire.clips)?;
+        if !clips.is_empty() && !wire.subtitles.is_empty() {
+            // A clip starts on a keyframe, so the mapper cannot know where the served timeline
+            // begins; cues written for it would drift by up to a GOP (TDD 0008, "Deferred").
+            return reject("subtitles cannot be combined with clips");
+        }
         let subtitles = self.interpret_subtitles(&wire.subtitles)?;
 
         let now = Instant::now();
@@ -406,6 +466,7 @@ impl HttpResolver {
         Ok(ResolvedAsset {
             location,
             renditions,
+            clips,
             subtitles,
             version: wire.version,
             valid_until,

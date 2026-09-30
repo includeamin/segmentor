@@ -69,6 +69,7 @@ impl AppState {
                     AssetResolver::Http(Box::new(HttpResolver::new(
                         mapper,
                         LocationPolicy::new(remote),
+                        config.limits.max_clips,
                     )?)),
                     Duration::from_millis(mapper.negative_ttl_ms),
                     Duration::from_millis(mapper.error_ttl_ms),

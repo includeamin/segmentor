@@ -15,6 +15,8 @@ use std::time::Instant;
 
 use reqwest::Url;
 
+use crate::clip::ClipWindow;
+
 pub(crate) use catalog::StaticResolver;
 pub(crate) use mapper::HttpResolver;
 pub(crate) use policy::LocationPolicy;
@@ -67,16 +69,19 @@ pub(crate) struct RenditionLocation {
     pub(crate) location: AssetLocation,
 }
 
+/// One clip of a sequence: a file, and the window of it to play.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClipLocation {
+    pub(crate) location: AssetLocation,
+    pub(crate) window: ClipWindow,
+}
+
 /// Which of an answer's locations something refers to: the single file, one rendition, or one
 /// clip. A signed-URL refresh uses it to find the matching location in a newer answer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LocationKey {
     Main,
     Rendition(String),
-    #[allow(
-        dead_code,
-        reason = "TEMPORARY: first constructed by load_clips (plan Task 6)"
-    )]
     Clip(usize),
 }
 
@@ -93,10 +98,13 @@ impl fmt::Display for LocationKey {
 /// A resolver's answer for one asset.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedAsset {
-    /// A single file. Mutually exclusive with `renditions`; exactly one is non-empty.
+    /// A single file. Exactly one of `location`, `renditions`, and `clips` is set.
     pub(crate) location: Option<AssetLocation>,
     /// Several files served as one adaptive asset. Mutually exclusive with `location`.
     pub(crate) renditions: Vec<RenditionLocation>,
+    /// Several files, or windows of them, played back to back. Mutually exclusive with
+    /// `location` and `renditions`.
+    pub(crate) clips: Vec<ClipLocation>,
     /// Sidecar subtitles, in the order the mapper listed them.
     pub(crate) subtitles: Vec<SubtitleLocation>,
     /// Opaque change token: equal versions mean identical media.
@@ -112,19 +120,26 @@ impl ResolvedAsset {
     /// Every location this answer names, each with the key a refresh needs to find its way back
     /// to the right one.
     pub(crate) fn locations(&self) -> Vec<(LocationKey, &AssetLocation)> {
-        match &self.location {
-            Some(location) => vec![(LocationKey::Main, location)],
-            None => self
-                .renditions
-                .iter()
-                .map(|rendition| {
-                    (
-                        LocationKey::Rendition(rendition.id.clone()),
-                        &rendition.location,
-                    )
-                })
-                .collect(),
+        if let Some(location) = &self.location {
+            return vec![(LocationKey::Main, location)];
         }
+        if self.renditions.is_empty() {
+            return self
+                .clips
+                .iter()
+                .enumerate()
+                .map(|(position, clip)| (LocationKey::Clip(position), &clip.location))
+                .collect();
+        }
+        self.renditions
+            .iter()
+            .map(|rendition| {
+                (
+                    LocationKey::Rendition(rendition.id.clone()),
+                    &rendition.location,
+                )
+            })
+            .collect()
     }
 
     /// The location previously served under `key`, for matching a refreshed answer back to the
@@ -137,7 +152,7 @@ impl ResolvedAsset {
                 .iter()
                 .find(|candidate| &candidate.id == id)
                 .map(|candidate| &candidate.location),
-            LocationKey::Clip(_) => None,
+            LocationKey::Clip(position) => self.clips.get(*position).map(|clip| &clip.location),
         }
     }
 }

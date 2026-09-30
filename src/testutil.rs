@@ -53,6 +53,8 @@ pub(crate) struct Answer {
     /// Mutually exclusive with `renditions`; `location` is `Value::Null` when renditions are set.
     pub(crate) location: Value,
     pub(crate) renditions: Vec<Value>,
+    /// Mutually exclusive with `location` and `renditions`.
+    pub(crate) clips: Vec<Value>,
     pub(crate) ttl_seconds: Option<u64>,
     pub(crate) expires_at: Option<String>,
     pub(crate) subtitles: Vec<Value>,
@@ -74,6 +76,7 @@ impl Answer {
             version: version.to_owned(),
             location: json!({ "type": "file", "path": path }),
             renditions: Vec::new(),
+            clips: Vec::new(),
             ttl_seconds: Some(300),
             expires_at: None,
             subtitles: Vec::new(),
@@ -85,6 +88,7 @@ impl Answer {
             version: version.to_owned(),
             location: json!({ "type": "http", "url": url }),
             renditions: Vec::new(),
+            clips: Vec::new(),
             ttl_seconds: Some(300),
             expires_at: None,
             subtitles: Vec::new(),
@@ -100,11 +104,49 @@ impl Answer {
                 .iter()
                 .map(|(id, path)| json!({ "id": id, "location": { "type": "file", "path": path } }))
                 .collect(),
+            clips: Vec::new(),
             ttl_seconds: Some(300),
             expires_at: None,
             subtitles: Vec::new(),
         }
     }
+
+    /// A sequence (TDD 0008): each entry is a location with an optional `from_ms` and `to_ms`.
+    pub(crate) fn clips(version: &str, clips: &[(Value, Option<u64>, Option<u64>)]) -> Self {
+        Self {
+            version: version.to_owned(),
+            location: Value::Null,
+            renditions: Vec::new(),
+            clips: clips
+                .iter()
+                .map(|(location, from_ms, to_ms)| {
+                    let mut clip = json!({ "location": location });
+                    if let Some(from_ms) = from_ms {
+                        clip["from_ms"] = json!(from_ms);
+                    }
+                    if let Some(to_ms) = to_ms {
+                        clip["to_ms"] = json!(to_ms);
+                    }
+                    clip
+                })
+                .collect(),
+            ttl_seconds: Some(300),
+            expires_at: None,
+            subtitles: Vec::new(),
+        }
+    }
+}
+
+pub(crate) fn file_location(path: &str) -> Value {
+    json!({ "type": "file", "path": path })
+}
+
+#[allow(
+    dead_code,
+    reason = "TEMPORARY: first used by the rotation test (plan Task 7)"
+)]
+pub(crate) fn http_location(url: &str) -> Value {
+    json!({ "type": "http", "url": url })
 }
 
 #[derive(Default)]
@@ -221,7 +263,9 @@ async fn mapper_asset(
         "asset_id": id,
         "version": answer.version,
     });
-    if answer.renditions.is_empty() {
+    if !answer.clips.is_empty() {
+        body["clips"] = json!(answer.clips);
+    } else if answer.renditions.is_empty() {
         body["location"] = answer.location;
     } else {
         body["renditions"] = json!(answer.renditions);

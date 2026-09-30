@@ -47,10 +47,6 @@ struct SequenceManifests {
 /// Trims every clip from its already parsed file, in order, each starting where the one before
 /// ended, and builds what is served (TDD 0008, "Loading"). One clip is an ordinary asset; two or
 /// more are a sequence. Errors name the clip by its position in the mapper's list.
-#[allow(
-    dead_code,
-    reason = "TEMPORARY: first called by the registry (plan Task 6)"
-)]
 pub(crate) fn build(
     asset_id: &str,
     files: &[ClipFile],
