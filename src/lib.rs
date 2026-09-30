@@ -10,6 +10,7 @@
 use std::process::ExitCode;
 
 mod asset;
+mod cenc;
 mod cli;
 mod clip;
 mod composite;
