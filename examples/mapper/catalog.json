@@ -18,5 +18,16 @@
   "long": {
     "version": "v1",
     "location": { "type": "file", "path": "generated/long.mp4" }
+  },
+  "trimmed": {
+    "version": "v1",
+    "clips": [{ "location": { "type": "file", "path": "h264-aac.mp4" }, "from_ms": 1500 }]
+  },
+  "preroll": {
+    "version": "v1",
+    "clips": [
+      { "location": { "type": "file", "path": "rendition-480p.mp4" } },
+      { "location": { "type": "file", "path": "rendition-720p.mp4" }, "from_ms": 1500 }
+    ]
   }
 }

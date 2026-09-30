@@ -62,10 +62,11 @@ class Mapper(BaseHTTPRequestHandler):
             "asset_id": asset_id,
             "version": entry["version"],
             "ttl_seconds": TTL_SECONDS,
-            "location": entry["location"],
         }
-        if "subtitles" in entry:
-            answer["subtitles"] = entry["subtitles"]
+        # Pass through whichever of the three alternatives the entry uses, and its subtitles.
+        for field in ("location", "renditions", "clips", "subtitles"):
+            if field in entry:
+                answer[field] = entry[field]
         body = json.dumps(answer).encode()
 
         self.send_response(200)
