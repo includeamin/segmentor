@@ -16,7 +16,9 @@ use crate::config::{
     Config, LimitsConfig, MapperConfig, RemoteMediaConfig, ResolverSettings, Secret,
 };
 use crate::http::{AppState, router, spawn_resolver_probe};
-use crate::testutil::{Answer, MockMapper, MockOrigin, OriginValidator, fixture, fixtures_dir};
+use crate::testutil::{
+    Answer, MockMapper, MockOrigin, OriginValidator, file_location, fixture, fixtures_dir,
+};
 
 fn mapper_settings(url: &str) -> MapperConfig {
     MapperConfig {
@@ -1689,5 +1691,198 @@ async fn a_mapper_answer_cannot_set_both_location_and_renditions() {
     assert_eq!(
         status(&h.app, "/hls/movie/master.m3u8").await,
         StatusCode::BAD_GATEWAY
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Clipping and concatenation (TDD 0008)
+// ---------------------------------------------------------------------------------------------
+
+fn clip(
+    path: &str,
+    from_ms: Option<u64>,
+    to_ms: Option<u64>,
+) -> (serde_json::Value, Option<u64>, Option<u64>) {
+    (file_location(path), from_ms, to_ms)
+}
+
+#[tokio::test]
+async fn a_single_clip_trims_one_file_and_keeps_its_urls() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "trimmed",
+        Answer::clips("v1", &[clip("h264-aac.mp4", Some(1500), None)]),
+    );
+
+    let (code, _, master) = fetch(&h.app, "/hls/trimmed/master.m3u8").await;
+    let version = version_in(&master);
+    let playlist = text(&fetch(&h.app, "/hls/trimmed/video/index.m3u8").await.2);
+
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        playlist.matches("#EXTINF:").count(),
+        2,
+        "from the keyframe at 1 s: {playlist}"
+    );
+    assert!(!playlist.contains("DISCONTINUITY"), "{playlist}");
+    assert_eq!(
+        status(&h.app, &format!("/hls/trimmed/video/init.mp4?v={version}")).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status(
+            &h.app,
+            &format!("/hls/trimmed/video/segments/1/media.m4s?v={version}")
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status(
+            &h.app,
+            &format!("/hls/trimmed/video/segments/2/media.m4s?v={version}")
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn a_clip_cut_from_a_fragmented_file_trims_the_same_way() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "trimmed",
+        Answer::clips("v1", &[clip("h264-aac-fragmented.mp4", Some(1500), None)]),
+    );
+
+    let playlist = text(&fetch(&h.app, "/hls/trimmed/video/index.m3u8").await.2);
+
+    assert_eq!(playlist.matches("#EXTINF:").count(), 2, "{playlist}");
+}
+
+#[tokio::test]
+async fn a_whole_file_clip_serves_the_same_media_bytes_as_the_file() {
+    let h = harness().await;
+    h.mapper
+        .state
+        .set("plain", Answer::file("v1", "h264-aac.mp4"));
+    h.mapper.state.set(
+        "whole",
+        Answer::clips("v1", &[clip("h264-aac.mp4", None, None)]),
+    );
+
+    let plain_version = version_in(&fetch(&h.app, "/hls/plain/master.m3u8").await.2);
+    let whole_version = version_in(&fetch(&h.app, "/hls/whole/master.m3u8").await.2);
+
+    assert_ne!(
+        plain_version, whole_version,
+        "a clip's window is part of its version"
+    );
+    for track in ["video", "audio-1"] {
+        for segment in 0..3 {
+            let plain = fetch(
+                &h.app,
+                &format!("/hls/plain/{track}/segments/{segment}/media.m4s?v={plain_version}"),
+            )
+            .await
+            .2;
+            let whole = fetch(
+                &h.app,
+                &format!("/hls/whole/{track}/segments/{segment}/media.m4s?v={whole_version}"),
+            )
+            .await
+            .2;
+            assert!(!plain.is_empty());
+            assert_eq!(plain, whole, "{track} segment {segment}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_clip_window_is_part_of_the_url_version() {
+    let h = harness().await;
+    for (id, to_ms) in [("a", 2000), ("b", 3000), ("c", 2000)] {
+        h.mapper.state.set(
+            id,
+            Answer::clips("v1", &[clip("h264-aac.mp4", Some(0), Some(to_ms))]),
+        );
+    }
+
+    let a = version_in(&fetch(&h.app, "/hls/a/master.m3u8").await.2);
+    let b = version_in(&fetch(&h.app, "/hls/b/master.m3u8").await.2);
+    let c = version_in(&fetch(&h.app, "/hls/c/master.m3u8").await.2);
+
+    assert_ne!(a, b);
+    assert_eq!(
+        a, c,
+        "the same clips under the same mapper version give the same URLs"
+    );
+}
+
+#[tokio::test]
+async fn malformed_clip_answers_are_rejected() {
+    let h = harness_with(|config| config.limits.max_clips = 2).await;
+    let clip = r#"{"location":{"type":"file","path":"h264-aac.mp4"}}"#;
+    let cases = [
+        // Both a location and clips.
+        format!(r#""location":{{"type":"file","path":"h264-aac.mp4"}},"clips":[{clip}]"#),
+        // An empty list.
+        r#""clips":[]"#.to_owned(),
+        // An end that is not after the start.
+        r#""clips":[{"location":{"type":"file","path":"h264-aac.mp4"},"from_ms":2000,"to_ms":2000}]"#.to_owned(),
+        // A time over 2^32 - 1.
+        r#""clips":[{"location":{"type":"file","path":"h264-aac.mp4"},"to_ms":4294967296}]"#.to_owned(),
+        // Subtitles alongside clips.
+        format!(r#""clips":[{clip}],"subtitles":[{{"language":"en","location":{{"type":"file","path":"subtitles-en.vtt"}}}}]"#),
+        // More than limits.max_clips.
+        format!(r#""clips":[{clip},{clip},{clip}]"#),
+        // A location the path rules refuse.
+        r#""clips":[{"location":{"type":"file","path":"../h264-aac.mp4"}}]"#.to_owned(),
+    ];
+    for (index, fields) in cases.iter().enumerate() {
+        // A different ID per case, so no case is answered from another's cached failure.
+        let id = format!("bad{index}");
+        *h.mapper.state.raw_body.lock().unwrap() =
+            Some(format!(r#"{{"asset_id":"{id}","version":"v1",{fields}}}"#));
+        assert_eq!(
+            status(&h.app, &format!("/hls/{id}/master.m3u8")).await,
+            StatusCode::BAD_GATEWAY,
+            "{fields}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn one_bad_clip_fails_the_whole_asset() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "movie",
+        Answer::clips(
+            "v1",
+            &[
+                clip("h264-aac.mp4", None, None),
+                clip("does-not-exist.mp4", None, None),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        status(&h.app, "/hls/movie/master.m3u8").await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the reason, naming clip 1, is in the asset_load_failed log line"
+    );
+}
+
+#[tokio::test]
+async fn a_window_past_the_end_of_its_file_fails_the_asset() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "movie",
+        Answer::clips("v1", &[clip("h264-aac.mp4", Some(5000), None)]),
+    );
+
+    assert_eq!(
+        status(&h.app, "/hls/movie/master.m3u8").await,
+        StatusCode::INTERNAL_SERVER_ERROR
     );
 }

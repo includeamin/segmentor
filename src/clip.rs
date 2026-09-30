@@ -11,10 +11,6 @@ use crate::source::SourceIdentity;
 
 /// The largest `from_ms` or `to_ms` accepted (`2^32 − 1`): every conversion to ticks then fits
 /// a `u64` at any 32-bit timescale.
-#[allow(
-    dead_code,
-    reason = "TEMPORARY: first used by the mapper client (plan Task 6)"
-)]
 pub(crate) const MAX_CLIP_MS: u64 = 4_294_967_295;
 
 const NANOS_PER_SECOND: u128 = 1_000_000_000;

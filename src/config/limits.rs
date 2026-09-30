@@ -38,6 +38,8 @@ pub(crate) struct LimitsConfig {
     pub(crate) max_subtitles_total_bytes: u64,
     /// Video renditions an adaptive asset may list.
     pub(crate) max_renditions: usize,
+    /// Clips one answer may list (TDD 0008).
+    pub(crate) max_clips: usize,
 }
 
 impl LimitsConfig {
@@ -66,6 +68,7 @@ impl LimitsConfig {
             || self.max_subtitle_bytes == 0
             || self.max_subtitles_total_bytes == 0
             || self.max_renditions == 0
+            || self.max_clips == 0
         {
             return Err(Error::Configuration(
                 "all resource limits must be greater than zero".to_owned(),
@@ -103,6 +106,7 @@ impl Default for LimitsConfig {
             max_subtitle_bytes: 2 * 1024 * 1024,
             max_subtitles_total_bytes: 8 * 1024 * 1024,
             max_renditions: 8,
+            max_clips: 64,
         }
     }
 }

@@ -30,6 +30,7 @@ impl StaticResolver {
         Ok(Resolution::Resolved(ResolvedAsset {
             location: Some(AssetLocation::File(path.clone())),
             renditions: Vec::new(),
+            clips: Vec::new(),
             subtitles: Vec::new(),
             version: STATIC_VERSION.to_owned(),
             valid_until: Instant::now() + FOREVER,
