@@ -22,6 +22,7 @@
   - [Trick play, subtitles, and adaptive renditions](technical-design/0006-trick-play-subtitles-and-renditions.md)
   - [Viewer authorization](technical-design/0007-viewer-authorization.md)
   - [Clipping and concatenation](technical-design/0008-clipping-and-concatenation.md)
+  - [Common encryption and DRM](technical-design/0009-common-encryption-and-drm.md)
   - [Technical design template](technical-design/template.md)
 
 # Implementation
