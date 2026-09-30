@@ -24,6 +24,7 @@ mod protocol;
 mod registry;
 mod resolver;
 mod segment;
+mod sequence;
 mod source;
 mod subtitle;
 #[cfg(test)]
