@@ -89,7 +89,8 @@ pub(crate) fn dash_content_protection(encryption: &Encryption, key: &ContentKey)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cenc::{CLEARKEY, FAIRPLAY, PLAYREADY, WIDEVINE, WireEncryption};
+    use crate::cenc::WireEncryption;
+    use crate::cenc::keys::{CLEARKEY, FAIRPLAY, PLAYREADY, WIDEVINE};
 
     fn pssh(system: &[u8; 16], data: &[u8]) -> String {
         use base64::Engine;

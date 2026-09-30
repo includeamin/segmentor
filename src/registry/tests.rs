@@ -2096,6 +2096,7 @@ async fn decode_each(
     base: &str,
     clips: &[(String, Vec<String>)],
     directory: &std::path::Path,
+    key: Option<&str>,
 ) -> Vec<u64> {
     std::fs::create_dir_all(directory).unwrap();
     let mut counts = Vec::new();
@@ -2106,14 +2107,18 @@ async fn decode_each(
         }
         let path = directory.join(format!("clip-{position}.mp4"));
         std::fs::write(&path, bytes).unwrap();
-        let count = std::process::Command::new("ffprobe")
-            .args(["-v", "error", "-count_frames", "-select_streams", "v:0"])
-            .args(["-show_entries", "stream=nb_read_frames", "-of", "csv=p=0"])
-            .arg(&path)
-            .output()
-            .unwrap();
-        let decode = std::process::Command::new("ffmpeg")
-            .args(["-v", "error", "-i"])
+        let mut probe = std::process::Command::new("ffprobe");
+        probe.args(["-v", "error", "-count_frames", "-select_streams", "v:0"]);
+        probe.args(["-show_entries", "stream=nb_read_frames", "-of", "csv=p=0"]);
+        let mut ffmpeg = std::process::Command::new("ffmpeg");
+        ffmpeg.args(["-v", "error"]);
+        if let Some(key) = key {
+            probe.args(["-decryption_key", key]);
+            ffmpeg.args(["-decryption_key", key]);
+        }
+        let count = probe.arg("-i").arg(&path).output().unwrap();
+        let decode = ffmpeg
+            .arg("-i")
             .arg(&path)
             .args(["-f", "null", "-"])
             .output()
@@ -2180,7 +2185,14 @@ async fn every_clip_of_a_sequence_decodes_from_the_served_hls_and_dash() {
                 .push(line.to_owned());
         }
     }
-    let frames = decode_each(&h.app, "/hls/seq/video/", &clips, &directory.join("hls")).await;
+    let frames = decode_each(
+        &h.app,
+        "/hls/seq/video/",
+        &clips,
+        &directory.join("hls"),
+        None,
+    )
+    .await;
     assert_eq!(
         frames,
         [90, 90, 60],
@@ -2225,7 +2237,14 @@ async fn every_clip_of_a_sequence_decodes_from_the_served_hls_and_dash() {
         assert_eq!(tfdt(&fragment), offset, "period {position}");
         clips.push((format!("clips/{position}/init.mp4?v={version}"), segments));
     }
-    let frames = decode_each(&h.app, "/dash/seq/video/", &clips, &directory.join("dash")).await;
+    let frames = decode_each(
+        &h.app,
+        "/dash/seq/video/",
+        &clips,
+        &directory.join("dash"),
+        None,
+    )
+    .await;
     assert_eq!(frames, [90, 90, 60]);
 }
 
@@ -2467,4 +2486,131 @@ async fn admin_status_reports_key_ids_never_keys() {
         "01234567-89ab-cdef-0123-456789abcdef"
     );
     assert!(!String::from_utf8_lossy(&body).contains(KEY));
+}
+
+/// `FFmpeg`'s error output decoding `path`, optionally with a decryption key.
+fn decode_errors(path: &std::path::Path, key: Option<&str>) -> String {
+    let mut command = std::process::Command::new("ffmpeg");
+    command.args(["-v", "error"]);
+    if let Some(key) = key {
+        command.args(["-decryption_key", key]);
+    }
+    let output = command
+        .arg("-i")
+        .arg(path)
+        .args(["-f", "null", "-"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// An independent implementation (`FFmpeg`'s `cbcs` decryptor) must recover every frame with the
+/// right key, and must not with a wrong one (TDD 0009, "Testing").
+#[tokio::test]
+async fn ffmpeg_decrypts_every_encrypted_track_we_serve() {
+    if std::process::Command::new("ffprobe")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: ffprobe is not installed");
+        return;
+    }
+    let h = harness().await;
+    let encryption = clear_key_encryption(KEY);
+    h.mapper.state.set(
+        "one",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(encryption.clone()),
+    );
+    h.mapper.state.set(
+        "seq",
+        Answer::clips(
+            "v1",
+            &[
+                clip("h264-aac.mp4", None, None),
+                clip("rendition-720p.mp4", None, None),
+                clip("h264-aac.mp4", Some(1500), None),
+            ],
+        )
+        .with_encryption(encryption),
+    );
+    let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/drm-decode");
+
+    // A single file: video and audio, each reassembled from its init and segments.
+    let version = version_in(&fetch(&h.app, "/hls/one/master.m3u8").await.2);
+    for (track, expected) in [("video", 90u64)] {
+        let segments = (0..3)
+            .map(|n| format!("segments/{n}/media.m4s?v={version}"))
+            .collect();
+        let clips = vec![(format!("init.mp4?v={version}"), segments)];
+        let frames = decode_each(
+            &h.app,
+            &format!("/hls/one/{track}/"),
+            &clips,
+            &directory.join("one"),
+            Some(KEY),
+        )
+        .await;
+        assert_eq!(frames, [expected]);
+    }
+    let audio_path = {
+        let mut bytes = fetch(&h.app, &format!("/hls/one/audio-1/init.mp4?v={version}"))
+            .await
+            .2
+            .to_vec();
+        for n in 0..3 {
+            bytes.extend_from_slice(
+                &fetch(
+                    &h.app,
+                    &format!("/hls/one/audio-1/segments/{n}/media.m4s?v={version}"),
+                )
+                .await
+                .2,
+            );
+        }
+        let path = directory.join("one-audio.mp4");
+        std::fs::write(&path, bytes).unwrap();
+        path
+    };
+    assert_eq!(
+        decode_errors(&audio_path, Some(KEY)),
+        "",
+        "audio decrypts cleanly"
+    );
+    assert_ne!(
+        decode_errors(&audio_path, Some("ffeeddccbbaa99887766554433221100")),
+        "",
+        "a wrong key does not"
+    );
+
+    // A sequence: every clip's video, from the served playlist, as in the clips decode test.
+    let playlist = text(&fetch(&h.app, "/hls/seq/video/index.m3u8").await.2);
+    let mut clips: Vec<(String, Vec<String>)> = Vec::new();
+    for line in playlist.lines() {
+        if let Some(uri) = line
+            .strip_prefix("#EXT-X-MAP:URI=\"")
+            .and_then(|rest| rest.strip_suffix('"'))
+        {
+            clips.push((uri.to_owned(), Vec::new()));
+        } else if !line.is_empty() && !line.starts_with('#') {
+            clips.last_mut().unwrap().1.push(line.to_owned());
+        }
+    }
+    let frames = decode_each(
+        &h.app,
+        "/hls/seq/video/",
+        &clips,
+        &directory.join("seq"),
+        Some(KEY),
+    )
+    .await;
+    assert_eq!(frames, [90, 90, 60]);
+
+    // Without the key, the video does not decode cleanly: it really is encrypted.
+    let video = directory.join("one").join("clip-0.mp4");
+    assert_ne!(
+        decode_errors(&video, None),
+        "",
+        "clear decoding of encrypted video fails"
+    );
 }
