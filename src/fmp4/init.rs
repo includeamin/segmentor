@@ -28,7 +28,6 @@ pub(crate) fn write_init_segment(metadata: &Metadata, track_id: u32) -> Result<V
     write_init(metadata, track_id, None)
 }
 
-#[allow(dead_code, reason = "TEMPORARY: used by the DRM plan's later tasks")]
 pub(crate) fn write_protected_init_segment(
     metadata: &Metadata,
     track_id: u32,

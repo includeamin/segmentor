@@ -18,7 +18,6 @@ pub(crate) struct PreparedSegment {
     pub(crate) content_length: u64,
     /// For an encrypted track: what remains once the samples are read (see `cenc::segment`).
     /// `header`, `ranges`, and `content_length` then describe the clear fragment and are replaced.
-    #[allow(dead_code, reason = "TEMPORARY: used by the DRM plan's later tasks")]
     pub(crate) encryption: Option<Box<crate::cenc::PendingEncryption>>,
 }
 

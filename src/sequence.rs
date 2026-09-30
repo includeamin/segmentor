@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::asset::PackagedAsset;
+use crate::asset::{Extras, PackagedAsset};
 use crate::clip::{self, ClipWindow, TimelinePosition, Trailing};
 use crate::composite::ServedAsset;
 use crate::config::LimitsConfig;
@@ -54,6 +54,7 @@ pub(crate) fn build(
     mapper_version: &str,
     segment_duration_ms: u64,
     limits: &LimitsConfig,
+    encryption: Option<&Arc<crate::cenc::Encryption>>,
 ) -> Result<ServedAsset> {
     let named = |position: usize| {
         move |error: Error| Error::InvalidMedia(format!("clip {position}: {error}"))
@@ -85,6 +86,7 @@ pub(crate) fn build(
         clips
             .iter()
             .map(|&(file, window)| (&files[file].parsed.index.source, window)),
+        encryption.map(AsRef::as_ref),
     );
     let mut assets = Vec::with_capacity(trimmed.len());
     for (position, (file, clip_start, index)) in trimmed.into_iter().enumerate() {
@@ -92,10 +94,13 @@ pub(crate) fn build(
             files[file].source.clone(),
             index,
             &files[file].parsed.metadata,
-            Vec::new(),
             segment_duration_ms,
             limits,
-            Some(version.clone()),
+            Extras {
+                subtitles: Vec::new(),
+                version: Some(version.clone()),
+                encryption: encryption.map(Arc::clone),
+            },
         )
         .map_err(named(position))?;
         assets.push((asset, clip_start));
@@ -231,6 +236,11 @@ fn render(
 }
 
 impl SequenceAsset {
+    /// The encryption every clip shares, if any.
+    pub(crate) fn encryption(&self) -> Option<&crate::cenc::Encryption> {
+        self.clips[0].encryption()
+    }
+
     pub(crate) fn version(&self) -> &str {
         &self.version
     }
@@ -342,7 +352,15 @@ mod tests {
     };
 
     fn build_from(files: &[ClipFile], clips: &[(usize, ClipWindow)]) -> Result<ServedAsset> {
-        build("test", files, clips, "v1", 1000, &LimitsConfig::default())
+        build(
+            "test",
+            files,
+            clips,
+            "v1",
+            1000,
+            &LimitsConfig::default(),
+            None,
+        )
     }
 
     fn sequence(asset: &ServedAsset) -> &SequenceAsset {

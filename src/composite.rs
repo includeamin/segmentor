@@ -31,6 +31,18 @@ pub(crate) enum ServedAsset {
 }
 
 impl ServedAsset {
+    /// The key IDs (as UUIDs) the asset is encrypted with, or `None` when it is served clear.
+    pub(crate) fn key_ids(&self) -> Option<Vec<String>> {
+        match self {
+            Self::Single(asset) => asset.encryption().map(crate::cenc::Encryption::key_ids),
+            Self::Composite(asset) => asset.video[0]
+                .asset
+                .encryption()
+                .map(crate::cenc::Encryption::key_ids),
+            Self::Sequence(asset) => asset.encryption().map(crate::cenc::Encryption::key_ids),
+        }
+    }
+
     pub(crate) fn version(&self) -> &str {
         match self {
             Self::Single(asset) => asset.version(),
@@ -710,7 +722,7 @@ fn version_of(
 }
 
 fn presentation_for<'a>(asset: &'a PackagedAsset, version: &'a str) -> Presentation<'a> {
-    Presentation::new(&asset.index.tracks, &asset.plan, version).with_encryption(None)
+    Presentation::new(&asset.index.tracks, &asset.plan, version).with_encryption(asset.encryption())
 }
 
 /// Which underlying asset supplies one member of the shared audio group.
@@ -813,6 +825,8 @@ fn render(
     iframe_source: usize,
 ) -> Result<CompositeManifests> {
     let (video_views, audio_views) = build_views(video, audio_only, audio, version)?;
+    // Every rendition is encrypted with the same keys, so the first one speaks for the asset.
+    let encryption = video[0].asset.encryption();
 
     let adaptive_video = video_views
         .iter()
@@ -840,7 +854,7 @@ fn render(
         &adaptive_audio,
         subtitles,
         iframe_stream_line.as_deref(),
-        None,
+        encryption,
     )?);
 
     let hls_video = video
@@ -874,7 +888,11 @@ fn render(
         version,
     )?;
     let duration = dash::track_duration(video_views[0].2)?;
-    let dash = Bytes::from(dash::wrap_manifest(&duration, &dash_body, false));
+    let dash = Bytes::from(dash::wrap_manifest(
+        &duration,
+        &dash_body,
+        encryption.is_some(),
+    ));
 
     Ok(CompositeManifests {
         hls_master,

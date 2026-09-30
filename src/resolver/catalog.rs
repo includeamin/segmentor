@@ -35,6 +35,7 @@ impl StaticResolver {
             version: STATIC_VERSION.to_owned(),
             valid_until: Instant::now() + FOREVER,
             hard_expiry: None,
+            encryption: None,
         }))
     }
 }

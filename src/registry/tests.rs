@@ -2267,3 +2267,204 @@ async fn a_listing_is_capped_at_max_assets() {
 
     assert_eq!(known_assets(&h.app).await, serde_json::json!(["a", "b"]));
 }
+
+// ---------------------------------------------------------------------------------------------
+// Encryption (TDD 0009)
+// ---------------------------------------------------------------------------------------------
+
+const KEY_ID: &str = "0123456789abcdef0123456789abcdef";
+const KEY: &str = "00112233445566778899aabbccddeeff";
+
+fn clear_key_encryption(key: &str) -> serde_json::Value {
+    serde_json::json!({
+        "scheme": "cbcs",
+        "keys": [{ "key_id": KEY_ID, "key": key }],
+        "systems": [{ "system_id": "e2719d58-a985-b3c9-781a-b030af78d30e", "license_url": "https://l.example.net/ck" }],
+    })
+}
+
+#[tokio::test]
+async fn an_encrypted_asset_serves_protected_init_and_fragments() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "drm",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(clear_key_encryption(KEY)),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/drm/master.m3u8").await.2);
+
+    let init = fetch(&h.app, &format!("/hls/drm/video/init.mp4?v={version}"))
+        .await
+        .2;
+    let segment = fetch(
+        &h.app,
+        &format!("/hls/drm/video/segments/1/media.m4s?v={version}"),
+    )
+    .await;
+    let audio = fetch(&h.app, &format!("/dash/drm/audio-1/init.mp4?v={version}"))
+        .await
+        .2;
+
+    assert!(init.windows(4).any(|w| w == b"encv") && init.windows(4).any(|w| w == b"tenc"));
+    assert!(audio.windows(4).any(|w| w == b"enca"));
+    assert_eq!(segment.0, StatusCode::OK);
+    assert!(segment.2.windows(4).any(|w| w == b"senc"));
+    let playlist = text(&fetch(&h.app, "/hls/drm/video/index.m3u8").await.2);
+    assert!(
+        playlist.contains(r#"KEYFORMAT="org.w3.clearkey""#),
+        "{playlist}"
+    );
+    assert!(metric(&h.state, "vod_encrypted_segments_total 1"));
+}
+
+#[tokio::test]
+async fn range_and_head_requests_work_on_an_encrypted_segment() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "drm",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(clear_key_encryption(KEY)),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/drm/master.m3u8").await.2);
+    let uri = format!("/hls/drm/video/segments/0/media.m4s?v={version}");
+    let whole = fetch(&h.app, &uri).await.2;
+
+    let ranged = h
+        .app
+        .clone()
+        .oneshot(
+            Request::get(&uri)
+                .header(axum::http::header::RANGE, "bytes=8-15")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let head = h
+        .app
+        .clone()
+        .oneshot(Request::head(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        &to_bytes(ranged.into_body(), usize::MAX).await.unwrap()[..],
+        &whole[8..16]
+    );
+    assert_eq!(
+        head.headers()[axum::http::header::CONTENT_LENGTH],
+        whole.len().to_string().as_str()
+    );
+    assert_eq!(
+        fetch(&h.app, &uri).await.2,
+        whole,
+        "deterministic: the same bytes again"
+    );
+}
+
+#[tokio::test]
+async fn an_unsupported_codec_with_encryption_fails_the_asset() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "drm",
+        Answer::file("v1", "hevc-aac.mp4").with_encryption(clear_key_encryption(KEY)),
+    );
+
+    assert_eq!(
+        status(&h.app, "/hls/drm/master.m3u8").await,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+}
+
+#[tokio::test]
+async fn the_key_changes_the_url_version() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "a",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(clear_key_encryption(KEY)),
+    );
+    h.mapper.state.set(
+        "b",
+        Answer::file("v1", "h264-aac.mp4")
+            .with_encryption(clear_key_encryption("ffeeddccbbaa99887766554433221100")),
+    );
+    h.mapper.state.set("c", Answer::file("v1", "h264-aac.mp4"));
+
+    let version = |id: &'static str| {
+        let app = h.app.clone();
+        async move { version_in(&fetch(&app, &format!("/hls/{id}/master.m3u8")).await.2) }
+    };
+    let (a, b, c) = (version("a").await, version("b").await, version("c").await);
+    assert!(a != b && a != c && b != c);
+}
+
+#[tokio::test]
+async fn rekeying_under_the_same_version_reloads_with_the_new_key() {
+    let h = harness().await;
+    let answer = |key: &str| {
+        let mut answer =
+            Answer::file("v1", "h264-aac.mp4").with_encryption(clear_key_encryption(key));
+        answer.ttl_seconds = Some(0);
+        answer
+    };
+    h.mapper.state.always_full.store(true, Ordering::SeqCst);
+    h.mapper.state.set("drm", answer(KEY));
+    let before = version_in(&fetch(&h.app, "/hls/drm/master.m3u8").await.2);
+
+    h.mapper
+        .state
+        .set("drm", answer("ffeeddccbbaa99887766554433221100"));
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let after = version_in(&fetch(&h.app, "/hls/drm/master.m3u8").await.2);
+
+    assert_ne!(before, after, "new key, new URLs");
+    assert!(
+        metric(&h.state, "vod_asset_loads_total{outcome=\"ok\"} 2"),
+        "reloaded with the new key"
+    );
+}
+
+#[tokio::test]
+async fn a_rejected_encryption_answer_never_echoes_the_key() {
+    let h = harness().await;
+    *h.mapper.state.raw_body.lock().unwrap() = Some(format!(
+        r#"{{"asset_id":"drm","version":"v1","location":{{"type":"file","path":"h264-aac.mp4"}},"encryption":{{"scheme":"cbcs","keys":[{{"key_id":"{KEY_ID}","key":"{KEY}zz"}}]}}}}"#
+    ));
+
+    let (code, _, body) = fetch(&h.app, "/hls/drm/master.m3u8").await;
+
+    assert_eq!(code, StatusCode::BAD_GATEWAY);
+    assert!(!String::from_utf8_lossy(&body).contains(KEY));
+}
+
+#[tokio::test]
+async fn a_mistyped_encryption_answer_never_logs_the_key() {
+    let h = harness().await;
+    *h.mapper.state.raw_body.lock().unwrap() = Some(format!(
+        r#"{{"asset_id":"drm","version":"v1","location":{{"type":"file","path":"h264-aac.mp4"}},"encryption":{{"scheme":"cbcs","keys":"{KEY}"}}}}"#
+    ));
+
+    let (code, _, body) = fetch(&h.app, "/hls/drm/master.m3u8").await;
+
+    assert_eq!(code, StatusCode::BAD_GATEWAY);
+    assert!(!String::from_utf8_lossy(&body).contains(KEY));
+}
+
+#[tokio::test]
+async fn admin_status_reports_key_ids_never_keys() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "drm",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(clear_key_encryption(KEY)),
+    );
+    assert_eq!(status(&h.app, "/hls/drm/master.m3u8").await, StatusCode::OK);
+
+    let body = fetch(&h.app, "/admin/status").await.2;
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["cache"]["assets"][0]["encrypted"], true);
+    assert_eq!(
+        json["cache"]["assets"][0]["key_ids"][0],
+        "01234567-89ab-cdef-0123-456789abcdef"
+    );
+    assert!(!String::from_utf8_lossy(&body).contains(KEY));
+}

@@ -306,6 +306,7 @@ fn moved_track(track: &Track, range: (usize, usize), origin: u64, base: u64) -> 
 pub(crate) fn version_of<'a>(
     mapper_version: &str,
     clips: impl IntoIterator<Item = (&'a SourceIdentity, ClipWindow)>,
+    encryption: Option<&crate::cenc::Encryption>,
 ) -> String {
     use std::fmt::Write;
 
@@ -330,6 +331,10 @@ pub(crate) fn version_of<'a>(
             }
             None => hasher.update([0]),
         }
+    }
+    if let Some(encryption) = encryption {
+        hasher.update(b"cbcs");
+        hasher.update(encryption.fingerprint());
     }
     hasher
         .finalize()
@@ -711,32 +716,32 @@ mod tests {
         let index = parse("h264-aac.mp4");
         let other = parse("hevc-aac.mp4");
         let source = &index.source;
-        let base = version_of("v1", [(source, window(0, Some(2000)))]);
+        let base = version_of("v1", [(source, window(0, Some(2000)))], None);
 
         assert_eq!(base.len(), 16);
         assert_eq!(
             base,
-            version_of("v1", [(source, window(0, Some(2000)))]),
+            version_of("v1", [(source, window(0, Some(2000)))], None),
             "stable"
         );
         assert_ne!(
             base,
-            version_of("v1", [(source, window(0, Some(3000)))]),
+            version_of("v1", [(source, window(0, Some(3000)))], None),
             "the window"
         );
         assert_ne!(
             base,
-            version_of("v1", [(source, window(0, None))]),
+            version_of("v1", [(source, window(0, None))], None),
             "an open end"
         );
         assert_ne!(
             base,
-            version_of("v2", [(source, window(0, Some(2000)))]),
+            version_of("v2", [(source, window(0, Some(2000)))], None),
             "the mapper version"
         );
         assert_ne!(
             base,
-            version_of("v1", [(&other.source, window(0, Some(2000)))]),
+            version_of("v1", [(&other.source, window(0, Some(2000)))], None),
             "the content"
         );
         assert_ne!(
@@ -746,7 +751,8 @@ mod tests {
                 [
                     (source, window(0, Some(2000))),
                     (source, window(0, Some(2000)))
-                ]
+                ],
+                None
             ),
             "the clip count"
         );
