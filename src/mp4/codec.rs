@@ -15,7 +15,7 @@ use crate::media::CodecConfig;
 const VISUAL_ENTRY_HEAD: usize = 78;
 
 /// The width, height, and child boxes of a visual sample entry payload.
-fn visual_entry(entry: &[u8]) -> Result<(u16, u16, &[u8])> {
+pub(crate) fn visual_entry(entry: &[u8]) -> Result<(u16, u16, &[u8])> {
     let mut reader = Reader::new(entry);
     // Reserved (6), data reference index (2), and 16 bytes of pre-defined fields.
     reader.skip(24)?;

@@ -6,9 +6,12 @@
     reason = "TEMPORARY: wired in by later tasks of the DRM plan"
 )]
 
+mod avc;
+mod bits;
 mod cipher;
 mod keys;
 
+pub(crate) use avc::AvcParameters;
 pub(crate) use cipher::{Cipher, Pattern};
 pub(crate) use keys::{
     CLEARKEY, ContentKey, DrmSystem, Encryption, FAIRPLAY, KeyBytes, Keys, PLAYREADY, WIDEVINE,
