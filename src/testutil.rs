@@ -161,6 +161,9 @@ pub(crate) struct MapperState {
     pub(crate) delay_ms: AtomicU64,
     /// When set, a `304` is never sent, so every lookup gets a full answer (a fresh signature).
     pub(crate) always_full: AtomicBool,
+    /// The body `GET /v1/assets` answers with; `None` answers `404`, as a mapper that does not
+    /// implement the optional listing would.
+    pub(crate) listing: Mutex<Option<String>>,
 }
 
 impl MapperState {
@@ -191,6 +194,7 @@ impl MockMapper {
         let app = Router::new()
             .route("/v1/assets/{id}", get(mapper_asset))
             .route("/v1/health", get(mapper_health))
+            .route("/v1/assets", get(mapper_listing))
             .with_state(Arc::clone(&state));
         Self {
             address: serve(app).await,
@@ -208,6 +212,13 @@ async fn mapper_health(State(state): State<Arc<MapperState>>) -> StatusCode {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
         StatusCode::OK
+    }
+}
+
+async fn mapper_listing(State(state): State<Arc<MapperState>>) -> Response {
+    match state.listing.lock().unwrap().clone() {
+        Some(body) => ([(CONTENT_TYPE, "application/json")], body).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

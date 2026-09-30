@@ -2228,3 +2228,42 @@ async fn every_clip_of_a_sequence_decodes_from_the_served_hls_and_dash() {
     let frames = decode_each(&h.app, "/dash/seq/video/", &clips, &directory.join("dash")).await;
     assert_eq!(frames, [90, 90, 60]);
 }
+
+// ---------------------------------------------------------------------------------------------
+// The optional asset listing (`GET /v1/assets`)
+// ---------------------------------------------------------------------------------------------
+
+async fn known_assets(app: &Router) -> serde_json::Value {
+    let json: serde_json::Value =
+        serde_json::from_slice(&fetch(app, "/admin/status").await.2).unwrap();
+    json["resolver"]["known_assets"].clone()
+}
+
+#[tokio::test]
+async fn admin_status_lists_what_the_mapper_lists_sorted_and_checked() {
+    let h = harness().await;
+    *h.mapper.state.listing.lock().unwrap() =
+        Some(r#"{"assets":["preroll","movie","movie","../etc","","has space"]}"#.to_owned());
+
+    assert_eq!(
+        known_assets(&h.app).await,
+        serde_json::json!(["movie", "preroll"]),
+        "sorted, once each, and only IDs a request could name"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_listing_is_no_listing() {
+    let h = harness().await;
+    *h.mapper.state.listing.lock().unwrap() = Some(r#"{"assets":"movie"}"#.to_owned());
+
+    assert_eq!(known_assets(&h.app).await, serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn a_listing_is_capped_at_max_assets() {
+    let h = harness_with(|config| config.limits.max_assets = 2).await;
+    *h.mapper.state.listing.lock().unwrap() = Some(r#"{"assets":["c","b","a"]}"#.to_owned());
+
+    assert_eq!(known_assets(&h.app).await, serde_json::json!(["a", "b"]));
+}

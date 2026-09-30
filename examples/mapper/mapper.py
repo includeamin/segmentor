@@ -2,7 +2,7 @@
 """A minimal mapper for local development and demos.
 
 Implements just enough of the wire protocol in docs/mapper-api.md for segmentor to resolve
-assets against it: GET /v1/health and GET /v1/assets/{id}. It answers from catalog.json, read
+assets against it: GET /v1/health, GET /v1/assets/{id}, and the optional GET /v1/assets listing. It answers from catalog.json, read
 fresh on every request, so editing that file (or the mount in docker-compose.dev.yml) and waiting
 out the short TTL below is enough to see a change without restarting anything.
 
@@ -35,6 +35,23 @@ class Mapper(BaseHTTPRequestHandler):
         if self.path == "/v1/health":
             self.send_response(200)
             self.end_headers()
+            return
+
+        if self.path == "/v1/assets":
+            # The optional listing: lets the demo and control panel offer every catalog entry.
+            try:
+                ids = sorted(load_catalog())
+            except (OSError, json.JSONDecodeError) as error:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(f"catalog.json: {error}\n".encode())
+                return
+            body = json.dumps({"assets": ids}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
 
         prefix = "/v1/assets/"
