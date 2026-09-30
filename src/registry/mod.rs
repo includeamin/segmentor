@@ -25,7 +25,7 @@ use reqwest::Url;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, Semaphore};
 use tokio::time::{Duration, timeout};
 
-use crate::asset::PackagedAsset;
+use crate::asset::{Extras, PackagedAsset};
 use crate::composite::{self, ServedAsset};
 use crate::config::{Config, LimitsConfig, is_valid_asset_id};
 use crate::error::{Error, Result};
@@ -359,6 +359,7 @@ impl AssetRegistry {
                 media.tracks = asset.track_count(),
                 media.segments = asset.segment_count(),
                 media.clips = asset.clip_count(),
+                media.encrypted = asset.key_ids().is_some(),
                 index.bytes = asset.index_bytes(),
                 elapsed_ms = started.elapsed().as_millis(),
             );
@@ -556,6 +557,7 @@ impl AssetRegistry {
             let old_locations = old.locations();
             let new_locations = new.locations();
             let same_objects = old.version == new.version
+                && old.encryption == new.encryption
                 && old_locations.len() == new_locations.len()
                 && old_locations.iter().zip(&new_locations).all(
                     |((old_id, old_loc), (new_id, new_loc))| {
@@ -712,6 +714,7 @@ impl AssetRegistry {
                     media.tracks = asset.track_count(),
                     media.segments = asset.segment_count(),
                     media.clips = asset.clip_count(),
+                    media.encrypted = asset.key_ids().is_some(),
                     index.bytes = asset.index_bytes(),
                     elapsed_ms = started.elapsed().as_millis(),
                 );
@@ -751,9 +754,13 @@ impl AssetRegistry {
             )
             .await?;
         let subtitles = self.fetch_subtitles(&resolved.subtitles).await?;
-        let asset = PackagedAsset::load_with_subtitles(
+        let asset = PackagedAsset::load_with(
             source,
-            subtitles,
+            Extras {
+                subtitles,
+                version: None,
+                encryption: resolved.encryption.clone(),
+            },
             self.settings.segment_duration_ms,
             &self.limits,
         )
@@ -783,6 +790,7 @@ impl AssetRegistry {
         for rendition in resolved.renditions.clone() {
             let registry = Arc::clone(self);
             let asset_id = asset_id.to_owned();
+            let encryption = resolved.encryption.clone();
             tasks.spawn(async move {
                 let outcome: Result<(PackagedAsset, Arc<AssetRefresher>)> = async {
                     let refresher = Arc::new(AssetRefresher {
@@ -798,8 +806,12 @@ impl AssetRegistry {
                             Arc::clone(&refresher) as Arc<dyn LocationRefresher>,
                         )
                         .await?;
-                    let asset = PackagedAsset::load(
+                    let asset = PackagedAsset::load_with(
                         source,
+                        Extras {
+                            encryption,
+                            ..Extras::default()
+                        },
                         registry.settings.segment_duration_ms,
                         &registry.limits,
                     )
@@ -910,6 +922,7 @@ impl AssetRegistry {
         let version = resolved.version.clone();
         let segment_duration_ms = self.settings.segment_duration_ms;
         let limits = self.limits.clone();
+        let encryption = resolved.encryption.clone();
         let asset = tokio::task::spawn_blocking(move || {
             sequence::build(
                 &asset_id,
@@ -918,6 +931,7 @@ impl AssetRegistry {
                 &version,
                 segment_duration_ms,
                 &limits,
+                encryption.as_ref(),
             )
         })
         .await

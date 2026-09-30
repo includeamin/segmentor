@@ -58,9 +58,17 @@ pub(crate) struct Answer {
     pub(crate) ttl_seconds: Option<u64>,
     pub(crate) expires_at: Option<String>,
     pub(crate) subtitles: Vec<Value>,
+    /// Content keys and DRM systems (TDD 0009).
+    pub(crate) encryption: Option<Value>,
 }
 
 impl Answer {
+    /// Adds an `encryption` object to the answer.
+    pub(crate) fn with_encryption(mut self, encryption: Value) -> Self {
+        self.encryption = Some(encryption);
+        self
+    }
+
     /// Adds a `file` subtitle entry.
     pub(crate) fn with_subtitle(mut self, language: &str, path: &str) -> Self {
         self.subtitles.push(json!({
@@ -80,6 +88,7 @@ impl Answer {
             ttl_seconds: Some(300),
             expires_at: None,
             subtitles: Vec::new(),
+            encryption: None,
         }
     }
 
@@ -92,6 +101,7 @@ impl Answer {
             ttl_seconds: Some(300),
             expires_at: None,
             subtitles: Vec::new(),
+            encryption: None,
         }
     }
 
@@ -108,6 +118,7 @@ impl Answer {
             ttl_seconds: Some(300),
             expires_at: None,
             subtitles: Vec::new(),
+            encryption: None,
         }
     }
 
@@ -133,6 +144,7 @@ impl Answer {
             ttl_seconds: Some(300),
             expires_at: None,
             subtitles: Vec::new(),
+            encryption: None,
         }
     }
 }
@@ -279,6 +291,9 @@ async fn mapper_asset(
     }
     if !answer.subtitles.is_empty() {
         body["subtitles"] = json!(answer.subtitles);
+    }
+    if let Some(encryption) = answer.encryption {
+        body["encryption"] = encryption;
     }
     if let Some(ttl) = answer.ttl_seconds {
         body["ttl_seconds"] = json!(ttl);

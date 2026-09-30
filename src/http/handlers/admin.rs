@@ -49,6 +49,9 @@ struct CachedAssetJson {
     /// One for anything but a sequence of clips.
     clips: usize,
     duration_seconds: f64,
+    encrypted: bool,
+    /// Key IDs only; content keys never leave the process.
+    key_ids: Vec<String>,
 }
 
 impl From<RegistryStatus> for StatusResponse {
@@ -76,6 +79,8 @@ impl From<RegistryStatus> for StatusResponse {
                         subtitles: asset.subtitles,
                         clips: asset.clips,
                         duration_seconds: asset.duration_seconds,
+                        encrypted: asset.key_ids.is_some(),
+                        key_ids: asset.key_ids.unwrap_or_default(),
                     })
                     .collect(),
             },
@@ -122,6 +127,8 @@ mod tests {
                     subtitles: 1,
                     clips: 1,
                     duration_seconds: 120.5,
+                    encrypted: false,
+                    key_ids: Vec::new(),
                 }],
             },
         };

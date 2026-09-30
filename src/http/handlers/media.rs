@@ -22,6 +22,7 @@ use crate::http::state::AppState;
 use crate::http::stream::StreamJob;
 use crate::http::validators::{entity_tag, not_modified, not_modified_response};
 use crate::media::TrackKind;
+use crate::source::ByteRange;
 
 /// The `v` query parameter carried by every init and media URL.
 #[derive(Debug, Deserialize)]
@@ -73,9 +74,23 @@ pub(crate) async fn media_segment(
     let requested = parse_track(&track)?;
     let etag = entity_tag(asset.version(), &format!("{track}-segment-{segment_index}"));
     let kind = requested.key.kind;
-    serve_segment(&state, &method, &headers, asset, etag, kind, move |asset| {
-        asset.prepare_media_segment(requested.rendition.as_deref(), requested.key, segment_index)
-    })
+    let what = format!("{asset_id}/{track}/segments/{segment_index}");
+    serve_segment(
+        &state,
+        &method,
+        &headers,
+        asset,
+        etag,
+        kind,
+        what,
+        move |asset| {
+            asset.prepare_media_segment(
+                requested.rendition.as_deref(),
+                requested.key,
+                segment_index,
+            )
+        },
+    )
     .await
 }
 
@@ -147,6 +162,7 @@ pub(crate) async fn iframe_segment(
     let asset = state.asset(&asset_id).await?;
     version.require(asset.version())?;
     let etag = entity_tag(asset.version(), &format!("iframe-{frame_index}"));
+    let what = format!("{asset_id}/video/iframes/{frame_index}");
     serve_segment(
         &state,
         &method,
@@ -154,13 +170,62 @@ pub(crate) async fn iframe_segment(
         asset,
         etag,
         TrackKind::Video,
+        what,
         move |asset| asset.prepare_iframe(frame_index),
     )
     .await
 }
 
+/// Reads an encrypted track's samples, encrypts them off the async workers, and returns the
+/// finished fragment as a header-only segment, so ranges, `HEAD`, and streaming from here on are
+/// the clear path's (TDD 0009, "The encrypted segment path").
+async fn encrypt_segment(
+    state: &AppState,
+    source: &PackagedAsset,
+    ranges: Vec<ByteRange>,
+    pending: crate::cenc::PendingEncryption,
+    what: &str,
+) -> HttpResult<PreparedSegment> {
+    let started = Instant::now();
+    let permit = state.segment_permit().await?;
+    let mut payload = Vec::new();
+    for range in ranges {
+        match source.read_range(range).await {
+            Ok(bytes) => payload.extend_from_slice(&bytes),
+            Err(error) => {
+                state.metrics.encryption_failed();
+                return Err(error.into());
+            }
+        }
+    }
+    drop(permit);
+    let finished = tokio::task::spawn_blocking(move || pending.finish(payload))
+        .await
+        .map_err(|error| HttpError::internal(error.to_string()))?;
+    match finished {
+        Ok(bytes) => {
+            state.metrics.encrypted_segment(started.elapsed());
+            Ok(PreparedSegment {
+                content_length: bytes.len() as u64,
+                header: bytes,
+                ranges: Vec::new(),
+                encryption: None,
+            })
+        }
+        Err(error) => {
+            state.metrics.encryption_failed();
+            tracing::error!(event = "segment_encryption_failed", segment = what, %error);
+            Err(error.into())
+        }
+    }
+}
+
 /// Answers a request for a generated fragment: conditional, ranged, and streamed from the source
 /// through a bounded queue.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one call shape for both segment routes; a parameter struct would only rename them"
+)]
 async fn serve_segment(
     state: &AppState,
     method: &Method,
@@ -168,6 +233,7 @@ async fn serve_segment(
     asset: Arc<ServedAsset>,
     etag: HeaderValue,
     kind: TrackKind,
+    what: String,
     prepare: impl FnOnce(&ServedAsset) -> crate::error::Result<(Arc<PackagedAsset>, PreparedSegment)>
     + Send
     + 'static,
@@ -179,11 +245,15 @@ async fn serve_segment(
     // Header generation is CPU work proportional to the segment's sample count, so it runs on
     // the blocking pool rather than an async worker. `source` is the specific underlying asset
     // (a composite has several) whose bytes the prepared fragment's offsets refer to.
-    let (source, prepared) = {
+    let (source, mut prepared) = {
         let asset = Arc::clone(&asset);
         tokio::task::spawn_blocking(move || prepare(&asset))
             .await
             .map_err(|error| HttpError::internal(error.to_string()))??
+    };
+    let prepared = match prepared.encryption.take() {
+        None => prepared,
+        Some(pending) => encrypt_segment(state, &source, prepared.ranges, *pending, &what).await?,
     };
     let total_length = prepared.content_length;
     let requested_interval = match requested_range(headers, total_length, &etag) {

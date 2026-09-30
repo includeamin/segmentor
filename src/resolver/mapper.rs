@@ -3,6 +3,7 @@
 //! `GET {base_url}/v1/assets/{asset_id}` returns a JSON document naming the media's location and
 //! version. Everything in the answer is validated before it is trusted.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, CACHE_CONTROL, IF_NONE_MATCH, RETRY_AFTER};
@@ -58,6 +59,9 @@ struct Wire {
     clips: Vec<WireClip>,
     #[serde(default)]
     subtitles: Vec<WireSubtitle>,
+    /// Content keys and DRM systems (TDD 0009). Validated before the answer is used.
+    #[serde(default)]
+    encryption: Option<crate::cenc::WireEncryption>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -239,8 +243,14 @@ impl HttpResolver {
             StatusCode::OK => {
                 let max_age = max_age(&response);
                 let body = self.read_body(response).await?;
+                // Only the location is reported: serde's type-mismatch messages can echo a value
+                // from the body, and the body may hold content keys.
                 let wire: Wire = serde_json::from_slice(&body).map_err(|error| {
-                    ResolveError::Rejected(format!("mapper answer is not valid: {error}"))
+                    ResolveError::Rejected(format!(
+                        "mapper answer is not valid JSON of the expected shape (line {}, column {})",
+                        error.line(),
+                        error.column()
+                    ))
                 })?;
                 Ok(Resolution::Resolved(
                     self.interpret(asset_id, wire, max_age)?,
@@ -495,6 +505,16 @@ impl HttpResolver {
             let refresh_after = remaining.saturating_sub(margin).max(remaining / 2);
             valid_until = valid_until.min(now + refresh_after);
         }
+        let encryption = wire
+            .encryption
+            .as_ref()
+            .map(|encryption| {
+                encryption
+                    .validate()
+                    .map(Arc::new)
+                    .map_err(ResolveError::Rejected)
+            })
+            .transpose()?;
         Ok(ResolvedAsset {
             location,
             renditions,
@@ -503,6 +523,7 @@ impl HttpResolver {
             version: wire.version,
             valid_until,
             hard_expiry,
+            encryption,
         })
     }
 }

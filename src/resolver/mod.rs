@@ -114,6 +114,8 @@ pub(crate) struct ResolvedAsset {
     /// After this instant the location itself is dead (for example a signed URL) and must never
     /// be used, even as a stale fallback.
     pub(crate) hard_expiry: Option<Instant>,
+    /// Content keys and DRM systems for the whole asset (TDD 0009); `None` serves it clear.
+    pub(crate) encryption: Option<std::sync::Arc<crate::cenc::Encryption>>,
 }
 
 impl ResolvedAsset {
@@ -168,6 +170,10 @@ pub(crate) enum ResolveError {
 }
 
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one short-lived value per lookup; boxing would only add an allocation"
+)]
 pub(crate) enum Resolution {
     /// A new or changed answer.
     Resolved(ResolvedAsset),

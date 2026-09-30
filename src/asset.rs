@@ -14,6 +14,15 @@ use crate::subtitle::{self, Subtitle};
 use crate::{fmp4, mp4, segment};
 use std::sync::Arc;
 
+/// What a load adds to the file itself: sidecar subtitles, a URL version chosen by the caller (a
+/// clip's), and content encryption.
+#[derive(Debug, Default)]
+pub(crate) struct Extras {
+    pub(crate) subtitles: Vec<Subtitle>,
+    pub(crate) version: Option<String>,
+    pub(crate) encryption: Option<Arc<crate::cenc::Encryption>>,
+}
+
 #[derive(Debug)]
 pub(crate) struct PackagedAsset {
     source: MediaSourceKind,
@@ -24,6 +33,7 @@ pub(crate) struct PackagedAsset {
     version: String,
     rendered: RenderedManifests,
     subtitles: Vec<Subtitle>,
+    protection: Option<crate::cenc::AssetProtection>,
 }
 
 /// Playlists and manifests rendered once at load so requests never walk sample tables.
@@ -56,14 +66,15 @@ impl PackagedAsset {
         segment_duration_ms: u64,
         limits: &LimitsConfig,
     ) -> Result<Self> {
-        Self::load_with_subtitles(source, Vec::new(), segment_duration_ms, limits).await
+        Self::load_with(source, Extras::default(), segment_duration_ms, limits).await
     }
 
-    /// Like [`Self::load`], with sidecar subtitle files already fetched. Each is validated and
-    /// moved onto the asset's timeline; one bad file fails the whole asset.
-    pub(crate) async fn load_with_subtitles(
+    /// Like [`Self::load`], with sidecar subtitle files already fetched and, optionally, content
+    /// encryption. Each subtitle is validated and moved onto the asset's timeline; one bad file
+    /// fails the whole asset.
+    pub(crate) async fn load_with(
         source: MediaSourceKind,
-        subtitles: Vec<Subtitle>,
+        extras: Extras,
         segment_duration_ms: u64,
         limits: &LimitsConfig,
     ) -> Result<Self> {
@@ -75,10 +86,9 @@ impl PackagedAsset {
                 source,
                 index,
                 &metadata,
-                subtitles,
                 segment_duration_ms,
                 &limits,
-                None,
+                extras,
             )
         })
         .await
@@ -86,31 +96,52 @@ impl PackagedAsset {
     }
 
     /// Plans, writes init segments, and renders playlists for an already parsed index: a whole
-    /// file's, or one trimmed to a clip (see `clip::trim`). `version` replaces the URL version
-    /// derived from the content, for a clip whose version must also cover its window.
+    /// file's, or one trimmed to a clip (see `clip::trim`). `extras.version` replaces the URL
+    /// version derived from the content, for a clip whose version must also cover its window.
     pub(crate) fn assemble(
         source: MediaSourceKind,
         index: MediaIndex,
         metadata: &Metadata,
-        subtitles: Vec<Subtitle>,
         segment_duration_ms: u64,
         limits: &LimitsConfig,
-        version: Option<String>,
+        extras: Extras,
     ) -> Result<Self> {
+        let Extras {
+            subtitles,
+            version,
+            encryption,
+        } = extras;
         let plan = segment::plan(&index, segment_duration_ms, limits)?;
         let subtitles = prepare_subtitles(&index, subtitles)?;
+        let protection = encryption
+            .map(|encryption| {
+                crate::cenc::AssetProtection::new(encryption, &index.tracks, metadata)
+            })
+            .transpose()?;
         let init_segments = index
             .tracks
             .iter()
             .map(|track| {
-                fmp4::write_init_segment(metadata, track.id)
-                    .map(Bytes::from)
-                    .map(|bytes| (track.key, bytes))
+                let bytes = match protection
+                    .as_ref()
+                    .and_then(|p| p.track(track.id).map(|t| (p, t)))
+                {
+                    Some((asset, track_protection)) => fmp4::write_protected_init_segment(
+                        metadata,
+                        track.id,
+                        &track_protection.init(&asset.pssh),
+                    ),
+                    None => fmp4::write_init_segment(metadata, track.id),
+                }?;
+                Ok((track.key, Bytes::from(bytes)))
             })
             .collect::<Result<HashMap<_, _>>>()?;
-        let version = version.unwrap_or_else(|| version_of(&index, &subtitles));
+        let encryption_ref = protection.as_ref().map(|p| p.encryption.as_ref());
+        let version = version.unwrap_or_else(|| version_of(&index, &subtitles, encryption_ref));
         let rendered = RenderedManifests::render(
-            Presentation::new(&index.tracks, &plan, &version).with_subtitles(&subtitles),
+            Presentation::new(&index.tracks, &plan, &version)
+                .with_subtitles(&subtitles)
+                .with_encryption(encryption_ref),
         )?;
         Ok(Self {
             source,
@@ -121,6 +152,7 @@ impl PackagedAsset {
             version,
             rendered,
             subtitles,
+            protection,
         })
     }
 
@@ -132,6 +164,35 @@ impl PackagedAsset {
     pub(crate) fn presentation(&self) -> Presentation<'_> {
         Presentation::new(&self.index.tracks, &self.plan, &self.version)
             .with_subtitles(&self.subtitles)
+            .with_encryption(self.encryption())
+    }
+
+    /// The content keys and DRM systems this asset is encrypted with, if any.
+    pub(crate) fn encryption(&self) -> Option<&crate::cenc::Encryption> {
+        self.protection
+            .as_ref()
+            .map(|protection| protection.encryption.as_ref())
+    }
+
+    /// Marks an encrypted track's segment as still to be encrypted once its bytes are read.
+    fn with_encryption(
+        &self,
+        track: &Track,
+        segment: TrackSegment,
+        sequence_number: u32,
+        mut prepared: fmp4::PreparedSegment,
+    ) -> fmp4::PreparedSegment {
+        if let Some(protection) = self.protection.as_ref().and_then(|p| p.track(track.id)) {
+            prepared.encryption = Some(Box::new(crate::cenc::PendingEncryption {
+                track_id: track.id,
+                kind: track.kind,
+                samples: track.samples[segment.first_sample..segment.end_sample].to_vec(),
+                decode_time: segment.decode_time,
+                sequence_number,
+                protection: Arc::clone(protection),
+            }));
+        }
+        prepared
     }
 
     pub(crate) fn init_segment(&self, key: TrackKey) -> Result<Bytes> {
@@ -188,7 +249,8 @@ impl PackagedAsset {
         let sequence_number = frame_index
             .checked_add(1)
             .ok_or_else(|| Error::InvalidMedia("sequence number overflow".to_owned()))?;
-        fmp4::prepare_media_segment(track, segment, sequence_number, &self.limits)
+        let prepared = fmp4::prepare_media_segment(track, segment, sequence_number, &self.limits)?;
+        Ok(self.with_encryption(track, segment, sequence_number, prepared))
     }
 
     /// The HLS playlist that lists one subtitle file.
@@ -248,7 +310,9 @@ impl PackagedAsset {
             .copied()
             .ok_or_else(|| Error::InvalidMedia("segment is missing a track".to_owned()))?;
 
-        fmp4::prepare_media_segment(track, track_segment, sequence_number, &self.limits)
+        let prepared =
+            fmp4::prepare_media_segment(track, track_segment, sequence_number, &self.limits)?;
+        Ok(self.with_encryption(track, track_segment, sequence_number, prepared))
     }
 
     /// Logs what packaging left out or adjusted, so an operator can see why a file behaves as it
@@ -383,7 +447,11 @@ fn prepare_subtitles(index: &MediaIndex, subtitles: Vec<Subtitle>) -> Result<Vec
 /// The `v` value in media URLs: a hash of everything the index was built from (`moov`, and every
 /// `moof` of a fragmented file), [`FORMAT_REVISION`], and any subtitle files, so changing a
 /// caption gives new URLs.
-fn version_of(index: &MediaIndex, subtitles: &[Subtitle]) -> String {
+fn version_of(
+    index: &MediaIndex,
+    subtitles: &[Subtitle],
+    encryption: Option<&crate::cenc::Encryption>,
+) -> String {
     use std::fmt::Write;
 
     use sha2::{Digest, Sha256};
@@ -407,6 +475,11 @@ fn version_of(index: &MediaIndex, subtitles: &[Subtitle]) -> String {
             hasher.update((part.len() as u64).to_be_bytes());
             hasher.update(part);
         }
+    }
+    // Nothing is added when clear, so a clear asset keeps the version it always had.
+    if let Some(encryption) = encryption {
+        hasher.update(b"cbcs");
+        hasher.update(encryption.fingerprint());
     }
     hasher
         .finalize()
@@ -445,7 +518,7 @@ mod tests {
         assert!(asset.version().bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_ne!(asset.version(), moov_only);
         assert_eq!(
-            version_of(&asset.index, &[]),
+            version_of(&asset.index, &[], None),
             asset.version(),
             "and it is stable"
         );
@@ -495,10 +568,12 @@ mod tests {
             source,
             index,
             &metadata,
-            Vec::new(),
             1000,
             &limits,
-            Some("feedfacefeedface".to_owned()),
+            Extras {
+                version: Some("feedfacefeedface".to_owned()),
+                ..Extras::default()
+            },
         )
         .unwrap();
 

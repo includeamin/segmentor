@@ -20,6 +20,8 @@ pub(crate) struct CachedAsset {
     pub(crate) subtitles: usize,
     pub(crate) clips: usize,
     pub(crate) duration_seconds: f64,
+    /// The key IDs (as UUIDs) of an encrypted asset; never the keys.
+    pub(crate) key_ids: Option<Vec<String>>,
 }
 
 type Key = (String, String);
@@ -140,6 +142,7 @@ impl LoadedCache {
                         subtitles: entry.asset.subtitle_count(),
                         clips: entry.asset.clip_count(),
                         duration_seconds: entry.asset.duration_seconds(),
+                        key_ids: entry.asset.key_ids(),
                     },
                 )
             })

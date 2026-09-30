@@ -32,6 +32,9 @@ pub(crate) struct Metrics {
     loads_ok: AtomicU64,
     loads_failed: AtomicU64,
     load_micros: AtomicU64,
+    encrypted_segments: AtomicU64,
+    encryption_micros: AtomicU64,
+    encryption_failures: AtomicU64,
     coalesced_waiters: AtomicU64,
     location_rotations: AtomicU64,
     loaded_assets: AtomicU64,
@@ -68,6 +71,9 @@ impl Metrics {
             loads_ok: AtomicU64::new(0),
             loads_failed: AtomicU64::new(0),
             load_micros: AtomicU64::new(0),
+            encrypted_segments: AtomicU64::new(0),
+            encryption_micros: AtomicU64::new(0),
+            encryption_failures: AtomicU64::new(0),
             coalesced_waiters: AtomicU64::new(0),
             location_rotations: AtomicU64::new(0),
             loaded_assets: AtomicU64::new(0),
@@ -185,6 +191,18 @@ impl Metrics {
 
     pub(crate) fn resolution_event(&self, event: CacheEvent) {
         self.cache_events[event as usize].fetch_add(1, Relaxed);
+    }
+
+    pub(crate) fn encrypted_segment(&self, elapsed: Duration) {
+        self.encrypted_segments.fetch_add(1, Relaxed);
+        self.encryption_micros.fetch_add(
+            u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+            Relaxed,
+        );
+    }
+
+    pub(crate) fn encryption_failed(&self) {
+        self.encryption_failures.fetch_add(1, Relaxed);
     }
 
     pub(crate) fn asset_load(&self, succeeded: bool, elapsed: Duration) {
@@ -398,10 +416,13 @@ impl Metrics {
         }
         let _ = writeln!(
             out,
-            "# HELP vod_asset_loads_total Asset loads by outcome.\n# TYPE vod_asset_loads_total counter\nvod_asset_loads_total{{outcome=\"ok\"}} {}\nvod_asset_loads_total{{outcome=\"failed\"}} {}\n# HELP vod_asset_load_seconds_total Time spent loading assets.\n# TYPE vod_asset_load_seconds_total counter\nvod_asset_load_seconds_total {}\n# HELP vod_registry_coalesced_waiters_total Requests that shared another request's resolve or load.\n# TYPE vod_registry_coalesced_waiters_total counter\nvod_registry_coalesced_waiters_total {}\n# HELP vod_location_rotations_total Signed URLs replaced in place on loaded assets.\n# TYPE vod_location_rotations_total counter\nvod_location_rotations_total {}\n# HELP vod_loaded_assets Assets currently held in memory.\n# TYPE vod_loaded_assets gauge\nvod_loaded_assets {}\n# HELP vod_loaded_bytes Estimated bytes held by loaded assets.\n# TYPE vod_loaded_bytes gauge\nvod_loaded_bytes {}",
+            "# HELP vod_asset_loads_total Asset loads by outcome.\n# TYPE vod_asset_loads_total counter\nvod_asset_loads_total{{outcome=\"ok\"}} {}\nvod_asset_loads_total{{outcome=\"failed\"}} {}\n# HELP vod_asset_load_seconds_total Time spent loading assets.\n# TYPE vod_asset_load_seconds_total counter\nvod_asset_load_seconds_total {}\n# HELP vod_encrypted_segments_total Segments encrypted on request.\n# TYPE vod_encrypted_segments_total counter\nvod_encrypted_segments_total {}\n# HELP vod_encryption_seconds_total Time spent reading and encrypting segments.\n# TYPE vod_encryption_seconds_total counter\nvod_encryption_seconds_total {}\n# HELP vod_encryption_failures_total Segments that could not be encrypted.\n# TYPE vod_encryption_failures_total counter\nvod_encryption_failures_total {}\n# HELP vod_registry_coalesced_waiters_total Requests that shared another request's resolve or load.\n# TYPE vod_registry_coalesced_waiters_total counter\nvod_registry_coalesced_waiters_total {}\n# HELP vod_location_rotations_total Signed URLs replaced in place on loaded assets.\n# TYPE vod_location_rotations_total counter\nvod_location_rotations_total {}\n# HELP vod_loaded_assets Assets currently held in memory.\n# TYPE vod_loaded_assets gauge\nvod_loaded_assets {}\n# HELP vod_loaded_bytes Estimated bytes held by loaded assets.\n# TYPE vod_loaded_bytes gauge\nvod_loaded_bytes {}",
             self.loads_ok.load(Relaxed),
             self.loads_failed.load(Relaxed),
             Duration::from_micros(self.load_micros.load(Relaxed)).as_secs_f64(),
+            self.encrypted_segments.load(Relaxed),
+            Duration::from_micros(self.encryption_micros.load(Relaxed)).as_secs_f64(),
+            self.encryption_failures.load(Relaxed),
             self.coalesced_waiters.load(Relaxed),
             self.location_rotations.load(Relaxed),
             self.loaded_assets.load(Relaxed),
