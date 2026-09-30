@@ -28,3 +28,6 @@ target
 /tests/fixtures/generated/
 
 **__pycache__/
+# Local planning notes from the superpowers workflow; never committed.
+docs/superpowers/
+.superpowers/
