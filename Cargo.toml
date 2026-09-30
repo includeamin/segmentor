@@ -16,6 +16,7 @@ categories = ["multimedia::video", "web-programming::http-server"]
 exclude = ["/.github", "/docs", "/demo", "/fuzz", "/tests/fixtures", "/Dockerfile", "/.dockerignore", "/book.toml", "/Makefile"]
 
 [dependencies]
+aes = "0.9"
 axum = "0.8"
 base64 = "0.23"
 bytes = "1"
