@@ -2437,7 +2437,7 @@ async fn a_rejected_encryption_answer_never_echoes_the_key() {
 }
 
 #[tokio::test]
-async fn a_mistyped_encryption_answer_never_logs_the_key() {
+async fn a_mistyped_encryption_answer_is_a_bad_gateway() {
     let h = harness().await;
     *h.mapper.state.raw_body.lock().unwrap() = Some(format!(
         r#"{{"asset_id":"drm","version":"v1","location":{{"type":"file","path":"h264-aac.mp4"}},"encryption":{{"scheme":"cbcs","keys":"{KEY}"}}}}"#

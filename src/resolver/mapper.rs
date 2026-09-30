@@ -243,15 +243,7 @@ impl HttpResolver {
             StatusCode::OK => {
                 let max_age = max_age(&response);
                 let body = self.read_body(response).await?;
-                // Only the location is reported: serde's type-mismatch messages can echo a value
-                // from the body, and the body may hold content keys.
-                let wire: Wire = serde_json::from_slice(&body).map_err(|error| {
-                    ResolveError::Rejected(format!(
-                        "mapper answer is not valid JSON of the expected shape (line {}, column {})",
-                        error.line(),
-                        error.column()
-                    ))
-                })?;
+                let wire = parse_answer(&body)?;
                 Ok(Resolution::Resolved(
                     self.interpret(asset_id, wire, max_age)?,
                 ))
@@ -558,4 +550,36 @@ fn is_rendition_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+/// Parses a `200` body. Only the location of a failure is reported: serde's type-mismatch
+/// messages can echo a value from the body, and the body may hold content keys.
+fn parse_answer(body: &[u8]) -> Result<Wire, ResolveError> {
+    serde_json::from_slice(body).map_err(|error| {
+        ResolveError::Rejected(format!(
+            "mapper answer is not valid JSON of the expected shape (line {}, column {})",
+            error.line(),
+            error.column()
+        ))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_mistyped_answer_reports_its_position_but_never_a_value() {
+        let key = "00112233445566778899aabbccddeeff";
+        let body = format!(
+            r#"{{"asset_id":"a","version":"v","encryption":{{"scheme":"cbcs","keys":"{key}"}}}}"#
+        );
+
+        let Err(ResolveError::Rejected(message)) = parse_answer(body.as_bytes()) else {
+            panic!("a string where an array belongs must be rejected");
+        };
+
+        assert!(!message.contains(key), "{message}");
+        assert!(message.contains("line"), "{message}");
+    }
 }
