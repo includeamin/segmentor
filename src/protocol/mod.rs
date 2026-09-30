@@ -10,4 +10,4 @@ mod presentation;
 pub(crate) use hls::{AdaptiveAudio, AdaptiveVideo};
 #[cfg(test)]
 pub(crate) use presentation::fixtures;
-pub(crate) use presentation::{Bandwidth, Presentation};
+pub(crate) use presentation::{Bandwidth, Presentation, SequenceClip};

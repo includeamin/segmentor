@@ -116,6 +116,15 @@ impl<'a> Presentation<'a> {
     }
 }
 
+/// One clip of a sequence, as the renderers see it: its own view, the global number of its first
+/// segment, and where it starts on the sequence's timeline.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SequenceClip<'a> {
+    pub(crate) presentation: Presentation<'a>,
+    pub(crate) first_segment: u32,
+    pub(crate) start_nanos: u64,
+}
+
 fn payload_bytes(samples: &[Sample]) -> Result<u64> {
     samples.iter().try_fold(0u64, |total, sample| {
         total
