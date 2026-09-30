@@ -26,16 +26,21 @@ impl Addressing {
     };
 }
 
-fn mpd_open(duration_seconds: &str) -> String {
+fn mpd_open(duration_seconds: &str, encrypted: bool) -> String {
+    let namespaces = if encrypted {
+        " xmlns:cenc=\"urn:mpeg:cenc:2013\" xmlns:dashif=\"https://dashif.org/CPS\""
+    } else {
+        ""
+    };
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" type=\"static\" mediaPresentationDuration=\"PT{duration_seconds}S\" minBufferTime=\"PT1.5S\" profiles=\"urn:mpeg:dash:profile:isoff-main:2011\">\n"
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\"{namespaces} type=\"static\" mediaPresentationDuration=\"PT{duration_seconds}S\" minBufferTime=\"PT1.5S\" profiles=\"urn:mpeg:dash:profile:isoff-main:2011\">\n"
     )
 }
 
 pub(crate) fn manifest(presentation: Presentation<'_>) -> Result<String> {
     let duration = presentation_duration(presentation)?;
     let version = presentation.version();
-    let mut manifest = mpd_open(&duration);
+    let mut manifest = mpd_open(&duration, presentation.encryption().is_some());
     manifest.push_str("  <Period start=\"PT0S\">\n");
     if let Some(video) = presentation.video() {
         write_video_adaptation(
@@ -85,6 +90,12 @@ pub(crate) fn write_video_adaptation(
         "    <AdaptationSet contentType=\"video\" segmentAlignment=\"true\" startWithSAP=\"1\">"
     )
     .expect("writing to a String cannot fail");
+    if let Some(encryption) = presentation.encryption() {
+        manifest.push_str(&crate::cenc::dash_content_protection(
+            encryption,
+            encryption.key_for(track.kind),
+        ));
+    }
     writeln!(manifest, "      <Representation id=\"{id}\" bandwidth=\"{}\" codecs=\"{codec}\" mimeType=\"video/mp4\" width=\"{width}\" height=\"{height}\">", presentation.bandwidth(track)?.peak)
         .expect("writing to a String cannot fail");
     write_segment_template(manifest, presentation, track, version, addressing);
@@ -114,6 +125,12 @@ pub(crate) fn write_audio_adaptation(
         "    <AdaptationSet contentType=\"audio\"{language} segmentAlignment=\"true\">"
     )
     .expect("writing to a String cannot fail");
+    if let Some(encryption) = presentation.encryption() {
+        manifest.push_str(&crate::cenc::dash_content_protection(
+            encryption,
+            encryption.key_for(track.kind),
+        ));
+    }
     writeln!(manifest, "      <Representation id=\"{id}\" bandwidth=\"{}\" codecs=\"{codec}\" mimeType=\"audio/mp4\" audioSamplingRate=\"{sample_rate}\">", presentation.bandwidth(track)?.peak)
         .expect("writing to a String cannot fail");
     writeln!(manifest, "        <AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"{channels}\" />")
@@ -125,10 +142,10 @@ pub(crate) fn write_audio_adaptation(
 
 /// A static MPD header and footer around adaptation sets the caller has already written, for an
 /// adaptive asset whose renditions come from several `Presentation`s.
-pub(crate) fn wrap_manifest(duration_seconds: &str, body: &str) -> String {
+pub(crate) fn wrap_manifest(duration_seconds: &str, body: &str, encrypted: bool) -> String {
     format!(
         "{}  <Period start=\"PT0S\">\n{body}  </Period>\n</MPD>\n",
-        mpd_open(duration_seconds)
+        mpd_open(duration_seconds, encrypted)
     )
 }
 
@@ -215,7 +232,11 @@ pub(crate) fn sequence_manifest(
     total_nanos: u64,
     version: &str,
 ) -> Result<String> {
-    let mut manifest = mpd_open(&nanos_as_seconds(total_nanos));
+    let encrypted = clips
+        .first()
+        .and_then(|clip| clip.presentation.encryption())
+        .is_some();
+    let mut manifest = mpd_open(&nanos_as_seconds(total_nanos), encrypted);
     for (position, clip) in clips.iter().enumerate() {
         writeln!(
             manifest,
@@ -294,6 +315,31 @@ fn presentation_duration(presentation: Presentation<'_>) -> Result<String> {
 mod tests {
     use super::*;
     use crate::protocol::fixtures::Loaded;
+
+    #[test]
+    fn an_encrypted_manifest_declares_its_namespaces_and_protection() {
+        let loaded = Loaded::h264_aac();
+        let encryption = crate::cenc::tests_support::sample_encryption();
+
+        let manifest = manifest(loaded.presentation().with_encryption(Some(&encryption))).unwrap();
+
+        assert!(
+            manifest.contains(
+                r#"xmlns:cenc="urn:mpeg:cenc:2013" xmlns:dashif="https://dashif.org/CPS""#
+            ),
+            "{manifest}"
+        );
+        assert_eq!(
+            manifest.matches(r#"value="cbcs""#).count(),
+            2,
+            "one per adaptation set: {manifest}"
+        );
+        assert!(
+            !self::manifest(loaded.presentation())
+                .unwrap()
+                .contains("ContentProtection")
+        );
+    }
 
     #[test]
     fn renders_static_manifest_with_both_representations() {

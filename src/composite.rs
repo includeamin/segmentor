@@ -710,7 +710,7 @@ fn version_of(
 }
 
 fn presentation_for<'a>(asset: &'a PackagedAsset, version: &'a str) -> Presentation<'a> {
-    Presentation::new(&asset.index.tracks, &asset.plan, version)
+    Presentation::new(&asset.index.tracks, &asset.plan, version).with_encryption(None)
 }
 
 /// Which underlying asset supplies one member of the shared audio group.
@@ -840,6 +840,7 @@ fn render(
         &adaptive_audio,
         subtitles,
         iframe_stream_line.as_deref(),
+        None,
     )?);
 
     let hls_video = video
@@ -873,7 +874,7 @@ fn render(
         version,
     )?;
     let duration = dash::track_duration(video_views[0].2)?;
-    let dash = Bytes::from(dash::wrap_manifest(&duration, &dash_body));
+    let dash = Bytes::from(dash::wrap_manifest(&duration, &dash_body, false));
 
     Ok(CompositeManifests {
         hls_master,
