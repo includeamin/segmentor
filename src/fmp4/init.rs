@@ -41,6 +41,29 @@ pub(crate) fn write_init_segment(metadata: &Metadata, track_id: u32) -> Result<V
     Ok(output)
 }
 
+/// The first sample entry of `track_id`: its type and payload, as the file has them.
+#[allow(dead_code, reason = "TEMPORARY: used by the DRM plan's later tasks")]
+pub(crate) fn sample_entry(metadata: &Metadata, track_id: u32) -> Result<([u8; 4], Vec<u8>)> {
+    let moov = box_payload(metadata.moov_bytes(), 0)?;
+    let track = child_boxes(moov.payload)?
+        .into_iter()
+        .filter(|child| child.name == *b"trak")
+        .find(|track| track_id_of(track).is_ok_and(|id| id == track_id))
+        .ok_or_else(|| Error::InvalidMedia(format!("track {track_id} does not exist")))?;
+    let media = required_child(track.payload, *b"mdia")?;
+    let info = required_child(media.payload, *b"minf")?;
+    let table = required_child(info.payload, *b"stbl")?;
+    let description = required_child(table.payload, *b"stsd")?;
+    let mut reader = Reader::new(description.payload);
+    reader.full_box()?;
+    reader.skip(4)?;
+    let entry = child_boxes(reader.rest())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::InvalidMedia("stsd entry is missing".to_owned()))?;
+    Ok((entry.name, entry.payload.to_vec()))
+}
+
 fn track_id_of(track: &RawBox<'_>) -> Result<u32> {
     let mut reader = Reader::new(required_child(track.payload, *b"tkhd")?.payload);
     let version = reader.full_box()?;
