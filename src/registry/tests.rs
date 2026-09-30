@@ -2090,7 +2090,7 @@ async fn a_rotated_signature_reaches_every_clip_cut_from_that_file() {
 }
 
 /// Reassembles each clip from its init segment and media segments under `base`, and returns how
-/// many video frames FFmpeg decodes from each, failing on any decode error.
+/// many video frames `ffmpeg` decodes from each, failing on any decode error.
 async fn decode_each(
     app: &Router,
     base: &str,
@@ -2133,7 +2133,7 @@ async fn decode_each(
     counts
 }
 
-/// FFmpeg cannot judge a mixed sequence as one stream: its HLS demuxer keeps the first init
+/// `ffmpeg` cannot judge a mixed sequence as one stream: its HLS demuxer keeps the first init
 /// segment's decoder settings across an `EXT-X-MAP` change, and its DASH demuxer plays a single
 /// Period (TDD 0008, "Testing"). So each clip is followed from the served playlist and manifest to
 /// its own init and media segments, reassembled, and decoded on its own.
