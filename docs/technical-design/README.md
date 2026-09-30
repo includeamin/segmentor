@@ -13,7 +13,7 @@ Technical design documents explain a proposed subsystem before or during impleme
 | [0005](0005-fragmented-mp4-input.md) | Fragmented MP4 input | Accepted; implemented |
 | [0006](0006-trick-play-subtitles-and-renditions.md) | Trick play, subtitles, and adaptive renditions | Accepted; implemented |
 | [0007](0007-viewer-authorization.md) | Viewer authorization | Draft |
-| [0008](0008-clipping-and-concatenation.md) | Clipping and concatenation | Draft |
+| [0008](0008-clipping-and-concatenation.md) | Clipping and concatenation | Accepted; implemented |
 
 ## Workflow
 

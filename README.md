@@ -37,8 +37,8 @@ proportional to the segment asked for, not to the length of the video.
 ## What it does not do
 
 - **No transcoding.** The codecs must already suit the protocol, and there is no bitrate ladder
-  unless you supply the renditions. Adaptive renditions are
-  [planned](docs/technical-design/0006-trick-play-subtitles-and-renditions.md).
+  unless you supply the renditions ([mapper API](docs/mapper-api.md#renditions)). Trimming and
+  joining files is done on keyframes, not by re-encoding ([clips](docs/mapper-api.md#clips)).
 - **No DRM, no live streaming, no MPEG-TS output.** Segments are fragmented MP4. DRM is planned
   after the features above.
 - **No authentication.** Run it behind a reverse proxy or CDN that provides it; see

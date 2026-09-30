@@ -1,6 +1,6 @@
 # TDD 0008: Clipping and concatenation
 
-- Status: Draft
+- Status: Accepted; implemented
 - Created: 2026-09-30
 - Updated: 2026-09-30
 - Related ADRs: [ADR 0001](../adr/0001-use-fragmented-mp4-for-media-segments.md) (fragmented MP4 segments)

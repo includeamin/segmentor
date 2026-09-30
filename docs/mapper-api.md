@@ -59,7 +59,8 @@ A file on an HTTP origin:
 | `location.path` | For `file` | Relative to `storage.media_root`; no leading `/`, no `.` or `..` components, no NUL, at most 4096 bytes |
 | `location.url` | For `http` | See [Remote locations](#remote-locations) |
 | `subtitles` | No | Sidecar WebVTT files; see [Subtitles](#subtitles) |
-| `renditions` | Instead of `location` | Several files served as one adaptive asset; see [Renditions](#renditions). Exactly one of `location` or `renditions` must be set |
+| `renditions` | Instead of `location` | Several files served as one adaptive asset; see [Renditions](#renditions). Exactly one of `location`, `renditions`, or `clips` must be set |
+| `clips` | Instead of `location` | One file trimmed, or several played back to back; see [Clips](#clips) |
 
 ### `304 Not Modified`
 
@@ -172,6 +173,40 @@ The server does not ask what kind a rendition is; it loads every one exactly as 
 
 A video rendition's own URL is `video-{id}`, for example `/hls/{asset}/video-{id}/index.m3u8`; the shared audio group stays `audio-{n}`, exactly as for a single-file asset. The HLS master playlist gains one `#EXT-X-STREAM-INF` per video rendition, sorted by bandwidth, all pointing at the shared audio group; the DASH manifest gains one `Representation` per video rendition. Sidecar subtitles and HLS I-frame playlists (the latter built from the lowest-bandwidth rendition only) both work the same as for a single-file asset.
 
+## Clips
+
+Instead of a single `location`, an answer may list clips: each a file and an optional window of it. One clip trims a file. Two or more play back to back as one stream, even when they were encoded differently, for example a pre-roll ad followed by part of a movie.
+
+```json
+{
+  "asset_id": "movie-with-preroll",
+  "version": "2026-09-30-a",
+  "clips": [
+    { "location": { "type": "file", "path": "ads/preroll.mp4" } },
+    { "location": { "type": "http", "url": "https://origin.example.net/m/movie.mp4" },
+      "from_ms": 90000, "to_ms": 5490000 }
+  ]
+}
+```
+
+| Field | Required | Rules |
+| --- | --- | --- |
+| `location` | Yes | A `file` or `http` location with the same rules as a single asset's |
+| `from_ms` | No | Default `0`. A time on the file's own clock, the one subtitle cues are read against |
+| `to_ms` | No | Default: the end of the file. Must be later than `from_ms`; a value past the end is clamped to the end |
+
+Both times are at most 4294967295 ms, and an answer may list at most `limits.max_clips` (default 64) clips.
+
+**Nothing is re-encoded, so a clip starts on a keyframe:** the last one shown at or before `from_ms`, so nothing you asked for is lost, but up to one keyframe interval before it may be shown. The end cuts at `to_ms` to the frame. Audio is cut at the same instants as the video. The `clip_trimmed` log line records, for every clip, the window asked for and the window served.
+
+**Clips must be alike in shape, not in encoding.** Every clip must have a video track or none, and the same number of audio tracks, with the same codec in each (H.264 with H.264, AAC with AAC). Resolution, profile, bitrate, frame rate, and sample rate may all differ. A mismatch fails the asset, naming both clips.
+
+**One clip is served as an ordinary asset**, with the same URLs as a single `location`. **Two or more form a sequence:** the HLS media playlists carry an `#EXT-X-DISCONTINUITY` and a fresh `#EXT-X-MAP` at each clip boundary, and the DASH manifest has one `Period` per clip. Segment numbers run across the whole sequence. Each clip has its own init segment at `/{hls|dash}/{asset}/{track}/clips/{n}/init.mp4` (counting from 0), and the plain `{track}/init.mp4` does not exist for a sequence. Sequences have no I-frame playlist.
+
+**Loading is all or nothing:** if any clip's file cannot be read or parsed, its window holds no media, or it does not match the others, the whole asset fails with that clip named. A file named by several clips is read once. The URL version hashes the mapper's `version` with every clip's content and window, so trimming the same file differently always gives new URLs.
+
+`subtitles` cannot be combined with `clips` yet: the mapper cannot know where a keyframe-aligned clip begins, so cues written for the output would drift. Such an answer is rejected.
+
 ## What a `version` means to the server
 
 The server keeps one loaded copy per asset, keyed by `(asset_id, version)`. A different `version`, or the same version at a different location (a rotated signed URL), makes it reload from the new location. There is **no grace period**: players holding URLs from the old version get `404` and recover by fetching the playlist again. Change `version` only when the media actually changes.
@@ -245,4 +280,5 @@ Then `curl http://127.0.0.1:3000/hls/movie/master.m3u8`.
 - `version` also changes when a subtitle file changes, or when any rendition's file changes.
 - Video renditions are encoded with the same keyframe interval, so their segments align.
 - `expires_at` is set for anything signed, and re-signing keeps the same `version`.
+- `from_ms`/`to_ms` are on the file's own clock, and a clip may start up to one keyframe interval early.
 - The mapper is reachable over `https` in production and requires the bearer token.
