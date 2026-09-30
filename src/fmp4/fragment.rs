@@ -53,15 +53,25 @@ pub(crate) fn prepare_media_segment(
         ));
     }
 
-    let provisional_moof = build_moof(track, samples, segment.decode_time, sequence_number, 0)?;
+    let provisional_moof = build_moof(
+        track.id,
+        track.kind,
+        samples,
+        segment.decode_time,
+        sequence_number,
+        0,
+        &[],
+    )?;
     let data_offset = i32::try_from(provisional_moof.len() + 8)
         .map_err(|_| Error::InvalidMedia("fragment header is too large".to_owned()))?;
     let moof = build_moof(
-        track,
+        track.id,
+        track.kind,
         samples,
         segment.decode_time,
         sequence_number,
         data_offset,
+        &[],
     )?;
     let payload_len = samples.iter().try_fold(0u64, |total, sample| {
         total
@@ -111,11 +121,13 @@ fn coalesced_ranges(samples: &[Sample]) -> Result<Vec<ByteRange>> {
 }
 
 fn build_moof(
-    track: &Track,
+    track_id: u32,
+    kind: TrackKind,
     samples: &[Sample],
     decode_time: u64,
     sequence_number: u32,
     data_offset: i32,
+    extra: &[u8],
 ) -> Result<Vec<u8>> {
     let mut mfhd = Vec::new();
     write_full_box_fields(&mut mfhd, 0, 0);
@@ -123,7 +135,7 @@ fn build_moof(
 
     let mut tfhd = Vec::new();
     write_full_box_fields(&mut tfhd, 0, TFHD_DEFAULT_BASE_IS_MOOF);
-    tfhd.extend_from_slice(&track.id.to_be_bytes());
+    tfhd.extend_from_slice(&track_id.to_be_bytes());
 
     let mut tfdt = Vec::new();
     write_full_box_fields(&mut tfdt, 1, 0);
@@ -138,7 +150,7 @@ fn build_moof(
     for sample in samples {
         trun.extend_from_slice(&sample.duration.to_be_bytes());
         trun.extend_from_slice(&sample.size.to_be_bytes());
-        let flags = match track.kind {
+        let flags = match kind {
             TrackKind::Audio => SYNC_SAMPLE_FLAGS,
             TrackKind::Video if sample.is_sync => SYNC_SAMPLE_FLAGS,
             TrackKind::Video => NON_SYNC_SAMPLE_FLAGS,
@@ -151,6 +163,7 @@ fn build_moof(
     write_box(&mut traf_payload, *b"tfhd", &tfhd)?;
     write_box(&mut traf_payload, *b"tfdt", &tfdt)?;
     write_box(&mut traf_payload, *b"trun", &trun)?;
+    traf_payload.extend_from_slice(extra);
 
     let mut moof_payload = Vec::new();
     write_box(&mut moof_payload, *b"mfhd", &mfhd)?;
@@ -182,4 +195,177 @@ fn write_box_header(output: &mut Vec<u8>, size: u64, name: [u8; 4]) -> Result<()
     output.extend_from_slice(&size.to_be_bytes());
     output.extend_from_slice(&name);
     Ok(())
+}
+
+/// Most subsamples one sample can have: `saiz` records each sample's `2 + 6n` bytes in a `u8`.
+pub(crate) const MAX_SUBSAMPLES: usize = 42;
+
+/// The `moof` and `mdat` header of an encrypted fragment: the usual boxes plus `senc`, `saiz`,
+/// and `saio`, which describe each sample's clear and protected bytes (ISO/IEC 23001-7, 7.2).
+/// An empty map means a whole-sample (audio) encryption with no subsamples.
+#[allow(dead_code, reason = "TEMPORARY: used by the DRM plan's later tasks")]
+pub(crate) fn encrypted_fragment_header(
+    track_id: u32,
+    kind: TrackKind,
+    samples: &[Sample],
+    decode_time: u64,
+    sequence_number: u32,
+    subsamples: &[Vec<(u16, u32)>],
+    payload_len: usize,
+) -> Result<Vec<u8>> {
+    let overflow = || Error::InvalidMedia("encrypted fragment is too large".to_owned());
+    let probe_extra = encryption_boxes(subsamples, 0)?;
+    let probe = build_moof(
+        track_id,
+        kind,
+        samples,
+        decode_time,
+        sequence_number,
+        0,
+        &probe_extra,
+    )?;
+    // `senc` is the first extra box, at the end of the `moof`; its entries start 16 bytes in
+    // (box header 8, version and flags 4, sample count 4). Box sizes do not depend on the values
+    // filled in below, so the probe's layout is the final one.
+    let senc_entries = probe.len() - probe_extra.len() + 16;
+    let extra = encryption_boxes(
+        subsamples,
+        u32::try_from(senc_entries).map_err(|_| overflow())?,
+    )?;
+    let data_offset = i32::try_from(probe.len() + 8).map_err(|_| overflow())?;
+    let mut header = build_moof(
+        track_id,
+        kind,
+        samples,
+        decode_time,
+        sequence_number,
+        data_offset,
+        &extra,
+    )?;
+    let payload = u64::try_from(payload_len).map_err(|_| overflow())?;
+    write_box_header(
+        &mut header,
+        payload.checked_add(8).ok_or_else(overflow)?,
+        *b"mdat",
+    )?;
+    Ok(header)
+}
+
+fn encryption_boxes(subsamples: &[Vec<(u16, u32)>], aux_offset: u32) -> Result<Vec<u8>> {
+    let invalid = |message: &str| Error::InvalidMedia(message.to_owned());
+    let use_subsamples = subsamples.iter().any(|map| !map.is_empty());
+    let count = u32::try_from(subsamples.len()).map_err(|_| invalid("too many samples"))?;
+    let mut senc = Vec::new();
+    write_full_box_fields(&mut senc, 0, if use_subsamples { 2 } else { 0 });
+    senc.extend_from_slice(&count.to_be_bytes());
+    let mut sizes = Vec::with_capacity(subsamples.len());
+    for map in subsamples {
+        if !use_subsamples {
+            sizes.push(0u8);
+            continue;
+        }
+        if map.len() > MAX_SUBSAMPLES {
+            return Err(invalid(
+                "a sample has more than 42 subsamples, more than saiz can describe",
+            ));
+        }
+        let entries = u16::try_from(map.len()).map_err(|_| invalid("too many subsamples"))?;
+        senc.extend_from_slice(&entries.to_be_bytes());
+        for (clear, protected) in map {
+            senc.extend_from_slice(&clear.to_be_bytes());
+            senc.extend_from_slice(&protected.to_be_bytes());
+        }
+        sizes.push(u8::try_from(2 + 6 * map.len()).map_err(|_| invalid("too many subsamples"))?);
+    }
+    let mut aux_sizes = Vec::new();
+    write_full_box_fields(&mut aux_sizes, 0, 0);
+    // A non-zero default means "every sample has this size"; zero means the sizes are listed.
+    let uniform = sizes
+        .first()
+        .copied()
+        .filter(|first| *first != 0 && sizes.iter().all(|size| size == first));
+    aux_sizes.push(uniform.unwrap_or(0));
+    aux_sizes.extend_from_slice(&count.to_be_bytes());
+    if uniform.is_none() {
+        aux_sizes.extend_from_slice(&sizes);
+    }
+    let mut aux_offsets = Vec::new();
+    write_full_box_fields(&mut aux_offsets, 0, 0);
+    aux_offsets.extend_from_slice(&1u32.to_be_bytes());
+    aux_offsets.extend_from_slice(&aux_offset.to_be_bytes());
+    let mut boxes = Vec::new();
+    write_box(&mut boxes, *b"senc", &senc)?;
+    write_box(&mut boxes, *b"saiz", &aux_sizes)?;
+    write_box(&mut boxes, *b"saio", &aux_offsets)?;
+    Ok(boxes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media::Sample;
+
+    fn sample(size: u32) -> Sample {
+        Sample {
+            offset: 0,
+            size,
+            decode_time: 0,
+            duration: 512,
+            composition_offset: 0,
+            is_sync: true,
+        }
+    }
+
+    fn position(data: &[u8], name: [u8; 4]) -> usize {
+        data.windows(4).position(|window| window == name).unwrap() - 4
+    }
+
+    #[test]
+    fn senc_saiz_and_saio_describe_the_subsamples() {
+        let samples = [sample(100), sample(60)];
+        let subsamples = vec![vec![(10, 90)], vec![(5, 20), (7, 28)]];
+
+        let header =
+            encrypted_fragment_header(1, TrackKind::Video, &samples, 0, 3, &subsamples, 160)
+                .unwrap();
+
+        let senc = position(&header, *b"senc");
+        assert_eq!(
+            &header[senc + 8..senc + 12],
+            &[0, 0, 0, 2],
+            "subsample flag"
+        );
+        assert_eq!(&header[senc + 12..senc + 16], &2u32.to_be_bytes());
+        assert_eq!(&header[senc + 16..senc + 24], &[0, 1, 0, 10, 0, 0, 0, 90]);
+        let saiz = position(&header, *b"saiz");
+        assert_eq!(header[saiz + 12], 0, "sizes differ, so they are listed");
+        assert_eq!(&header[saiz + 13..saiz + 19], &[0, 0, 0, 2, 8, 14]);
+        let offsets = position(&header, *b"saio");
+        let offset = u32::from_be_bytes(header[offsets + 16..offsets + 20].try_into().unwrap());
+        assert_eq!(
+            offset as usize,
+            senc + 16,
+            "saio points at the first senc entry"
+        );
+        let mdat = position(&header, *b"mdat");
+        assert_eq!(mdat + 8, header.len());
+        assert_eq!(
+            u32::from_be_bytes(header[mdat..mdat + 4].try_into().unwrap()),
+            168
+        );
+    }
+
+    #[test]
+    fn whole_sample_audio_lists_zero_sized_entries() {
+        let samples = [sample(50), sample(50)];
+
+        let header =
+            encrypted_fragment_header(2, TrackKind::Audio, &samples, 0, 1, &[vec![], vec![]], 100)
+                .unwrap();
+
+        let senc = position(&header, *b"senc");
+        assert_eq!(&header[senc + 8..senc + 16], &[0, 0, 0, 0, 0, 0, 0, 2]);
+        let saiz = position(&header, *b"saiz");
+        assert_eq!(&header[saiz + 12..saiz + 19], &[0, 0, 0, 0, 2, 0, 0]);
+    }
 }

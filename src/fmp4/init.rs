@@ -14,7 +14,35 @@ use crate::source::Metadata;
 /// compatible. The source's own brands describe the source file, not this stream.
 const FTYP: [u8; 24] = *b"\x00\x00\x00\x18ftypiso6\x00\x00\x00\x00iso6mp41";
 
+/// What an encrypted track's init segment declares (ISO/IEC 23001-7, 8.1 and 8.2).
+#[allow(dead_code, reason = "TEMPORARY: used by the DRM plan's later tasks")]
+pub(crate) struct InitProtection<'a> {
+    pub(crate) key_id: [u8; 16],
+    pub(crate) constant_iv: [u8; 16],
+    pub(crate) crypt_byte_block: u8,
+    pub(crate) skip_byte_block: u8,
+    /// Complete `pssh` boxes, copied into `moov`.
+    pub(crate) pssh: &'a [Vec<u8>],
+}
+
 pub(crate) fn write_init_segment(metadata: &Metadata, track_id: u32) -> Result<Vec<u8>> {
+    write_init(metadata, track_id, None)
+}
+
+#[allow(dead_code, reason = "TEMPORARY: used by the DRM plan's later tasks")]
+pub(crate) fn write_protected_init_segment(
+    metadata: &Metadata,
+    track_id: u32,
+    protection: &InitProtection<'_>,
+) -> Result<Vec<u8>> {
+    write_init(metadata, track_id, Some(protection))
+}
+
+fn write_init(
+    metadata: &Metadata,
+    track_id: u32,
+    protection: Option<&InitProtection<'_>>,
+) -> Result<Vec<u8>> {
     let moov = box_payload(metadata.moov_bytes(), 0)?;
     let children = child_boxes(moov.payload)?;
     let movie_header = children
@@ -33,8 +61,17 @@ pub(crate) fn write_init_segment(metadata: &Metadata, track_id: u32) -> Result<V
         *b"mvhd",
         &with_zero_duration(movie_header.payload, DurationAt::MOVIE_OR_MEDIA)?,
     )?;
-    write_box(&mut movie, *b"trak", &track_box(track, track_id)?)?;
+    write_box(
+        &mut movie,
+        *b"trak",
+        &track_box(track, track_id, protection)?,
+    )?;
     write_box(&mut movie, *b"mvex", &track_extends(track_id))?;
+    if let Some(protection) = protection {
+        for pssh in protection.pssh {
+            movie.extend_from_slice(pssh);
+        }
+    }
 
     let mut output = FTYP.to_vec();
     write_box(&mut output, *b"moov", &movie)?;
@@ -72,7 +109,11 @@ fn track_id_of(track: &RawBox<'_>) -> Result<u32> {
 }
 
 /// Rebuilds a `trak` with the same boxes but no sample locations, edit list, or user data.
-fn track_box(track: &RawBox<'_>, track_id: u32) -> Result<Vec<u8>> {
+fn track_box(
+    track: &RawBox<'_>,
+    track_id: u32,
+    protection: Option<&InitProtection<'_>>,
+) -> Result<Vec<u8>> {
     let header = required_child(track.payload, *b"tkhd")?;
     let media = required_child(track.payload, *b"mdia")?;
     let mut output = Vec::new();
@@ -83,11 +124,19 @@ fn track_box(track: &RawBox<'_>, track_id: u32) -> Result<Vec<u8>> {
     )?;
     // The edit list is not copied: it was applied to the sample timestamps when the file was
     // parsed, and a player would otherwise apply it a second time.
-    write_box(&mut output, *b"mdia", &media_box(&media, track_id)?)?;
+    write_box(
+        &mut output,
+        *b"mdia",
+        &media_box(&media, track_id, protection)?,
+    )?;
     Ok(output)
 }
 
-fn media_box(media: &RawBox<'_>, track_id: u32) -> Result<Vec<u8>> {
+fn media_box(
+    media: &RawBox<'_>,
+    track_id: u32,
+    protection: Option<&InitProtection<'_>>,
+) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     for child in child_boxes(media.payload)? {
         match &child.name {
@@ -96,18 +145,30 @@ fn media_box(media: &RawBox<'_>, track_id: u32) -> Result<Vec<u8>> {
                 *b"mdhd",
                 &with_zero_duration(child.payload, DurationAt::MOVIE_OR_MEDIA)?,
             )?,
-            b"minf" => write_box(&mut output, *b"minf", &media_info_box(&child, track_id)?)?,
+            b"minf" => write_box(
+                &mut output,
+                *b"minf",
+                &media_info_box(&child, track_id, protection)?,
+            )?,
             _ => write_box(&mut output, child.name, child.payload)?,
         }
     }
     Ok(output)
 }
 
-fn media_info_box(media_info: &RawBox<'_>, track_id: u32) -> Result<Vec<u8>> {
+fn media_info_box(
+    media_info: &RawBox<'_>,
+    track_id: u32,
+    protection: Option<&InitProtection<'_>>,
+) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     for child in child_boxes(media_info.payload)? {
         if child.name == *b"stbl" {
-            write_box(&mut output, *b"stbl", &sample_table_box(&child, track_id)?)?;
+            write_box(
+                &mut output,
+                *b"stbl",
+                &sample_table_box(&child, track_id, protection)?,
+            )?;
         } else {
             // `vmhd`/`smhd` and `dinf`, exactly as they were.
             write_box(&mut output, child.name, child.payload)?;
@@ -117,13 +178,17 @@ fn media_info_box(media_info: &RawBox<'_>, track_id: u32) -> Result<Vec<u8>> {
 }
 
 /// The sample description, followed by the empty tables a fragmented file requires.
-fn sample_table_box(sample_table: &RawBox<'_>, track_id: u32) -> Result<Vec<u8>> {
+fn sample_table_box(
+    sample_table: &RawBox<'_>,
+    track_id: u32,
+    protection: Option<&InitProtection<'_>>,
+) -> Result<Vec<u8>> {
     let description = required_child(sample_table.payload, *b"stsd")?;
     let mut output = Vec::new();
     write_box(
         &mut output,
         *b"stsd",
-        &sample_description(description.payload, track_id)?,
+        &sample_description(description.payload, track_id, protection)?,
     )?;
     // `stts`, `stsc`, and `stco` are a version/flags word and an entry count of zero; `stsz`
     // adds a sample size before its count.
@@ -138,7 +203,11 @@ fn sample_table_box(sample_table: &RawBox<'_>, track_id: u32) -> Result<Vec<u8>>
 /// index 1, and zero defaults for duration, size, and flags (every sample says its own).
 /// The `stsd` payload to write: the source's, verbatim, except for a QuickTime-style audio entry,
 /// which browsers refuse and which is rewritten in the standard layout.
-fn sample_description(description: &[u8], track_id: u32) -> Result<Vec<u8>> {
+fn sample_description(
+    description: &[u8],
+    track_id: u32,
+    protection: Option<&InitProtection<'_>>,
+) -> Result<Vec<u8>> {
     let mut reader = Reader::new(description);
     reader.full_box()?;
     reader.skip(4)?;
@@ -147,15 +216,68 @@ fn sample_description(description: &[u8], track_id: u32) -> Result<Vec<u8>> {
         .next()
         .ok_or_else(|| Error::InvalidMedia("stsd entry is missing".to_owned()))?;
     if entry.name != *b"mp4a" {
-        return Ok(description.to_vec());
+        return protect(description.to_vec(), protection);
     }
     let Some(iso) = iso_audio_entry(entry.payload, track_id)? else {
-        return Ok(description.to_vec());
+        return protect(description.to_vec(), protection);
     };
     // The version, flags, and entry count of the source's `stsd`, then the rewritten entry.
     let mut rewritten = description[..8].to_vec();
     write_box(&mut rewritten, *b"mp4a", &iso)?;
-    Ok(rewritten)
+    protect(rewritten, protection)
+}
+
+fn protect(description: Vec<u8>, protection: Option<&InitProtection<'_>>) -> Result<Vec<u8>> {
+    let Some(protection) = protection else {
+        return Ok(description);
+    };
+    let mut reader = Reader::new(&description);
+    reader.full_box()?;
+    reader.skip(4)?;
+    let entry = child_boxes(reader.rest())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::InvalidMedia("stsd entry is missing".to_owned()))?;
+    let protected_type = match &entry.name {
+        b"mp4a" | b"ac-3" | b"ec-3" => *b"enca",
+        _ => *b"encv",
+    };
+    let mut payload = entry.payload.to_vec();
+    write_box(
+        &mut payload,
+        *b"sinf",
+        &protection_info(entry.name, protection)?,
+    )?;
+    let mut protected = description[..8].to_vec();
+    write_box(&mut protected, protected_type, &payload)?;
+    Ok(protected)
+}
+
+/// `sinf`: the original format, the `cbcs` scheme, and `tenc` with a constant IV.
+fn protection_info(original: [u8; 4], protection: &InitProtection<'_>) -> Result<Vec<u8>> {
+    let mut sinf = Vec::new();
+    write_box(&mut sinf, *b"frma", &original)?;
+    let mut schm = vec![0; 4];
+    schm.extend_from_slice(b"cbcs");
+    schm.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    write_box(&mut sinf, *b"schm", &schm)?;
+    let mut tenc = vec![
+        1,
+        0,
+        0,
+        0,
+        0,
+        (protection.crypt_byte_block << 4) | (protection.skip_byte_block & 0x0f),
+        1,
+        0,
+    ];
+    tenc.extend_from_slice(&protection.key_id);
+    tenc.push(16);
+    tenc.extend_from_slice(&protection.constant_iv);
+    let mut scheme_info = Vec::new();
+    write_box(&mut scheme_info, *b"tenc", &tenc)?;
+    write_box(&mut sinf, *b"schi", &scheme_info)?;
+    Ok(sinf)
 }
 
 fn track_extends(track_id: u32) -> Vec<u8> {
@@ -414,6 +536,63 @@ mod tests {
         assert_eq!(
             audio_entry(&init[FTYP.len() + 8..], 0),
             audio_entry(source_moov, 1)
+        );
+    }
+
+    fn init_for(name: &str, track_id: u32) -> (Vec<u8>, mp4::ParsedMedia) {
+        let media = parsed(name);
+        (
+            write_init_segment(&media.metadata, track_id).unwrap(),
+            media,
+        )
+    }
+
+    #[test]
+    fn a_protected_init_segment_declares_cbcs_and_carries_the_pssh() {
+        let (_, media) = init_for("h264-aac.mp4", 1);
+        let pssh = vec![
+            0, 0, 0, 32, b'p', b's', b's', b'h', 0, 0, 0, 0, 0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6,
+            0x4a, 0xce, 0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed, 0, 0, 0, 0,
+        ];
+        let protection = InitProtection {
+            key_id: [1; 16],
+            constant_iv: [2; 16],
+            crypt_byte_block: 1,
+            skip_byte_block: 9,
+            pssh: std::slice::from_ref(&pssh),
+        };
+
+        let init = write_protected_init_segment(&media.metadata, 1, &protection).unwrap();
+
+        let find = |needle: &[u8]| {
+            init.windows(needle.len())
+                .position(|window| window == needle)
+        };
+        assert!(
+            find(b"encv").is_some() && find(b"avc1").is_some(),
+            "renamed, original in frma"
+        );
+        assert!(find(b"frma").unwrap() < find(b"schm").unwrap());
+        let schm = find(b"schm").unwrap();
+        assert_eq!(&init[schm + 8..schm + 12], b"cbcs");
+        let tenc = find(b"tenc").unwrap();
+        assert_eq!(init[tenc + 4], 1, "tenc version 1");
+        assert_eq!(init[tenc + 9], 0x19, "pattern 1:9");
+        assert_eq!(
+            &init[tenc + 10..tenc + 12],
+            &[1, 0],
+            "protected, no per-sample IV"
+        );
+        assert_eq!(&init[tenc + 12..tenc + 28], &[1; 16], "key ID");
+        assert_eq!(init[tenc + 28], 16);
+        assert_eq!(&init[tenc + 29..tenc + 45], &[2; 16], "constant IV");
+        assert!(find(&pssh).is_some(), "pssh copied into moov");
+        // Every box size still adds up: the writer's own parser reads it back.
+        assert!(box_payload(&init[24..], 0).is_ok());
+        let plain = write_init_segment(&media.metadata, 1).unwrap();
+        assert!(
+            !plain.windows(4).any(|window| window == b"encv"),
+            "the clear writer is unchanged"
         );
     }
 }
