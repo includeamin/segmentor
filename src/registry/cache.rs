@@ -18,6 +18,7 @@ pub(crate) struct CachedAsset {
     pub(crate) bytes: u64,
     pub(crate) tracks: usize,
     pub(crate) subtitles: usize,
+    pub(crate) clips: usize,
     pub(crate) duration_seconds: f64,
 }
 
@@ -137,6 +138,7 @@ impl LoadedCache {
                         bytes: entry.weight,
                         tracks: entry.asset.track_count(),
                         subtitles: entry.asset.subtitle_count(),
+                        clips: entry.asset.clip_count(),
                         duration_seconds: entry.asset.duration_seconds(),
                     },
                 )

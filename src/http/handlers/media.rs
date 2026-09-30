@@ -79,6 +79,29 @@ pub(crate) async fn media_segment(
     .await
 }
 
+/// One clip's init segment, for a sequence: its clips may be encoded differently, so each has its
+/// own (TDD 0008, "URLs").
+pub(crate) async fn clip_init_segment(
+    State(state): State<AppState>,
+    Path((asset_id, track, clip)): Path<(String, String, u32)>,
+    Query(version): Query<VersionQuery>,
+    headers: HeaderMap,
+) -> HttpResult<Response> {
+    let asset = state.asset(&asset_id).await?;
+    version.require(asset.version())?;
+    let requested = parse_track(&track)?;
+    let etag = entity_tag(asset.version(), &format!("{track}-clip-{clip}-init"));
+    if not_modified(&headers, &etag) {
+        return not_modified_response(etag, "public, max-age=31536000, immutable");
+    }
+    let clip = usize::try_from(clip).map_err(|_| HttpError::not_found("clip does not exist"))?;
+    let bytes = asset.clip_init_segment(requested.rendition.as_deref(), requested.key, clip)?;
+    let Ok(range) = requested_range(&headers, bytes.len() as u64, &etag) else {
+        return range_not_satisfiable(bytes.len() as u64);
+    };
+    media_response(&bytes, requested.key.kind, etag, range)
+}
+
 /// A sidecar `WebVTT` file, served under both protocols.
 pub(crate) async fn subtitle_file(
     State(state): State<AppState>,

@@ -356,6 +356,7 @@ impl AssetRegistry {
                 asset.id = %id,
                 media.tracks = asset.track_count(),
                 media.segments = asset.segment_count(),
+                media.clips = asset.clip_count(),
                 index.bytes = asset.index_bytes(),
                 elapsed_ms = started.elapsed().as_millis(),
             );
@@ -708,6 +709,7 @@ impl AssetRegistry {
                     asset.id = asset_id,
                     media.tracks = asset.track_count(),
                     media.segments = asset.segment_count(),
+                    media.clips = asset.clip_count(),
                     index.bytes = asset.index_bytes(),
                     elapsed_ms = started.elapsed().as_millis(),
                 );

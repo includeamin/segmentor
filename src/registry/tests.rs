@@ -18,6 +18,7 @@ use crate::config::{
 use crate::http::{AppState, router, spawn_resolver_probe};
 use crate::testutil::{
     Answer, MockMapper, MockOrigin, OriginValidator, file_location, fixture, fixtures_dir,
+    http_location,
 };
 
 fn mapper_settings(url: &str) -> MapperConfig {
@@ -1884,5 +1885,206 @@ async fn a_window_past_the_end_of_its_file_fails_the_asset() {
     assert_eq!(
         status(&h.app, "/hls/movie/master.m3u8").await,
         StatusCode::INTERNAL_SERVER_ERROR
+    );
+}
+
+#[tokio::test]
+async fn a_sequence_plays_its_clips_back_to_back() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "seq",
+        Answer::clips(
+            "v1",
+            &[
+                clip("rendition-720p.mp4", None, None),
+                clip("h264-aac.mp4", Some(1500), None),
+            ],
+        ),
+    );
+
+    let master = text(&fetch(&h.app, "/hls/seq/master.m3u8").await.2);
+    let version = version_in(&fetch(&h.app, "/hls/seq/master.m3u8").await.2);
+
+    assert_eq!(master.matches("#EXT-X-STREAM-INF").count(), 1, "{master}");
+    assert!(master.contains("RESOLUTION=640x360"), "{master}");
+    assert!(!master.contains("I-FRAME"), "{master}");
+    for track in ["video", "audio-1"] {
+        let playlist = text(
+            &fetch(&h.app, &format!("/hls/seq/{track}/index.m3u8"))
+                .await
+                .2,
+        );
+        assert_eq!(playlist.matches("#EXTINF:").count(), 5, "3 + 2: {playlist}");
+        assert_eq!(
+            playlist.matches("#EXT-X-DISCONTINUITY").count(),
+            1,
+            "{playlist}"
+        );
+        assert!(
+            playlist.contains(&format!("#EXT-X-MAP:URI=\"clips/1/init.mp4?v={version}\"")),
+            "{playlist}"
+        );
+    }
+    let init = fetch(
+        &h.app,
+        &format!("/hls/seq/video/clips/1/init.mp4?v={version}"),
+    )
+    .await;
+    assert_eq!(init.0, StatusCode::OK);
+    assert_eq!(&init.2[4..8], b"ftyp");
+    assert_eq!(
+        status(
+            &h.app,
+            &format!("/dash/seq/audio-1/clips/0/init.mp4?v={version}")
+        )
+        .await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status(&h.app, &format!("/hls/seq/video/init.mp4?v={version}")).await,
+        StatusCode::NOT_FOUND,
+        "a sequence has no plain init segment"
+    );
+    assert_eq!(
+        status(
+            &h.app,
+            &format!("/hls/seq/video/clips/2/init.mp4?v={version}")
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+    let segment = fetch(
+        &h.app,
+        &format!("/hls/seq/video/segments/4/media.m4s?v={version}"),
+    )
+    .await;
+    assert_eq!(segment.0, StatusCode::OK);
+    assert_eq!(&segment.2[4..8], b"moof");
+    assert_eq!(
+        status(
+            &h.app,
+            &format!("/hls/seq/video/segments/5/media.m4s?v={version}")
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+    let manifest = text(&fetch(&h.app, "/dash/seq/manifest.mpd").await.2);
+    assert_eq!(manifest.matches("<Period ").count(), 2, "{manifest}");
+    assert!(manifest.contains("startNumber=\"3\""), "{manifest}");
+}
+
+#[tokio::test]
+async fn a_clip_init_segment_answers_conditional_and_range_requests() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "seq",
+        Answer::clips(
+            "v1",
+            &[
+                clip("h264-aac.mp4", None, None),
+                clip("h264-aac.mp4", None, None),
+            ],
+        ),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/seq/master.m3u8").await.2);
+    let uri = format!("/hls/seq/video/clips/1/init.mp4?v={version}");
+    let (_, headers, whole) = fetch(&h.app, &uri).await;
+
+    let conditional = h
+        .app
+        .clone()
+        .oneshot(
+            Request::get(&uri)
+                .header(
+                    axum::http::header::IF_NONE_MATCH,
+                    headers[axum::http::header::ETAG].clone(),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let ranged = h
+        .app
+        .clone()
+        .oneshot(
+            Request::get(&uri)
+                .header(axum::http::header::RANGE, "bytes=0-7")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(conditional.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+    let body = to_bytes(ranged.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(&body[..], &whole[..8]);
+}
+
+#[tokio::test]
+async fn the_status_endpoint_counts_a_sequences_clips() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "seq",
+        Answer::clips(
+            "v1",
+            &[
+                clip("h264-aac.mp4", None, None),
+                clip("h264-aac.mp4", None, None),
+            ],
+        ),
+    );
+    assert_eq!(status(&h.app, "/hls/seq/master.m3u8").await, StatusCode::OK);
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&fetch(&h.app, "/admin/status").await.2).unwrap();
+
+    assert_eq!(json["cache"]["assets"][0]["clips"], 2);
+}
+
+#[tokio::test]
+async fn a_rotated_signature_reaches_every_clip_cut_from_that_file() {
+    let (h, origin) = signed_harness(|_| {}).await;
+    let answer = |signature: &str| {
+        let url = signed(&origin, signature);
+        short_ttl(Answer::clips(
+            "v1",
+            &[
+                (http_location(&url), None, None),
+                (http_location(&url), Some(1500), None),
+            ],
+        ))
+    };
+    h.mapper.state.set("seq", answer("1"));
+    let version = version_in(&fetch(&h.app, "/hls/seq/master.m3u8").await.2);
+
+    // The mapper re-signs the same object and the old signature stops working.
+    *origin.state.required_query.lock().unwrap() = Some("sig=2".to_owned());
+    h.mapper.state.set("seq", answer("2"));
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let before = origin.state.queries.lock().unwrap().len();
+
+    // Segment 0 is the first clip's; segment 3 is the second's.
+    for segment in [0, 3] {
+        assert_eq!(
+            status(
+                &h.app,
+                &format!("/hls/seq/video/segments/{segment}/media.m4s?v={version}")
+            )
+            .await,
+            StatusCode::OK,
+            "segment {segment}"
+        );
+    }
+
+    let used = origin.state.queries.lock().unwrap()[before..].to_vec();
+    assert!(
+        !used.is_empty() && used.iter().all(|query| query == "sig=2"),
+        "{used:?}"
+    );
+    assert!(
+        metric(&h.state, "vod_asset_loads_total{outcome=\"ok\"} 1"),
+        "the asset must not reload"
     );
 }

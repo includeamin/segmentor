@@ -9,7 +9,9 @@ use crate::media::TrackKey;
 
 pub(crate) use admin::status as admin_status;
 pub(crate) use health::{health, metrics, ready};
-pub(crate) use media::{iframe_segment, init_segment, media_segment, subtitle_file};
+pub(crate) use media::{
+    clip_init_segment, iframe_segment, init_segment, media_segment, subtitle_file,
+};
 pub(crate) use playlist::{
     dash_manifest, iframe_playlist, master_playlist, media_playlist, subtitle_playlist,
 };

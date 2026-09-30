@@ -9,8 +9,8 @@ use tower_http::trace::{DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, T
 use tracing::Level;
 
 use super::handlers::{
-    admin_status, dash_manifest, health, iframe_playlist, iframe_segment, init_segment,
-    master_playlist, media_playlist, media_segment, metrics, ready, subtitle_file,
+    admin_status, clip_init_segment, dash_manifest, health, iframe_playlist, iframe_segment,
+    init_segment, master_playlist, media_playlist, media_segment, metrics, ready, subtitle_file,
     subtitle_playlist,
 };
 use super::middleware::{
@@ -30,14 +30,16 @@ const HLS_SUBTITLE_PLAYLIST: &str = "/hls/{asset_id}/subtitles/{language}/index.
 const HLS_SUBTITLE_FILE: &str = "/hls/{asset_id}/subtitles/{language}/sub.vtt";
 const DASH_SUBTITLE_FILE: &str = "/dash/{asset_id}/subtitles/{language}/sub.vtt";
 const HLS_INIT: &str = "/hls/{asset_id}/{track}/init.mp4";
+const HLS_CLIP_INIT: &str = "/hls/{asset_id}/{track}/clips/{clip}/init.mp4";
 const HLS_SEGMENT: &str = "/hls/{asset_id}/{track}/segments/{segment_index}/media.m4s";
 const DASH_MANIFEST: &str = "/dash/{asset_id}/manifest.mpd";
 const DASH_INIT: &str = "/dash/{asset_id}/{track}/init.mp4";
+const DASH_CLIP_INIT: &str = "/dash/{asset_id}/{track}/clips/{clip}/init.mp4";
 const DASH_SEGMENT: &str = "/dash/{asset_id}/{track}/segments/{segment_index}/media.m4s";
 
 /// Every route template, used both to register handlers and to label metrics, so a route
 /// cannot be added to one and forgotten in the other.
-pub(crate) const ROUTES: [&str; 16] = [
+pub(crate) const ROUTES: [&str; 18] = [
     HEALTH,
     ADMIN_STATUS,
     READY,
@@ -50,9 +52,11 @@ pub(crate) const ROUTES: [&str; 16] = [
     HLS_SUBTITLE_FILE,
     DASH_SUBTITLE_FILE,
     HLS_INIT,
+    HLS_CLIP_INIT,
     HLS_SEGMENT,
     DASH_MANIFEST,
     DASH_INIT,
+    DASH_CLIP_INIT,
     DASH_SEGMENT,
 ];
 
@@ -70,9 +74,11 @@ pub(crate) fn router(state: AppState) -> Router {
         .route(HLS_SUBTITLE_FILE, get(subtitle_file))
         .route(DASH_SUBTITLE_FILE, get(subtitle_file))
         .route(HLS_INIT, get(init_segment))
+        .route(HLS_CLIP_INIT, get(clip_init_segment))
         .route(HLS_SEGMENT, get(media_segment))
         .route(DASH_MANIFEST, get(dash_manifest))
         .route(DASH_INIT, get(init_segment))
+        .route(DASH_CLIP_INIT, get(clip_init_segment))
         .route(DASH_SEGMENT, get(media_segment))
         // Layers run outermost-last: timeout is innermost, request IDs outermost. CORS sits
         // outside the limit layers so 408, 431, and 503 responses stay readable by browsers.
