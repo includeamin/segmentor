@@ -68,10 +68,10 @@
     <div class="panel">
       <div class="panel-head"><h2>Player</h2></div>
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px">
-        <label>Known asset
-          <select id="asset-picker"><option value="">— pick one, or type below —</option></select>
+        <label>Asset
+          <select id="asset-pick"><option value="sample">sample</option><option value="">Custom…</option></select>
         </label>
-        <label>Asset <input id="asset" size="14" value="sample"></label>
+        <label id="asset-custom" hidden>Name <input id="asset" size="14" placeholder="asset id"></label>
         <label>Protocol<select id="proto"><option value="hls">HLS</option><option value="dash">DASH</option></select></label>
         <button id="load" style="align-self:end">Play</button>
       </div>
@@ -163,7 +163,7 @@ function load() {
   if (!diagnose()) log('<span class="warn-text">cannot start, see warnings under the player</span>');
   $('log').innerHTML = '';
   markCurrentRow();
-  const asset = encodeURIComponent($('asset').value);
+  const asset = encodeURIComponent(assetId());
   if ($('proto').value === 'hls') {
     const url = `${base()}/hls/${asset}/master.m3u8`;
     log('HLS ' + url);
@@ -197,28 +197,45 @@ function load() {
 }
 
 /// Plays a row's asset id when a cache or catalog row is clicked, so browsing needs no typing.
-function playAsset(assetId) {
-  $('asset').value = assetId;
+function playAsset(id) {
+  selectAsset(id);
   load();
 }
 
 function markCurrentRow() {
-  const current = $('asset').value;
+  const current = assetId();
   for (const row of document.querySelectorAll('#cache tbody tr'))
     row.classList.toggle('current', row.dataset.asset === current);
-  // The picker only ever shows a known asset; typing a custom name falls back to its
-  // placeholder rather than pretending one of the listed assets is selected.
-  const picker = $('asset-picker');
-  picker.value = [...picker.options].some(o => o.value === current) ? current : '';
 }
 
-/// The dropdown next to the Asset field: every asset ID the cache table lists. Picking one plays
-/// it; typing a name that isn't listed (a mapper asset nobody has requested yet, for example)
-/// keeps working in the text field regardless, since the picker is a convenience, not a gate.
-function renderAssetPicker(ids) {
-  $('asset-picker').innerHTML = '<option value="">— pick one, or type below —</option>'
-    + ids.map(id => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');
-  markCurrentRow();
+// ---------- asset dropdown ----------
+// Every asset the server can name (its static catalog, or a mapper's optional listing) plus
+// whatever it has loaded, then "Custom…" for any other name. Asset IDs are never empty, so the
+// empty value marks "Custom…" without colliding with one.
+const assetId = () => $('asset-pick').value || $('asset').value.trim();
+
+function showCustomField() {
+  $('asset-custom').hidden = $('asset-pick').value !== '';
+}
+
+/// Rebuilds the options from `ids`, keeping the current choice: a selected asset stays selected
+/// even when the list no longer names it, and "Custom…" stays chosen with its text intact.
+function renderAssetOptions(ids) {
+  const pick = $('asset-pick'), selected = pick.value;
+  const all = [...new Set(selected ? [...ids, selected] : ids)].sort();
+  pick.innerHTML = all.map(id => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('')
+    + '<option value="">Custom…</option>';
+  pick.value = selected;
+  showCustomField();
+}
+
+/// Selects `id`, adding it to the dropdown if it is not listed yet.
+function selectAsset(id) {
+  const pick = $('asset-pick');
+  if (![...pick.options].some(option => option.value === id))
+    pick.add(new Option(id, id), pick.options.length - 1);
+  pick.value = id;
+  showCustomField();
 }
 
 function renderPlayerStats() {
@@ -349,7 +366,8 @@ function renderCache(cache, knownAssets) {
     : '';
   for (const row of $('cache').tBodies[0].rows)
     row.onclick = () => playAsset(row.dataset.asset);
-  renderAssetPicker([...rows.keys()].sort());
+  renderAssetOptions([...rows.keys()]);
+  markCurrentRow();
 }
 
 function escapeHtml(s) {
@@ -406,7 +424,11 @@ async function poll() {
 
 $('load').onclick = load;
 $('asset').addEventListener('input', markCurrentRow);
-$('asset-picker').addEventListener('change', () => { if ($('asset-picker').value) playAsset($('asset-picker').value); });
+$('asset').addEventListener('keydown', event => { if (event.key === 'Enter') load(); });
+$('asset-pick').addEventListener('change', () => {
+  showCustomField();
+  if ($('asset-pick').value) load(); else $('asset').focus();
+});
 load();
 clearTimeout(pollTimer);
 poll();
