@@ -10,6 +10,7 @@ mod avc;
 mod bits;
 mod cipher;
 mod keys;
+mod segment;
 
 pub(crate) use avc::AvcParameters;
 pub(crate) use cipher::{Cipher, Pattern};
@@ -17,3 +18,4 @@ pub(crate) use keys::{
     CLEARKEY, ContentKey, DrmSystem, Encryption, FAIRPLAY, KeyBytes, Keys, PLAYREADY, WIDEVINE,
     WireEncryption, hex_string, pssh_data, uuid_string,
 };
+pub(crate) use segment::{AssetProtection, PendingEncryption, TrackProtection};

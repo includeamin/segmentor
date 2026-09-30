@@ -16,6 +16,10 @@ pub(crate) struct PreparedSegment {
     pub(crate) header: Bytes,
     pub(crate) ranges: Vec<ByteRange>,
     pub(crate) content_length: u64,
+    /// For an encrypted track: what remains once the samples are read (see `cenc::segment`).
+    /// `header`, `ranges`, and `content_length` then describe the clear fragment and are replaced.
+    #[allow(dead_code, reason = "TEMPORARY: used by the DRM plan's later tasks")]
+    pub(crate) encryption: Option<Box<crate::cenc::PendingEncryption>>,
 }
 
 pub(crate) async fn write_media_segment(
@@ -99,6 +103,7 @@ pub(crate) fn prepare_media_segment(
         header: Bytes::from(header),
         ranges: coalesced_ranges(samples)?,
         content_length,
+        encryption: None,
     })
 }
 
@@ -203,7 +208,6 @@ pub(crate) const MAX_SUBSAMPLES: usize = 42;
 /// The `moof` and `mdat` header of an encrypted fragment: the usual boxes plus `senc`, `saiz`,
 /// and `saio`, which describe each sample's clear and protected bytes (ISO/IEC 23001-7, 7.2).
 /// An empty map means a whole-sample (audio) encryption with no subsamples.
-#[allow(dead_code, reason = "TEMPORARY: used by the DRM plan's later tasks")]
 pub(crate) fn encrypted_fragment_header(
     track_id: u32,
     kind: TrackKind,

@@ -15,7 +15,6 @@ use crate::source::Metadata;
 const FTYP: [u8; 24] = *b"\x00\x00\x00\x18ftypiso6\x00\x00\x00\x00iso6mp41";
 
 /// What an encrypted track's init segment declares (ISO/IEC 23001-7, 8.1 and 8.2).
-#[allow(dead_code, reason = "TEMPORARY: used by the DRM plan's later tasks")]
 pub(crate) struct InitProtection<'a> {
     pub(crate) key_id: [u8; 16],
     pub(crate) constant_iv: [u8; 16],
@@ -79,7 +78,6 @@ fn write_init(
 }
 
 /// The first sample entry of `track_id`: its type and payload, as the file has them.
-#[allow(dead_code, reason = "TEMPORARY: used by the DRM plan's later tasks")]
 pub(crate) fn sample_entry(metadata: &Metadata, track_id: u32) -> Result<([u8; 4], Vec<u8>)> {
     let moov = box_payload(metadata.moov_bytes(), 0)?;
     let track = child_boxes(moov.payload)?

@@ -48,6 +48,10 @@ pub(crate) struct AvcParameters {
     nal_length_size: usize,
     sps: HashMap<u32, Sps>,
     pub(super) pps: HashMap<u32, Pps>,
+    #[cfg(test)]
+    raw_sps: Vec<Vec<u8>>,
+    #[cfg(test)]
+    raw_pps: Vec<Vec<u8>>,
 }
 
 impl AvcParameters {
@@ -62,6 +66,10 @@ impl AvcParameters {
             nal_length_size: usize::from(reader.u8()? & 3) + 1,
             sps: HashMap::new(),
             pps: HashMap::new(),
+            #[cfg(test)]
+            raw_sps: Vec::new(),
+            #[cfg(test)]
+            raw_pps: Vec::new(),
         };
         let sps_count = reader.u8()? & 0x1f;
         for _ in 0..sps_count {
@@ -86,10 +94,14 @@ impl AvcParameters {
             Some(7) => {
                 let (id, sps) = parse_sps(nal)?;
                 self.sps.insert(id, sps);
+                #[cfg(test)]
+                self.raw_sps.push(nal.to_vec());
             }
             Some(8) => {
                 let (id, pps) = parse_pps(nal)?;
                 self.pps.insert(id, pps);
+                #[cfg(test)]
+                self.raw_pps.push(nal.to_vec());
             }
             _ => {}
         }
@@ -409,7 +421,46 @@ fn small(value: u32, max: u32) -> Result<usize> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests_support {
+    use super::AvcParameters;
+
+    /// The first IDR slice NAL unit of `name`'s first sample, with the track's parameters.
+    pub(crate) fn first_idr(name: &str) -> (AvcParameters, Vec<u8>) {
+        let (parameters, samples) = super::tests::samples(name);
+        let length = parameters.nal_length_size();
+        let sample = &samples[0];
+        let mut at = 0;
+        while at < sample.len() {
+            let size = sample[at..at + length]
+                .iter()
+                .fold(0usize, |v, b| v << 8 | usize::from(*b));
+            let nal = &sample[at + length..at + length + size];
+            if nal[0] & 0x1f == 5 {
+                return (parameters, nal.to_vec());
+            }
+            at += length + size;
+        }
+        panic!("{name} starts with an IDR slice");
+    }
+}
+
+impl AvcParameters {
+    /// Removes and returns one SPS and one PPS as NAL units, for in-band tests.
+    #[cfg(test)]
+    pub(crate) fn take_all_for_test(&mut self) -> (Vec<u8>, Vec<u8>) {
+        let sps = std::mem::take(&mut self.raw_sps);
+        let pps = std::mem::take(&mut self.raw_pps);
+        self.sps.clear();
+        self.pps.clear();
+        (
+            sps.into_iter().next().unwrap(),
+            pps.into_iter().next().unwrap(),
+        )
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use super::*;
@@ -419,7 +470,7 @@ mod tests {
     use crate::testutil::fixture;
 
     /// The fixture's parameters and every video sample's bytes.
-    fn samples(name: &str) -> (AvcParameters, Vec<Vec<u8>>) {
+    pub(crate) fn samples(name: &str) -> (AvcParameters, Vec<Vec<u8>>) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
