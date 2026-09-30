@@ -141,10 +141,6 @@ pub(crate) fn file_location(path: &str) -> Value {
     json!({ "type": "file", "path": path })
 }
 
-#[allow(
-    dead_code,
-    reason = "TEMPORARY: first used by the rotation test (plan Task 7)"
-)]
 pub(crate) fn http_location(url: &str) -> Value {
     json!({ "type": "http", "url": url })
 }

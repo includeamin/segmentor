@@ -120,10 +120,6 @@ impl ServedAsset {
 
     /// One clip's init segment, served at `{track}/clips/{clip}/init.mp4`. Only a sequence has
     /// them; its clips may be encoded differently, so each has its own (TDD 0008, "URLs").
-    #[allow(
-        dead_code,
-        reason = "TEMPORARY: first used by the clip init route (plan Task 7)"
-    )]
     pub(crate) fn clip_init_segment(
         &self,
         rendition: Option<&str>,
@@ -276,6 +272,14 @@ impl ServedAsset {
                 .first()
                 .map_or(0, |entry| entry.asset.plan.segments.len()),
             Self::Sequence(asset) => asset.segment_count(),
+        }
+    }
+
+    /// How many clips the asset plays, for status reporting: one for anything but a sequence.
+    pub(crate) fn clip_count(&self) -> usize {
+        match self {
+            Self::Single(_) | Self::Composite(_) => 1,
+            Self::Sequence(asset) => asset.clip_count(),
         }
     }
 

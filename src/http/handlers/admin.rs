@@ -45,6 +45,8 @@ struct CachedAssetJson {
     bytes: u64,
     tracks: usize,
     subtitles: usize,
+    /// One for anything but a sequence of clips.
+    clips: usize,
     duration_seconds: f64,
 }
 
@@ -71,6 +73,7 @@ impl From<RegistryStatus> for StatusResponse {
                         bytes: asset.bytes,
                         tracks: asset.tracks,
                         subtitles: asset.subtitles,
+                        clips: asset.clips,
                         duration_seconds: asset.duration_seconds,
                     })
                     .collect(),
@@ -116,6 +119,7 @@ mod tests {
                     bytes: 4096,
                     tracks: 2,
                     subtitles: 1,
+                    clips: 1,
                     duration_seconds: 120.5,
                 }],
             },

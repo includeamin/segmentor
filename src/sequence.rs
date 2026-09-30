@@ -245,10 +245,6 @@ impl SequenceAsset {
             .ok_or(Error::NotFound("track does not exist"))
     }
 
-    #[allow(
-        dead_code,
-        reason = "TEMPORARY: first used by the clip init route (plan Task 7)"
-    )]
     pub(crate) fn clip_init_segment(&self, key: TrackKey, clip: usize) -> Result<Bytes> {
         self.clips
             .get(clip)
@@ -308,10 +304,6 @@ impl SequenceAsset {
         self.clips.iter().map(|clip| clip.plan.segments.len()).sum()
     }
 
-    #[allow(
-        dead_code,
-        reason = "TEMPORARY: first used by the clip init route (plan Task 7)"
-    )]
     pub(crate) fn clip_count(&self) -> usize {
         self.clips.len()
     }
