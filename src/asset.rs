@@ -9,7 +9,7 @@ use crate::media::{MediaIndex, Sample, Track, TrackKey};
 use crate::mp4::ParsedMedia;
 use crate::protocol::{Presentation, dash, hls};
 use crate::segment::{SegmentPlan, TrackSegment};
-use crate::source::{ByteRange, LocalMediaSource, MediaSourceKind};
+use crate::source::{ByteRange, LocalMediaSource, MediaSourceKind, Metadata};
 use crate::subtitle::{self, Subtitle};
 use crate::{fmp4, mp4, segment};
 use std::sync::Arc;
@@ -70,32 +70,45 @@ impl PackagedAsset {
         let parsed = mp4::parse(&source, limits).await?;
         let limits = limits.clone();
         tokio::task::spawn_blocking(move || {
-            Self::assemble(source, parsed, subtitles, segment_duration_ms, &limits)
+            let ParsedMedia { index, metadata } = parsed;
+            Self::assemble(
+                source,
+                index,
+                &metadata,
+                subtitles,
+                segment_duration_ms,
+                &limits,
+                None,
+            )
         })
         .await
         .map_err(|error| Error::Io(std::io::Error::other(error)))?
     }
 
-    fn assemble(
+    /// Plans, writes init segments, and renders playlists for an already parsed index: a whole
+    /// file's, or one trimmed to a clip (see `clip::trim`). `version` replaces the URL version
+    /// derived from the content, for a clip whose version must also cover its window.
+    pub(crate) fn assemble(
         source: MediaSourceKind,
-        parsed: ParsedMedia,
+        index: MediaIndex,
+        metadata: &Metadata,
         subtitles: Vec<Subtitle>,
         segment_duration_ms: u64,
         limits: &LimitsConfig,
+        version: Option<String>,
     ) -> Result<Self> {
-        let ParsedMedia { index, metadata } = parsed;
         let plan = segment::plan(&index, segment_duration_ms, limits)?;
         let subtitles = prepare_subtitles(&index, subtitles)?;
         let init_segments = index
             .tracks
             .iter()
             .map(|track| {
-                fmp4::write_init_segment(&metadata, track.id)
+                fmp4::write_init_segment(metadata, track.id)
                     .map(Bytes::from)
                     .map(|bytes| (track.key, bytes))
             })
             .collect::<Result<HashMap<_, _>>>()?;
-        let version = version_of(&index, &subtitles);
+        let version = version.unwrap_or_else(|| version_of(&index, &subtitles));
         let rendered = RenderedManifests::render(
             Presentation::new(&index.tracks, &plan, &version).with_subtitles(&subtitles),
         )?;
@@ -207,6 +220,19 @@ impl PackagedAsset {
         key: TrackKey,
         segment_index: u32,
     ) -> Result<fmp4::PreparedSegment> {
+        // The segment is looked up first, so an out-of-range index is still a 404; no plan has
+        // `u32::MAX` segments, so the saturation is never observed.
+        self.prepare_numbered_segment(key, segment_index, segment_index.saturating_add(1))
+    }
+
+    /// Like [`Self::prepare_media_segment`], with the fragment's `mfhd` sequence number chosen by
+    /// the caller: a sequence of clips numbers its fragments across every clip, not within one.
+    pub(crate) fn prepare_numbered_segment(
+        &self,
+        key: TrackKey,
+        segment_index: u32,
+        sequence_number: u32,
+    ) -> Result<fmp4::PreparedSegment> {
         let track = self.track(key)?;
         let segment = self
             .plan
@@ -221,9 +247,6 @@ impl PackagedAsset {
             .find(|candidate| candidate.track_id == track.id)
             .copied()
             .ok_or_else(|| Error::InvalidMedia("segment is missing a track".to_owned()))?;
-        let sequence_number = segment_index
-            .checked_add(1)
-            .ok_or_else(|| Error::InvalidMedia("sequence number overflow".to_owned()))?;
 
         fmp4::prepare_media_segment(track, track_segment, sequence_number, &self.limits)
     }
@@ -341,7 +364,7 @@ impl RenderedManifests {
 /// Media URLs are cached as immutable by browsers and CDNs, so a new build that answers an old
 /// URL with different bytes would be served stale content until the cache expires. Mixing the
 /// revision into the version gives such a build new URLs instead.
-const FORMAT_REVISION: u32 = 2;
+pub(crate) const FORMAT_REVISION: u32 = 2;
 
 /// Validates each subtitle file and moves its cues onto the asset's timeline, by the offset the
 /// edit lists were resolved with. A track's own delay is not part of it: that is already in the
@@ -452,6 +475,57 @@ mod tests {
         assert_ne!(plain.version(), shifted.version());
         let again = load("h264-aac-fragmented.mp4").await;
         assert_eq!(plain.version(), again.version(), "and a version is stable");
+    }
+
+    fn fixture_path(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    #[tokio::test]
+    async fn an_explicit_version_replaces_the_content_version_everywhere_it_is_served() {
+        let source = MediaSourceKind::Local(Arc::new(
+            LocalMediaSource::open(fixture_path("h264-aac.mp4")).unwrap(),
+        ));
+        let limits = LimitsConfig::default();
+        let ParsedMedia { index, metadata } = mp4::parse(&source, &limits).await.unwrap();
+
+        let asset = PackagedAsset::assemble(
+            source,
+            index,
+            &metadata,
+            Vec::new(),
+            1000,
+            &limits,
+            Some("feedfacefeedface".to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(asset.version(), "feedfacefeedface");
+        let master = String::from_utf8(asset.hls_master_playlist().to_vec()).unwrap();
+        assert!(master.contains("index.m3u8?v=feedfacefeedface"), "{master}");
+        let media =
+            String::from_utf8(asset.hls_media_playlist(TrackKey::VIDEO).unwrap().to_vec()).unwrap();
+        assert!(media.contains("init.mp4?v=feedfacefeedface"), "{media}");
+    }
+
+    #[tokio::test]
+    async fn a_caller_chosen_sequence_number_lands_in_the_fragment_header() {
+        let asset =
+            PackagedAsset::load_local(fixture_path("h264-aac.mp4"), 1000, &LimitsConfig::default())
+                .await
+                .unwrap();
+
+        let plain = asset.prepare_media_segment(TrackKey::VIDEO, 1).unwrap();
+        let numbered = asset
+            .prepare_numbered_segment(TrackKey::VIDEO, 1, 42)
+            .unwrap();
+
+        // moof header (8 bytes), mfhd header (8), version and flags (4), then the number.
+        assert_eq!(&plain.header[20..24], &2u32.to_be_bytes());
+        assert_eq!(&numbered.header[20..24], &42u32.to_be_bytes());
+        assert_eq!(plain.ranges, numbered.ranges);
     }
 
     /// The plain fragmented fixture with its last 20 kB removed: inside the final fragment.
