@@ -29,6 +29,7 @@ pub(crate) fn adaptive_master_playlist(
     audio: &[AdaptiveAudio<'_>],
     subtitles: &[Subtitle],
     iframe_stream_line: Option<&str>,
+    encryption: Option<&crate::cenc::Encryption>,
 ) -> Result<String> {
     if video.is_empty() {
         return Err(Error::InvalidMedia(
@@ -36,6 +37,11 @@ pub(crate) fn adaptive_master_playlist(
         ));
     }
     let mut playlist = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
+    playlist.push_str(
+        &encryption
+            .map(crate::cenc::hls_session_keys)
+            .unwrap_or_default(),
+    );
     for (index, entry) in audio.iter().enumerate() {
         let language = track_language(entry.track);
         let name = language.map_or_else(
@@ -115,6 +121,12 @@ pub(crate) fn master_playlist(presentation: Presentation<'_>) -> Result<String> 
     }
 
     let mut playlist = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
+    playlist.push_str(
+        &presentation
+            .encryption()
+            .map(crate::cenc::hls_session_keys)
+            .unwrap_or_default(),
+    );
     // Audio joins the variant as a rendition group whenever there is something to choose
     // between: video plus audio, or several audio tracks. A lone audio track is just the variant.
     let audio_group = audio.is_some() && (video.is_some() || audio_tracks.len() > 1);
@@ -170,11 +182,24 @@ pub(crate) fn media_playlist(presentation: Presentation<'_>, key: TrackKey) -> R
     let version = presentation.version();
     let target_duration = target_duration(presentation, track);
     let mut playlist = format!(
-        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target_duration}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-MAP:URI=\"init.mp4?v={version}\"\n"
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target_duration}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n"
     );
+    playlist.push_str(&key_lines(presentation, track));
+    writeln!(playlist, "#EXT-X-MAP:URI=\"init.mp4?v={version}\"")
+        .expect("writing to a String cannot fail");
     write_segment_entries(&mut playlist, presentation, track, 0, version)?;
     playlist.push_str("#EXT-X-ENDLIST\n");
     Ok(playlist)
+}
+
+/// The `#EXT-X-KEY` lines for `track`, empty when the presentation is clear.
+fn key_lines(presentation: Presentation<'_>, track: &Track) -> String {
+    presentation
+        .encryption()
+        .map(|encryption| {
+            crate::cenc::hls_key_lines(encryption, encryption.key_for(track.kind), "EXT-X-KEY")
+        })
+        .unwrap_or_default()
 }
 
 /// The longest segment of `track`, in whole seconds rounded up, as `#EXT-X-TARGETDURATION` needs.
@@ -232,6 +257,12 @@ pub(crate) fn sequence_media_playlist(
     let mut playlist = format!(
         "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n"
     );
+    if let Some(first) = clips.first() {
+        playlist.push_str(&key_lines(
+            first.presentation,
+            first.presentation.track(key)?,
+        ));
+    }
     for (position, clip) in clips.iter().enumerate() {
         let track = clip.presentation.track(key)?;
         if position > 0 {
@@ -280,6 +311,12 @@ pub(crate) fn sequence_master_playlist(
     let audio_group = !audio_keys.is_empty() && (video_key.is_some() || audio_keys.len() > 1);
 
     let mut playlist = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
+    playlist.push_str(
+        &first
+            .encryption()
+            .map(crate::cenc::hls_session_keys)
+            .unwrap_or_default(),
+    );
     if audio_group {
         for (index, key) in audio_keys.iter().enumerate() {
             // The first clip whose track names a language labels the rendition, so an unlabelled
@@ -406,8 +443,11 @@ pub(crate) fn iframe_playlist(presentation: Presentation<'_>) -> Result<Option<S
         .max()
         .unwrap_or(1);
     let mut playlist = format!(
-        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target_duration}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-I-FRAMES-ONLY\n#EXT-X-MAP:URI=\"init.mp4?v={version}\"\n"
+        "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target_duration}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-I-FRAMES-ONLY\n"
     );
+    playlist.push_str(&key_lines(presentation, track));
+    writeln!(playlist, "#EXT-X-MAP:URI=\"init.mp4?v={version}\"")
+        .expect("writing to a String cannot fail");
     for (index, frame) in frames.entries.iter().enumerate() {
         let milliseconds = frame
             .interval
@@ -565,6 +605,25 @@ pub(crate) fn track_language(track: &Track) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::protocol::fixtures::Loaded;
+
+    #[test]
+    fn an_encrypted_media_playlist_names_its_keys_before_the_map() {
+        let loaded = Loaded::h264_aac();
+        let encryption = crate::cenc::tests_support::sample_encryption();
+        let presentation = loaded.presentation().with_encryption(Some(&encryption));
+
+        let playlist = media_playlist(presentation, TrackKey::VIDEO).unwrap();
+        let master = master_playlist(presentation).unwrap();
+
+        let key = playlist.find("#EXT-X-KEY:").unwrap();
+        assert!(key < playlist.find("#EXT-X-MAP:").unwrap(), "{playlist}");
+        assert!(
+            master.contains("#EXT-X-SESSION-KEY:METHOD=SAMPLE-AES"),
+            "{master}"
+        );
+        let clear = media_playlist(loaded.presentation(), TrackKey::VIDEO).unwrap();
+        assert!(!clear.contains("EXT-X-KEY"), "{clear}");
+    }
 
     #[test]
     fn master_references_separate_audio_and_video_playlists() {

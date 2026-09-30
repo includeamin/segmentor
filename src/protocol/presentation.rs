@@ -22,6 +22,7 @@ pub(crate) struct Presentation<'a> {
     plan: &'a SegmentPlan,
     version: &'a str,
     subtitles: &'a [Subtitle],
+    encryption: Option<&'a crate::cenc::Encryption>,
 }
 
 impl<'a> Presentation<'a> {
@@ -31,7 +32,20 @@ impl<'a> Presentation<'a> {
             plan,
             version,
             subtitles: &[],
+            encryption: None,
         }
+    }
+
+    /// The same view, encrypted with `encryption` (TDD 0009).
+    pub(crate) const fn with_encryption(
+        self,
+        encryption: Option<&'a crate::cenc::Encryption>,
+    ) -> Self {
+        Self { encryption, ..self }
+    }
+
+    pub(crate) const fn encryption(&self) -> Option<&'a crate::cenc::Encryption> {
+        self.encryption
     }
 
     /// The same view with the asset's sidecar subtitles.
