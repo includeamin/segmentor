@@ -31,7 +31,8 @@ use crate::config::{Config, LimitsConfig, is_valid_asset_id};
 use crate::error::{Error, Result};
 use crate::observability::metrics::{CacheEvent, Metrics, ResolverOutcome};
 use crate::resolver::{
-    AssetLocation, AssetResolver, Resolution, ResolveError, ResolvedAsset, SubtitleLocation,
+    AssetLocation, AssetResolver, LocationKey, Resolution, ResolveError, ResolvedAsset,
+    SubtitleLocation,
 };
 use crate::source::LocationRefresher;
 use crate::subtitle::Subtitle;
@@ -219,22 +220,22 @@ impl AssetRegistry {
     }
 
     /// Re-asks the mapper for `asset_id`'s location after the origin rejected the current URL.
-    /// `rendition` names which one for a composite asset; `None` for a plain asset's only one.
+    /// `key` names which of the answer's locations.
     ///
     /// Concurrent callers share one lookup; a location fetched moments ago is reused instead of
     /// asking again. Fails if the asset changed underneath the caller.
     pub(crate) async fn refresh_location(
         self: &Arc<Self>,
         asset_id: &str,
-        rendition: Option<&str>,
+        key: &LocationKey,
     ) -> std::result::Result<Url, RegistryError> {
         let flight = self.enter_flight(asset_id).await;
         let registry = Arc::clone(self);
         let id = asset_id.to_owned();
-        let rendition = rendition.map(str::to_owned);
+        let key = key.clone();
         tokio::spawn(async move {
             let _flight = flight;
-            registry.refresh_inner(&id, rendition.as_deref()).await
+            registry.refresh_inner(&id, &key).await
         })
         .await
         .map_err(|error| RegistryError::LoadFailed(format!("refresh task failed: {error}")))?
@@ -243,7 +244,7 @@ impl AssetRegistry {
     async fn refresh_inner(
         &self,
         asset_id: &str,
-        rendition: Option<&str>,
+        key: &LocationKey,
     ) -> std::result::Result<Url, RegistryError> {
         const RECENT: Duration = Duration::from_secs(2);
         let (old, fetched_at) = match lock(&self.inner).resolutions.get(asset_id) {
@@ -255,7 +256,7 @@ impl AssetRegistry {
             _ => return Err(RegistryError::NotFound),
         };
         if fetched_at.elapsed() < RECENT
-            && let Some(AssetLocation::Http(url)) = old.location_for(rendition)
+            && let Some(AssetLocation::Http(url)) = old.location_for(key)
         {
             return Ok(url.clone());
         }
@@ -264,10 +265,10 @@ impl AssetRegistry {
             Ok(Resolution::Resolved(new)) => {
                 self.metrics.resolver_result(ResolverOutcome::Ok);
                 self.store_resolution(asset_id, &new, Some(&old));
-                match new.location_for(rendition) {
+                match new.location_for(key) {
                     Some(AssetLocation::Http(url))
                         if new.version == old.version
-                            && old.location_for(rendition).is_some_and(|old| {
+                            && old.location_for(key).is_some_and(|old| {
                                 old.same_object(&AssetLocation::Http(url.clone()))
                             }) =>
                     {
@@ -565,17 +566,17 @@ impl AssetRegistry {
                 // The same objects, possibly under fresh signatures: keep the loaded asset and
                 // point any rotated rendition at its new URL, so nothing is reparsed and streams
                 // in flight simply carry on.
-                for (rendition, new_loc) in &new_locations {
+                for (key, new_loc) in &new_locations {
                     if let (AssetLocation::Http(url), Some(old_loc)) =
-                        (new_loc, old.location_for(*rendition))
+                        (new_loc, old.location_for(key))
                         && old_loc != *new_loc
                     {
-                        asset.update_location(*rendition, url);
+                        asset.update_location(key, url);
                         self.metrics.location_rotated();
                         tracing::debug!(
                             event = "location_rotated",
                             asset.id = asset_id,
-                            rendition = rendition.unwrap_or("-"),
+                            location = %key,
                         );
                     }
                 }
@@ -731,7 +732,7 @@ impl AssetRegistry {
         let refresher = Arc::new(AssetRefresher {
             registry: Arc::downgrade(self),
             asset_id: asset_id.to_owned(),
-            rendition: None,
+            key: LocationKey::Main,
             armed: AtomicBool::new(false),
         });
         let source = self
@@ -779,7 +780,7 @@ impl AssetRegistry {
                     let refresher = Arc::new(AssetRefresher {
                         registry: Arc::downgrade(&registry),
                         asset_id: asset_id.clone(),
-                        rendition: Some(rendition.id.clone()),
+                        key: LocationKey::Rendition(rendition.id.clone()),
                         armed: AtomicBool::new(false),
                     });
                     let source = registry
@@ -861,8 +862,8 @@ fn describe(error: &RegistryError) -> String {
 struct AssetRefresher {
     registry: Weak<AssetRegistry>,
     asset_id: String,
-    /// Which rendition this refresher answers for; `None` for a plain asset's only location.
-    rendition: Option<String>,
+    /// Which of the answer's locations this refresher answers for.
+    key: LocationKey,
     /// Enabled once the asset has loaded; see `AssetRegistry::load`.
     armed: AtomicBool,
 }
@@ -880,7 +881,7 @@ impl LocationRefresher for AssetRefresher {
                 .upgrade()
                 .ok_or_else(|| Error::Upstream("the asset registry has shut down".to_owned()))?;
             registry
-                .refresh_location(&self.asset_id, self.rendition.as_deref())
+                .refresh_location(&self.asset_id, &self.key)
                 .await
                 .map_err(|error| match error {
                     RegistryError::Unavailable(message) => Error::UpstreamUnavailable(message),
