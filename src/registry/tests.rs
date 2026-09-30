@@ -18,7 +18,7 @@ use crate::config::{
 use crate::http::{AppState, router, spawn_resolver_probe};
 use crate::testutil::{
     Answer, MockMapper, MockOrigin, OriginValidator, file_location, fixture, fixtures_dir,
-    http_location,
+    http_location, tfdt,
 };
 
 fn mapper_settings(url: &str) -> MapperConfig {
@@ -2087,4 +2087,144 @@ async fn a_rotated_signature_reaches_every_clip_cut_from_that_file() {
         metric(&h.state, "vod_asset_loads_total{outcome=\"ok\"} 1"),
         "the asset must not reload"
     );
+}
+
+/// Reassembles each clip from its init segment and media segments under `base`, and returns how
+/// many video frames FFmpeg decodes from each, failing on any decode error.
+async fn decode_each(
+    app: &Router,
+    base: &str,
+    clips: &[(String, Vec<String>)],
+    directory: &std::path::Path,
+) -> Vec<u64> {
+    std::fs::create_dir_all(directory).unwrap();
+    let mut counts = Vec::new();
+    for (position, (init, segments)) in clips.iter().enumerate() {
+        let mut bytes = fetch(app, &format!("{base}{init}")).await.2.to_vec();
+        for segment in segments {
+            bytes.extend_from_slice(&fetch(app, &format!("{base}{segment}")).await.2);
+        }
+        let path = directory.join(format!("clip-{position}.mp4"));
+        std::fs::write(&path, bytes).unwrap();
+        let count = std::process::Command::new("ffprobe")
+            .args(["-v", "error", "-count_frames", "-select_streams", "v:0"])
+            .args(["-show_entries", "stream=nb_read_frames", "-of", "csv=p=0"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        let decode = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(&path)
+            .args(["-f", "null", "-"])
+            .output()
+            .unwrap();
+        assert!(
+            decode.stderr.is_empty(),
+            "clip {position}: {}",
+            String::from_utf8_lossy(&decode.stderr)
+        );
+        counts.push(
+            String::from_utf8_lossy(&count.stdout)
+                .trim()
+                .parse()
+                .unwrap(),
+        );
+    }
+    counts
+}
+
+/// FFmpeg cannot judge a mixed sequence as one stream: its HLS demuxer keeps the first init
+/// segment's decoder settings across an `EXT-X-MAP` change, and its DASH demuxer plays a single
+/// Period (TDD 0008, "Testing"). So each clip is followed from the served playlist and manifest to
+/// its own init and media segments, reassembled, and decoded on its own.
+#[tokio::test]
+async fn every_clip_of_a_sequence_decodes_from_the_served_hls_and_dash() {
+    if std::process::Command::new("ffprobe")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: ffprobe is not installed");
+        return;
+    }
+    let h = harness().await;
+    h.mapper.state.set(
+        "seq",
+        Answer::clips(
+            "v1",
+            &[
+                clip("h264-aac.mp4", None, None),
+                clip("rendition-720p.mp4", None, None),
+                clip("h264-aac.mp4", Some(1500), None),
+            ],
+        ),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/seq/master.m3u8").await.2);
+    let directory =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/sequence-decode");
+
+    // HLS: each EXT-X-MAP names a clip's init segment; the URIs after it are that clip's.
+    let playlist = text(&fetch(&h.app, "/hls/seq/video/index.m3u8").await.2);
+    let mut clips: Vec<(String, Vec<String>)> = Vec::new();
+    for line in playlist.lines() {
+        if let Some(uri) = line
+            .strip_prefix("#EXT-X-MAP:URI=\"")
+            .and_then(|rest| rest.strip_suffix('"'))
+        {
+            clips.push((uri.to_owned(), Vec::new()));
+        } else if !line.is_empty() && !line.starts_with('#') {
+            clips
+                .last_mut()
+                .expect("a map before any segment")
+                .1
+                .push(line.to_owned());
+        }
+    }
+    let frames = decode_each(&h.app, "/hls/seq/video/", &clips, &directory.join("hls")).await;
+    assert_eq!(
+        frames,
+        [90, 90, 60],
+        "whole, whole, and from the keyframe at 1 s"
+    );
+
+    // DASH: each Period's video template names its clip's init segment, first number, and
+    // offset; its timeline says how many segments follow.
+    let manifest = text(&fetch(&h.app, "/dash/seq/manifest.mpd").await.2);
+    let mut clips = Vec::new();
+    for (position, period) in manifest.split("<Period ").skip(1).enumerate() {
+        let video = period
+            .split("contentType=\"video\"")
+            .nth(1)
+            .expect("a video adaptation set");
+        let attribute = |name: &str| -> String {
+            video
+                .split(&format!("{name}=\""))
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .expect("the attribute is present")
+                .to_owned()
+        };
+        let first: u32 = attribute("startNumber").parse().unwrap();
+        let offset: u64 = attribute("presentationTimeOffset").parse().unwrap();
+        let count = u32::try_from(
+            video
+                .split("</SegmentTimeline>")
+                .next()
+                .unwrap()
+                .matches("<S ")
+                .count(),
+        )
+        .unwrap();
+        let segments = (first..first + count)
+            .map(|number| format!("segments/{number}/media.m4s?v={version}"))
+            .collect::<Vec<_>>();
+        // Each Period starts where its media does: the first fragment's decode time is the offset.
+        let fragment = fetch(&h.app, &format!("/dash/seq/video/{}", segments[0]))
+            .await
+            .2;
+        assert_eq!(tfdt(&fragment), offset, "period {position}");
+        clips.push((format!("clips/{position}/init.mp4?v={version}"), segments));
+    }
+    let frames = decode_each(&h.app, "/dash/seq/video/", &clips, &directory.join("dash")).await;
+    assert_eq!(frames, [90, 90, 60]);
 }
