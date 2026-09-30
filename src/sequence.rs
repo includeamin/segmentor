@@ -11,7 +11,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::asset::PackagedAsset;
-use crate::clip::{self, ClipWindow, TimelinePosition};
+use crate::clip::{self, ClipWindow, TimelinePosition, Trailing};
 use crate::composite::ServedAsset;
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
@@ -61,7 +61,13 @@ pub(crate) fn build(
     let mut start = TimelinePosition::ZERO;
     let mut trimmed = Vec::with_capacity(clips.len());
     for (position, &(file, window)) in clips.iter().enumerate() {
-        let cut = clip::trim(&files[file].parsed.index, window, start).map_err(named(position))?;
+        let trailing = if position + 1 == clips.len() {
+            Trailing::Keep
+        } else {
+            Trailing::Cut
+        };
+        let cut = clip::trim(&files[file].parsed.index, window, start, trailing)
+            .map_err(named(position))?;
         tracing::info!(
             event = "clip_trimmed",
             asset.id = asset_id,

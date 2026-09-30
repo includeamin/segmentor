@@ -68,6 +68,15 @@ fn overflow() -> Error {
     Error::InvalidMedia("clip timing overflow".to_owned())
 }
 
+/// What happens to audio that runs past the end of a clip's video.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Trailing {
+    /// Kept, as the segment planner keeps it for a whole file: nothing follows this clip.
+    Keep,
+    /// Stopped where the video ends, so the next clip's audio overlaps by less than one frame.
+    Cut,
+}
+
 /// One clip's samples, moved onto the sequence timeline.
 #[derive(Debug)]
 pub(crate) struct Trimmed {
@@ -85,6 +94,7 @@ pub(crate) fn trim(
     index: &MediaIndex,
     window: ClipWindow,
     start: TimelinePosition,
+    trailing: Trailing,
 ) -> Result<Trimmed> {
     let reference = reference_track(index)?;
     let timescale = reference.timescale;
@@ -100,7 +110,8 @@ pub(crate) fn trim(
     // Negative composition offsets can show a frame before its decode time; moving the clip later
     // by that much keeps every frame at or after the clip's start and every decode time positive.
     let lead = u64::try_from(i128::from(origin) - earliest).unwrap_or(0);
-    let to_the_end = end == reference.samples.len();
+    // Audio past the video's end belongs in the stream only when no clip follows this one.
+    let to_the_end = end == reference.samples.len() && trailing == Trailing::Keep;
 
     let mut tracks = Vec::with_capacity(index.tracks.len());
     for track in &index.tracks {
@@ -423,7 +434,13 @@ mod tests {
     fn the_start_snaps_back_to_the_last_keyframe_shown_at_or_before_from() {
         let index = parse("h264-aac.mp4");
 
-        let trimmed = trim(&index, window(1500, None), TimelinePosition::ZERO).unwrap();
+        let trimmed = trim(
+            &index,
+            window(1500, None),
+            TimelinePosition::ZERO,
+            Trailing::Keep,
+        )
+        .unwrap();
 
         let kept = video(&trimmed.index);
         // Keyframes are one second apart; the one at 1 s (frame 30) is the last shown by 1.5 s.
@@ -438,7 +455,13 @@ mod tests {
         // is shown at or before 0 ms; the clip still starts at the first one, and nothing moves.
         let index = parse("h264-aac.mp4");
 
-        let trimmed = trim(&index, window(0, None), TimelinePosition::ZERO).unwrap();
+        let trimmed = trim(
+            &index,
+            window(0, None),
+            TimelinePosition::ZERO,
+            Trailing::Keep,
+        )
+        .unwrap();
 
         for (kept, original) in trimmed.index.tracks.iter().zip(&index.tracks) {
             assert_eq!(kept.samples, original.samples, "track {}", kept.key);
@@ -451,7 +474,13 @@ mod tests {
         let original = video(&index);
         let to_ticks = i128::from(u64::from(original.timescale) * 2500 / 1000);
 
-        let trimmed = trim(&index, window(0, Some(2500)), TimelinePosition::ZERO).unwrap();
+        let trimmed = trim(
+            &index,
+            window(0, Some(2500)),
+            TimelinePosition::ZERO,
+            Trailing::Keep,
+        )
+        .unwrap();
 
         let kept = video(&trimmed.index).samples.len();
         let last_shown_before = original
@@ -472,7 +501,13 @@ mod tests {
         let index = parse("h264-aac.mp4");
         let (original_video, original_audio) = (video(&index), audio(&index));
 
-        let trimmed = trim(&index, window(1500, Some(2500)), TimelinePosition::ZERO).unwrap();
+        let trimmed = trim(
+            &index,
+            window(1500, Some(2500)),
+            TimelinePosition::ZERO,
+            Trailing::Keep,
+        )
+        .unwrap();
 
         let (kept_video, kept_audio) = (video(&trimmed.index), audio(&trimmed.index));
         let first =
@@ -503,7 +538,13 @@ mod tests {
         let ticks =
             |ms: u64| (ms + index.presentation_offset_ms) * u64::from(original.timescale) / 1000;
 
-        let trimmed = trim(&index, window(1000, Some(2000)), TimelinePosition::ZERO).unwrap();
+        let trimmed = trim(
+            &index,
+            window(1000, Some(2000)),
+            TimelinePosition::ZERO,
+            Trailing::Keep,
+        )
+        .unwrap();
 
         let kept = audio(&trimmed.index);
         let first = &original.samples[original_position(original, &kept.samples[0])];
@@ -521,11 +562,18 @@ mod tests {
     fn a_to_past_the_end_is_clamped() {
         let index = parse("h264-aac.mp4");
 
-        let open = trim(&index, window(1500, None), TimelinePosition::ZERO).unwrap();
+        let open = trim(
+            &index,
+            window(1500, None),
+            TimelinePosition::ZERO,
+            Trailing::Keep,
+        )
+        .unwrap();
         let past = trim(
             &index,
             window(1500, Some(10_000_000)),
             TimelinePosition::ZERO,
+            Trailing::Keep,
         )
         .unwrap();
 
@@ -537,7 +585,13 @@ mod tests {
     fn a_from_at_or_past_the_end_is_an_error() {
         let index = parse("h264-aac.mp4");
 
-        let error = trim(&index, window(5000, None), TimelinePosition::ZERO).unwrap_err();
+        let error = trim(
+            &index,
+            window(5000, None),
+            TimelinePosition::ZERO,
+            Trailing::Keep,
+        )
+        .unwrap_err();
 
         assert!(error.to_string().contains("from_ms"), "{error}");
     }
@@ -551,8 +605,20 @@ mod tests {
         assert!(presented(&video(&plain).samples[30]) > 15_360, "premise");
         assert!(edited.presentation_offset_ms > 0, "premise");
 
-        let from_plain = trim(&plain, window(1000, None), TimelinePosition::ZERO).unwrap();
-        let from_edited = trim(&edited, window(1000, None), TimelinePosition::ZERO).unwrap();
+        let from_plain = trim(
+            &plain,
+            window(1000, None),
+            TimelinePosition::ZERO,
+            Trailing::Keep,
+        )
+        .unwrap();
+        let from_edited = trim(
+            &edited,
+            window(1000, None),
+            TimelinePosition::ZERO,
+            Trailing::Keep,
+        )
+        .unwrap();
 
         assert_eq!(
             original_position(video(&plain), &video(&from_plain.index).samples[0]),
@@ -569,7 +635,7 @@ mod tests {
         let index = parse("h264-aac.mp4");
         let start = TimelinePosition::from_nanos(2_500_000_000);
 
-        let trimmed = trim(&index, window(1500, None), start).unwrap();
+        let trimmed = trim(&index, window(1500, None), start, Trailing::Keep).unwrap();
 
         let kept_video = video(&trimmed.index);
         assert_eq!(
@@ -607,7 +673,7 @@ mod tests {
         }
         let start = TimelinePosition::from_nanos(1_000_000_000);
 
-        let trimmed = trim(&index, window(0, None), start).unwrap();
+        let trimmed = trim(&index, window(0, None), start, Trailing::Keep).unwrap();
 
         let kept = video(&trimmed.index);
         let earliest = kept.samples.iter().map(presented).min().unwrap();
@@ -629,6 +695,7 @@ mod tests {
             &index,
             window(from_ms, Some(from_ms + 4)),
             TimelinePosition::ZERO,
+            Trailing::Keep,
         )
         .unwrap();
 
@@ -683,5 +750,38 @@ mod tests {
             ),
             "the clip count"
         );
+    }
+
+    #[test]
+    fn only_the_last_clip_keeps_audio_that_outlasts_its_video() {
+        let index = parse("h264-aac.mp4");
+        let last_frame = video(&index).samples.last().unwrap();
+        let video_end_in_audio_ticks =
+            (last_frame.decode_time + u64::from(last_frame.duration)) * 48_000 / 15_360;
+        assert!(
+            audio(&index).samples.last().unwrap().decode_time >= video_end_in_audio_ticks,
+            "premise: an audio frame starts after the video ends"
+        );
+
+        let middle = trim(
+            &index,
+            window(0, None),
+            TimelinePosition::ZERO,
+            Trailing::Cut,
+        )
+        .unwrap();
+        let last = trim(
+            &index,
+            window(0, None),
+            TimelinePosition::ZERO,
+            Trailing::Keep,
+        )
+        .unwrap();
+
+        assert!(
+            audio(&middle.index).samples.last().unwrap().decode_time < video_end_in_audio_ticks,
+            "a clip followed by another stops its audio where its video ends"
+        );
+        assert_eq!(audio(&last.index).samples, audio(&index).samples);
     }
 }
