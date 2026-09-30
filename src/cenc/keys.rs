@@ -133,12 +133,25 @@ pub(crate) struct WireEncryption {
     systems: Vec<WireSystem>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct WireKey {
     tracks: Option<String>,
     key_id: String,
     key: String,
     iv: Option<String>,
+}
+
+/// The wire key is still a plain string, so `Debug` must not print it either.
+impl fmt::Debug for WireKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WireKey")
+            .field("tracks", &self.tracks)
+            .field("key_id", &self.key_id)
+            .field("key", &"<redacted>")
+            .field("iv", &self.iv)
+            .finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -546,6 +559,14 @@ mod tests {
             !printed.contains(KEY) && !printed.contains("[0, 17, 34"),
             "{printed}"
         );
+    }
+
+    #[test]
+    fn the_wire_form_never_debug_prints_the_key() {
+        let printed = format!("{:?}", wire(&one_key("")));
+
+        assert!(!printed.contains(KEY), "{printed}");
+        assert!(printed.contains(KID), "{printed}");
     }
 
     #[test]
