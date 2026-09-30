@@ -70,7 +70,7 @@ pub(crate) struct ResolverStatus {
     pub(crate) healthy: bool,
     /// The mapper's base URL; `None` for the static catalog.
     pub(crate) base_url: Option<String>,
-    /// Asset IDs the resolver knows without asking anything: only the static catalog has them.
+    /// Asset IDs to offer in a control panel: the static catalog's, or a mapper's optional listing.
     pub(crate) known_assets: Option<Vec<String>>,
 }
 
@@ -307,8 +307,10 @@ impl AssetRegistry {
     /// A live snapshot for the admin status endpoint: resolver health, checked right now rather
     /// than from the background probe, and every asset currently held in the loaded-asset cache.
     pub(crate) async fn status(&self) -> RegistryStatus {
-        let healthy = self.resolver.healthy().await;
-        let known_assets = (self.resolver.kind() == "static").then(|| self.resolver.known_ids());
+        let (healthy, known_assets) = tokio::join!(
+            self.resolver.healthy(),
+            self.resolver.listed_ids(self.limits.max_assets)
+        );
         let cache = lock(&self.loaded);
         RegistryStatus {
             resolver: ResolverStatus {

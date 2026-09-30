@@ -10,6 +10,7 @@ A mapper answers one question: *where is asset X, and which version of it is cur
 | --- | --- | --- |
 | `GET` | `/v1/assets/{asset_id}` | Resolve one asset |
 | `GET` | `/v1/health` | Optional reachability probe |
+| `GET` | `/v1/assets` | Optional list of asset IDs, for control panels; see [List assets](#list-assets) |
 
 `{asset_id}` is 1 to 128 ASCII letters, digits, `-`, or `_`. The server rejects any other ID before contacting the mapper, so no escaping is needed. The mapper must ignore request headers it does not know, and the server ignores response fields it does not know, so either side can add fields without breaking the other.
 
@@ -82,6 +83,22 @@ Behavior depends only on the HTTP status, so error bodies are informational. `{"
 ## Health
 
 `GET /v1/health` returning any `2xx` means healthy. It is used only when the server's optional readiness probe is enabled, in which case the server reports itself not ready while the mapper is unreachable. Mappers without this endpoint can leave the probe disabled.
+
+## List assets
+
+`GET /v1/assets` is optional. When a mapper implements it, the server's `/admin/status` offers the IDs it returns as `resolver.known_assets`, so the [demo player](../demo/) and [control panel](../admin/) can list them in their asset dropdowns before anyone has played them. Nothing else uses it: the server never preloads or resolves an asset because it is listed.
+
+```text
+GET /v1/assets
+Accept: application/json
+Authorization: Bearer <token>          (if configured)
+```
+
+```json
+{ "assets": ["big-buck-bunny", "movie-with-preroll", "trailer"] }
+```
+
+List whatever is useful to browse; it need not be every asset. The server drops any ID a request could not name (the rules in [Endpoints](#endpoints)), removes duplicates, sorts the rest, and keeps at most `limits.max_assets` (default 1000). The answer is bounded like any other (`max_response_bytes`). Any failure, including a `404` from a mapper that does not implement the endpoint, a malformed body, or an outage, simply means there is no list: `known_assets` is `null` and nothing else changes. `/admin/status` asks on every call, so keep the answer cheap.
 
 ## Remote locations
 

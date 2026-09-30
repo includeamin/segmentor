@@ -18,8 +18,8 @@ use super::{
     SubtitleLocation,
 };
 use crate::clip::{ClipWindow, MAX_CLIP_MS};
-use crate::config::MapperConfig;
 use crate::config::Secret;
+use crate::config::{MapperConfig, is_valid_asset_id};
 use crate::observability::request_id;
 
 const MAX_VERSION_BYTES: usize = 256;
@@ -173,6 +173,38 @@ impl HttpResolver {
             .send()
             .await
             .is_ok_and(|response| response.status().is_success())
+    }
+
+    /// `GET {base}/v1/assets`: the asset IDs the mapper chooses to list, for status reporting
+    /// only (see `docs/mapper-api.md#list-assets`). The endpoint is optional, so any failure,
+    /// including the `404` of a mapper that does not implement it, is `None` rather than an
+    /// error. IDs a request could not name are dropped; the rest are sorted, deduplicated, and
+    /// capped at `max`.
+    pub(crate) async fn list(&self, max: usize) -> Option<Vec<String>> {
+        #[derive(Deserialize)]
+        struct Listing {
+            assets: Vec<String>,
+        }
+        let response = self
+            .authorized(self.client.get(format!("{}/v1/assets", self.base_url)))
+            .header(ACCEPT, "application/json")
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let body = self.read_body(response).await.ok()?;
+        let listing: Listing = serde_json::from_slice(&body).ok()?;
+        let mut ids = listing
+            .assets
+            .into_iter()
+            .filter(|id| is_valid_asset_id(id))
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        ids.truncate(max);
+        Some(ids)
     }
 
     fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
