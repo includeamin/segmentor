@@ -171,10 +171,17 @@ impl WireEncryption {
         if self.scheme != "cbcs" {
             return Err("encryption scheme is not supported; only cbcs is".to_owned());
         }
-        Ok(Encryption {
-            keys: self.keys()?,
-            systems: self.systems()?,
-        })
+        let keys = self.keys()?;
+        let systems = self.systems()?;
+        // FairPlay's key line has no key ID, so a player could not tell the audio key apart.
+        if matches!(keys, Keys::Split { .. })
+            && systems.iter().any(|system| system.system_id == FAIRPLAY)
+        {
+            return Err(
+                "FairPlay needs one key for all tracks (encryption keys tracks \"all\")".to_owned(),
+            );
+        }
+        Ok(Encryption { keys, systems })
     }
 
     fn keys(&self) -> Result<Keys, String> {
@@ -429,6 +436,21 @@ mod tests {
         );
         assert_eq!(encryption.distinct_keys().len(), 2);
         assert_eq!(encryption.key_ids().len(), 2);
+    }
+
+    /// `FairPlay`'s HLS key line carries no key ID, so it cannot name a separate audio key.
+    #[test]
+    fn fairplay_with_split_keys_is_refused() {
+        let json = format!(
+            r#"{{"scheme":"cbcs","keys":[{{"tracks":"video","key_id":"{KID}","key":"{KEY}"}},{{"tracks":"audio","key_id":"{KEY}","key":"{KID}"}}],
+            "systems":[{{"system_id":"94ce86fb-07ff-4f43-adb8-93d2fa968ca2","hls_uri":"skd://asset-1"}}]}}"#
+        );
+
+        let error = wire(&json).validate().unwrap_err();
+
+        assert!(error.contains("FairPlay"), "{error}");
+        assert!(error.contains("tracks"), "names the field: {error}");
+        assert!(!error.contains(KEY) && !error.contains(KID), "{error}");
     }
 
     #[test]

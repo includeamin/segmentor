@@ -237,8 +237,7 @@ An answer may carry an `encryption` object. segmentor then encrypts what it serv
   "encryption": {
     "scheme": "cbcs",
     "keys": [
-      { "tracks": "video", "key_id": "0123456789abcdef0123456789abcdef", "key": "00112233445566778899aabbccddeeff" },
-      { "tracks": "audio", "key_id": "fedcba9876543210fedcba9876543210", "key": "ffeeddccbbaa99887766554433221100" }
+      { "tracks": "all", "key_id": "0123456789abcdef0123456789abcdef", "key": "00112233445566778899aabbccddeeff" }
     ],
     "systems": [
       { "system_id": "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed", "pssh": "<base64 pssh box>", "license_url": "https://license.example.net/widevine" },
@@ -252,7 +251,7 @@ An answer may carry an `encryption` object. segmentor then encrypts what it serv
 | Field | Rules |
 | --- | --- |
 | `scheme` | `cbcs`. Anything else is rejected |
-| `keys` | One entry with `"tracks": "all"` (or no `tracks`), or one `"video"` and one `"audio"` entry. Every track of the asset must end up with exactly one key |
+| `keys` | One entry with `"tracks": "all"` (or no `tracks`), or one `"video"` and one `"audio"` entry, for example `{ "tracks": "video", … }, { "tracks": "audio", … }`. Every track of the asset must end up with exactly one key. FairPlay needs one key for all tracks: an answer listing FairPlay with separate video and audio keys is rejected |
 | `key_id`, `key` | 16 bytes each, as 32 hex digits |
 | `iv` | Optional, 16 bytes as 32 hex digits: the constant IV declared in the init segment. When absent, it is the first 16 bytes of SHA-256(`"segmentor cbcs iv"` followed by `key_id`), so every replica derives the same one. It is never derived from the key |
 | `systems` | At most 8. Each names a DRM system by its standard system ID (a UUID) |
@@ -265,7 +264,7 @@ An answer may carry an `encryption` object. segmentor then encrypts what it serv
 | System | System ID | HLS signalling | Needs |
 | --- | --- | --- | --- |
 | Widevine | `edef8ba9-79d6-4ace-a3c8-27dcd51d21ed` | `SAMPLE-AES` key line with a data URI of the `pssh` and the key ID | `pssh`; `license_url` for DASH |
-| FairPlay | `94ce86fb-07ff-4f43-adb8-93d2fa968ca2` | `SAMPLE-AES` key line with `com.apple.streamingkeydelivery` | `hls_uri` |
+| FairPlay | `94ce86fb-07ff-4f43-adb8-93d2fa968ca2` | `SAMPLE-AES` key line with `com.apple.streamingkeydelivery` | `hls_uri`; one key for all tracks (`"tracks": "all"`) |
 | PlayReady | `9a04f079-9840-4286-ab92-e65be0885f95` | `SAMPLE-AES` key line with a UTF-16 data URI of the PlayReady object taken from the `pssh` | `pssh`; `license_url` for DASH |
 | Clear Key | `e2719d58-a985-b3c9-781a-b030af78d30e` | `SAMPLE-AES` key line with `org.w3.clearkey` and the `license_url` | `license_url` for HLS; nothing for DASH |
 
@@ -277,7 +276,7 @@ Any other system ID is accepted and signalled in DASH only (its `pssh` and `lice
 
 **Codecs.** H.264 video and AAC, AC-3, and E-AC-3 audio can be encrypted. HEVC encryption is not supported yet: an asset with HEVC and an `encryption` object fails with "HEVC encryption is not supported yet". VP9, AV1, Opus, and FLAC cannot be encrypted. A source file that is itself encrypted is still rejected.
 
-**A malformed `encryption` object makes the whole answer malformed**: a `502` to players, never cached as valid, like any other bad answer. That covers an unknown scheme, a bad hex length, keys that do not cover every track, more than eight systems, a `pssh` that is not a well-formed box or names another system, a `license_url` that is not `https`, and a FairPlay entry without `hls_uri`. Error messages and logs never contain key material.
+**A malformed `encryption` object makes the whole answer malformed**: a `502` to players, never cached as valid, like any other bad answer. That covers an unknown scheme, a bad hex length, keys that do not cover every track, more than eight systems, a `pssh` that is not a well-formed box or names another system, a `license_url` that is not `https`, a FairPlay entry without `hls_uri`, and FairPlay listed with separate video and audio keys. Error messages and logs never contain key material.
 
 **The URL version covers the keys.** The key (as its SHA-256), the key IDs, the IVs, and the systems are hashed into the version in every URL. Re-keying an asset under an unchanged mapper `version` therefore reloads it and hands out new URLs, so no player mixes old and new segments.
 
