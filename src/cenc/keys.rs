@@ -85,9 +85,11 @@ impl Encryption {
         }
     }
 
+    /// Each key once: split keys that are identical count as one.
     pub(crate) fn distinct_keys(&self) -> Vec<&ContentKey> {
         match &self.keys {
             Keys::All(key) => vec![key],
+            Keys::Split { video, audio } if video == audio => vec![video],
             Keys::Split { video, audio } => vec![video, audio],
         }
     }

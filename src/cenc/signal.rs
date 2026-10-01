@@ -5,8 +5,8 @@ use std::fmt::Write;
 use base64::Engine;
 
 use super::keys::{
-    CLEARKEY, ContentKey, Encryption, FAIRPLAY, PLAYREADY, WIDEVINE, hex_string, pssh_data,
-    uuid_string,
+    CLEARKEY, ContentKey, DrmSystem, Encryption, FAIRPLAY, PLAYREADY, WIDEVINE, hex_string,
+    pssh_data, uuid_string,
 };
 
 fn base64(bytes: &[u8]) -> String {
@@ -17,43 +17,70 @@ fn base64(bytes: &[u8]) -> String {
 pub(crate) fn hls_key_lines(encryption: &Encryption, key: &ContentKey, tag: &str) -> String {
     let mut lines = String::new();
     for system in &encryption.systems {
-        let attributes = match system.system_id {
-            FAIRPLAY => system.hls_uri.as_ref().map(|uri| {
-                format!(r#"URI="{uri}",KEYFORMAT="com.apple.streamingkeydelivery",KEYFORMATVERSIONS="1""#)
-            }),
-            WIDEVINE => system.pssh.as_ref().map(|pssh| {
-                format!(
-                    r#"URI="data:text/plain;base64,{}",KEYID=0x{},KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed",KEYFORMATVERSIONS="1""#,
-                    base64(pssh),
-                    hex_string(&key.key_id)
-                )
-            }),
-            PLAYREADY => system.pssh.as_deref().and_then(pssh_data).map(|object| {
-                format!(
-                    r#"URI="data:text/plain;charset=UTF-16;base64,{}",KEYFORMAT="com.microsoft.playready",KEYFORMATVERSIONS="1""#,
-                    base64(object)
-                )
-            }),
-            CLEARKEY => system.license_url.as_ref().map(|url| {
-                format!(r#"URI="{url}",KEYFORMAT="org.w3.clearkey",KEYFORMATVERSIONS="1""#)
-            }),
-            _ => None,
-        };
-        if let Some(attributes) = attributes {
-            writeln!(lines, "#{tag}:METHOD=SAMPLE-AES,{attributes}")
-                .expect("writing to a String cannot fail");
+        if let Some(attributes) = hls_attributes(system, Some(&key.key_id)) {
+            push_key_line(&mut lines, tag, &attributes);
         }
     }
     lines
 }
 
 /// `EXT-X-SESSION-KEY` lines for every distinct key, so players can request licences early.
+///
+/// RFC 8216 4.3.4.5 forbids two session keys with the same `METHOD`, `URI`, `IV`, `KEYFORMAT`,
+/// and `KEYFORMATVERSIONS`; `KEYID` does not tell them apart. Only Widevine's line depends on
+/// the key, and only through `KEYID`, so each system's line is given once, for the first key.
 pub(crate) fn hls_session_keys(encryption: &Encryption) -> String {
-    encryption
-        .distinct_keys()
-        .into_iter()
-        .map(|key| hls_key_lines(encryption, key, "EXT-X-SESSION-KEY"))
-        .collect()
+    let mut lines = String::new();
+    let mut seen: Vec<String> = Vec::new();
+    for key in encryption.distinct_keys() {
+        for system in &encryption.systems {
+            let Some(identity) = hls_attributes(system, None) else {
+                continue;
+            };
+            if seen.contains(&identity) {
+                continue;
+            }
+            seen.push(identity);
+            if let Some(attributes) = hls_attributes(system, Some(&key.key_id)) {
+                push_key_line(&mut lines, "EXT-X-SESSION-KEY", &attributes);
+            }
+        }
+    }
+    lines
+}
+
+fn push_key_line(lines: &mut String, tag: &str, attributes: &str) {
+    writeln!(lines, "#{tag}:METHOD=SAMPLE-AES,{attributes}")
+        .expect("writing to a String cannot fail");
+}
+
+/// A system's HLS key attributes after `METHOD`, or `None` if HLS cannot name it. `KEYID` is
+/// written only when `key_id` is given.
+fn hls_attributes(system: &DrmSystem, key_id: Option<&[u8; 16]>) -> Option<String> {
+    match system.system_id {
+        FAIRPLAY => system.hls_uri.as_ref().map(|uri| {
+            format!(r#"URI="{uri}",KEYFORMAT="com.apple.streamingkeydelivery",KEYFORMATVERSIONS="1""#)
+        }),
+        WIDEVINE => system.pssh.as_ref().map(|pssh| {
+            let key_id = key_id
+                .map(|key_id| format!(",KEYID=0x{}", hex_string(key_id)))
+                .unwrap_or_default();
+            format!(
+                r#"URI="data:text/plain;base64,{}"{key_id},KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed",KEYFORMATVERSIONS="1""#,
+                base64(pssh),
+            )
+        }),
+        PLAYREADY => system.pssh.as_deref().and_then(pssh_data).map(|object| {
+            format!(
+                r#"URI="data:text/plain;charset=UTF-16;base64,{}",KEYFORMAT="com.microsoft.playready",KEYFORMATVERSIONS="1""#,
+                base64(object)
+            )
+        }),
+        CLEARKEY => system.license_url.as_ref().map(|url| {
+            format!(r#"URI="{url}",KEYFORMAT="org.w3.clearkey",KEYFORMATVERSIONS="1""#)
+        }),
+        _ => None,
+    }
 }
 
 /// The `ContentProtection` elements of one adaptation set, indented for its children.
@@ -145,6 +172,64 @@ mod tests {
             "{lines}"
         );
         let _ = (FAIRPLAY, CLEARKEY);
+    }
+
+    /// RFC 8216 4.3.4.5: no two `EXT-X-SESSION-KEY` lines may share `METHOD`, `URI`, `IV`,
+    /// `KEYFORMAT`, and `KEYFORMATVERSIONS`, so split keys must not repeat the per-system lines.
+    #[test]
+    fn split_keys_give_each_session_key_line_once() {
+        let json = format!(
+            r#"{{"scheme":"cbcs","keys":[
+              {{"tracks":"video","key_id":"0123456789abcdef0123456789abcdef","key":"00112233445566778899aabbccddeeff"}},
+              {{"tracks":"audio","key_id":"fedcba9876543210fedcba9876543210","key":"ffeeddccbbaa99887766554433221100"}}],
+            "systems":[
+              {{"system_id":"edef8ba9-79d6-4ace-a3c8-27dcd51d21ed","pssh":"{}"}},
+              {{"system_id":"9a04f079-9840-4286-ab92-e65be0885f95","pssh":"{}"}},
+              {{"system_id":"e2719d58-a985-b3c9-781a-b030af78d30e","license_url":"https://l.example.net/ck"}}
+            ]}}"#,
+            pssh(&WIDEVINE, b"wv"),
+            pssh(&PLAYREADY, b"pr")
+        );
+        let encryption = serde_json::from_str::<WireEncryption>(&json)
+            .unwrap()
+            .validate()
+            .unwrap();
+
+        let lines = hls_session_keys(&encryption);
+
+        let identities: Vec<String> = lines
+            .lines()
+            .map(|line| {
+                line.split(',')
+                    .filter(|attribute| !attribute.starts_with("KEYID="))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .collect();
+        let mut unique = identities.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), identities.len(), "{lines}");
+        assert_eq!(identities.len(), 3, "one line per system: {lines}");
+        assert!(
+            lines.contains("KEYID=0x0123456789abcdef0123456789abcdef"),
+            "Widevine keeps the first (video) key's line: {lines}"
+        );
+    }
+
+    #[test]
+    fn identical_split_keys_are_one_session_key() {
+        let key = r#""key_id":"0123456789abcdef0123456789abcdef","key":"00112233445566778899aabbccddeeff""#;
+        let json = format!(
+            r#"{{"scheme":"cbcs","keys":[{{"tracks":"video",{key}}},{{"tracks":"audio",{key}}}]}}"#
+        );
+        let encryption = serde_json::from_str::<WireEncryption>(&json)
+            .unwrap()
+            .validate()
+            .unwrap();
+
+        assert_eq!(encryption.distinct_keys().len(), 1);
+        assert_eq!(encryption.key_ids().len(), 1);
     }
 
     #[test]
