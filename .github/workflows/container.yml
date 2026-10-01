@@ -163,7 +163,7 @@ jobs:
         run: cosign sign --yes "$IMAGE@${{ steps.manifest.outputs.digest }}"
 
       - name: Attest the build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.manifest.outputs.digest }}
