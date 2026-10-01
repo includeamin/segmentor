@@ -164,7 +164,7 @@ jobs:
       # Ties each archive to this workflow run and commit, so a download can be checked with
       # `gh attestation verify` (see docs/releasing.md).
       - name: Attest the build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/*.tar.gz
 
