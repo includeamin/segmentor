@@ -14,7 +14,7 @@ Technical design documents explain a proposed subsystem before or during impleme
 | [0006](0006-trick-play-subtitles-and-renditions.md) | Trick play, subtitles, and adaptive renditions | Accepted; implemented |
 | [0007](0007-viewer-authorization.md) | Viewer authorization | Draft |
 | [0008](0008-clipping-and-concatenation.md) | Clipping and concatenation | Accepted; implemented |
-| [0009](0009-common-encryption-and-drm.md) | Common encryption and DRM | Draft |
+| [0009](0009-common-encryption-and-drm.md) | Common encryption and DRM | Accepted; H.264 and audio implemented, HEVC pending |
 
 ## Workflow
 

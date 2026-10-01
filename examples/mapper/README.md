@@ -50,3 +50,7 @@ costs seconds, not a real encode) at `tests/fixtures/generated/long.mp4`, which 
 picks up without a restart. It is not committed; requesting `long` before generating it fails like
 any other missing file — a mapper is asked lazily, per asset, so this cannot break startup the way
 a bad entry in a static `[assets.*]` catalog would.
+
+`drm-clearkey` is the same file encrypted with `cbcs` and signalled for Clear Key
+([mapper API](../../docs/mapper-api.md#encryption)). Its key is public test material, published
+in this repository: never use it, or any key committed to a repository, for real content.

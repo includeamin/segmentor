@@ -90,6 +90,22 @@ Alert on a rising `vod_segment_queue_timeouts_total` or `vod_http_requests_shed_
 
 Each loaded asset keeps its full sample index in memory, about 40 bytes per sample. `limits.max_index_bytes` (default 4 GiB) rejects a catalog whose combined indexes exceed it, and startup fails with the measured size. Size the container's memory limit above that budget plus headroom for in-flight segment reads (`stream_chunk_bytes` times `max_segment_jobs`).
 
+## Content encryption
+
+Assets whose mapper answer carries an `encryption` object ([mapper API](mapper-api.md#encryption)) are encrypted per request. The segment is read into memory, encrypted, and sent, so it is not streamed. Memory for in-flight encrypted segments is bounded by `limits.max_segment_jobs` times `limits.max_segment_bytes`, 512 MiB by default; count it in the container's memory limit next to the index budget above.
+
+| Metric | Type | Notes |
+| --- | --- | --- |
+| `vod_encrypted_segments_total` | counter | Segments encrypted and served |
+| `vod_encryption_seconds_total` | counter | Time spent encrypting |
+| `vod_encryption_failures_total` | counter | Segments that could not be encrypted |
+
+A failed encryption logs a `segment_encryption_failed` event naming the segment and the error, never key material. A rising `vod_encryption_failures_total` usually means a source the parser rejects; the log line says which.
+
+`/admin/status` reports, per asset, whether it is `encrypted` and its `key_ids`. It never shows keys. Keys are never written to disk or to logs.
+
+Because the mapper's answer carries the keys, the mapper must be reached over `https` and require the bearer token. segmentor never contacts a licence server.
+
 ## Resolving assets from a mapper
 
 By default the catalog is the `[assets.*]` tables and every asset is loaded before the server accepts traffic. To resolve assets from an external service instead, replace those tables with a resolver (see the commented example in `vod.example.toml` and the [Mapper API reference](mapper-api.md)):

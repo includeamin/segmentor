@@ -39,8 +39,9 @@ proportional to the segment asked for, not to the length of the video.
 - **No transcoding.** The codecs must already suit the protocol, and there is no bitrate ladder
   unless you supply the renditions ([mapper API](docs/mapper-api.md#renditions)). Trimming and
   joining files is done on keyframes, not by re-encoding ([clips](docs/mapper-api.md#clips)).
-- **No DRM, no live streaming, no MPEG-TS output.** Segments are fragmented MP4. DRM is planned
-  after the features above.
+- **No live streaming, no MPEG-TS output.** Segments are fragmented MP4. DRM is supported through
+  `cbcs` encryption with Widevine, FairPlay, PlayReady, and Clear Key signalling
+  ([mapper API](docs/mapper-api.md#encryption)).
 - **No authentication.** Run it behind a reverse proxy or CDN that provides it; see
   [operations](docs/operations.md). TLS itself is optional but built in ([`[server.tls]`](docs/operations.md#tls))
   for the case of running with no proxy in front.
@@ -51,7 +52,7 @@ proportional to the segment asked for, not to the length of the video.
 | --- | --- |
 | Convert files to HLS/DASH once and host static files | FFmpeg, [Shaka Packager](https://github.com/shaka-project/shaka-packager), or Bento4 |
 | Serve HLS/DASH without storing packaged output, as a standalone service, with strict resource limits | **segmentor** |
-| DRM, live streaming, or MPEG-TS output today | Shaka Packager |
+| Live streaming or MPEG-TS output today | Shaka Packager |
 | A mature on-demand packager that runs inside nginx | Kaltura's [nginx-vod-module](https://github.com/kaltura/nginx-vod-module) (AGPL-3.0) |
 
 segmentor takes its idea, packaging on demand instead of ahead of time, from nginx-vod-module but

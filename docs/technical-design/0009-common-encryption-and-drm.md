@@ -1,6 +1,6 @@
 # TDD 0009: Common encryption and DRM
 
-- Status: Draft
+- Status: Accepted; H.264 and audio implemented, HEVC pending
 - Created: 2026-10-01
 - Updated: 2026-10-01
 - Related ADRs: [ADR 0001](../adr/0001-use-fragmented-mp4-for-media-segments.md) (fragmented MP4 segments)
@@ -130,7 +130,7 @@ One `#EXT-X-KEY` per system goes in every media playlist, before the first `#EXT
 | PlayReady | `URI="data:text/plain;charset=UTF-16;base64,<PlayReady object from the pssh>"`, `KEYFORMAT="com.microsoft.playready"`, `KEYFORMATVERSIONS="1"` |
 | Clear Key | `URI="<license_url>"`, `KEYFORMAT="org.w3.clearkey"`, `KEYFORMATVERSIONS="1"` |
 
-Other system IDs have no standard HLS form and are signalled in DASH only; the mapper API reference says so. Implementation starts by checking the Clear Key line in hls.js; if hls.js cannot play it, Clear Key is left out of HLS (DASH stays the Clear Key test path) and this section is updated to say so.
+Other system IDs have no standard HLS form and are signalled in DASH only; the mapper API reference says so. Checked in hls.js 1.7 in headless Chrome: it plays the Clear Key line, so Clear Key stays in HLS. hls.js takes the licence URL from the key line but builds its request from the init data, which Chrome's Clear Key CDM accepts only as a `pssh` with the W3C common system ID `1077efec-c0b2-4d02-ace3-3c1e52e2fb4b`; the mapper therefore lists that system with a `pssh` next to Clear Key (see the mapper API reference). A Clear Key `pssh` under the DASH-IF ID `e2719d58-…` is rejected by the CDM.
 
 ### Versioning
 
