@@ -1707,6 +1707,21 @@ fn clip(
     (file_location(path), from_ms, to_ms)
 }
 
+/// Like [`clip`], with an own `encryption` override for [`Answer::clips_with_encryption`].
+fn clip_encrypted(
+    path: &str,
+    from_ms: Option<u64>,
+    to_ms: Option<u64>,
+    encryption: Option<serde_json::Value>,
+) -> (
+    serde_json::Value,
+    Option<u64>,
+    Option<u64>,
+    Option<serde_json::Value>,
+) {
+    (file_location(path), from_ms, to_ms, encryption)
+}
+
 #[tokio::test]
 async fn a_single_clip_trims_one_file_and_keeps_its_urls() {
     let h = harness().await;
@@ -1839,18 +1854,43 @@ async fn malformed_clip_answers_are_rejected() {
         format!(r#""clips":[{clip},{clip},{clip}]"#),
         // A location the path rules refuse.
         r#""clips":[{"location":{"type":"file","path":"../h264-aac.mp4"}}]"#.to_owned(),
+        // A clip's own `encryption` (TDD 0009, "Different keys per clip") that fails the same
+        // rules as the answer's own: a key that is not 32 hex digits.
+        format!(
+            r#""clips":[{{"location":{{"type":"file","path":"h264-aac.mp4"}},"encryption":{{"scheme":"cbcs","keys":[{{"key_id":"{KEY_ID}","key":"{KEY}zz"}}]}}}}]"#
+        ),
     ];
     for (index, fields) in cases.iter().enumerate() {
         // A different ID per case, so no case is answered from another's cached failure.
         let id = format!("bad{index}");
         *h.mapper.state.raw_body.lock().unwrap() =
             Some(format!(r#"{{"asset_id":"{id}","version":"v1",{fields}}}"#));
-        assert_eq!(
-            status(&h.app, &format!("/hls/{id}/master.m3u8")).await,
-            StatusCode::BAD_GATEWAY,
-            "{fields}"
+        let (code, _, body) = fetch(&h.app, &format!("/hls/{id}/master.m3u8")).await;
+        assert_eq!(code, StatusCode::BAD_GATEWAY, "{fields}");
+        assert!(
+            !String::from_utf8_lossy(&body).contains(KEY),
+            "a clip's own rejected key must not leak either: {fields}"
         );
     }
+}
+
+/// A bad per-clip `encryption` is rejected naming the clip, not silently applied or ignored.
+#[tokio::test]
+async fn a_bad_clip_level_encryption_names_the_clip() {
+    let h = harness().await;
+    *h.mapper.state.raw_body.lock().unwrap() = Some(format!(
+        r#"{{"asset_id":"movie","version":"v1","clips":[
+            {{"location":{{"type":"file","path":"h264-aac.mp4"}},"to_ms":1500}},
+            {{"location":{{"type":"file","path":"h264-aac.mp4"}},"from_ms":1500,
+              "encryption":{{"scheme":"cbcs","keys":[{{"key_id":"{KEY_ID}","key":"{KEY}zz"}}]}}}}
+        ]}}"#
+    ));
+
+    let (code, _, body) = fetch(&h.app, "/hls/movie/master.m3u8").await;
+
+    assert_eq!(code, StatusCode::BAD_GATEWAY);
+    let text = String::from_utf8_lossy(&body);
+    assert!(!text.contains(KEY));
 }
 
 #[tokio::test]
@@ -2556,6 +2596,316 @@ async fn admin_status_reports_key_ids_never_keys() {
         "01234567-89ab-cdef-0123-456789abcdef"
     );
     assert!(!String::from_utf8_lossy(&body).contains(KEY));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Different keys per clip (TDD 0009, "Deferred" -> implemented)
+// ---------------------------------------------------------------------------------------------
+
+const KEY_ID_B: &str = "fedcba9876543210fedcba9876543210";
+const KEY_B: &str = "ffeeddccbbaa99887766554433221100";
+
+fn clear_key_encryption_b() -> serde_json::Value {
+    serde_json::json!({
+        "scheme": "cbcs",
+        "keys": [{ "key_id": KEY_ID_B, "key": KEY_B }],
+        "systems": [{ "system_id": "e2719d58-a985-b3c9-781a-b030af78d30e", "license_url": "https://l.example.net/ck-b" }],
+    })
+}
+
+/// A clear pre-roll clip, then an encrypted one, exactly TDD 0009's "Different keys per clip"
+/// motivating example. No asset-level `encryption` is set; clip 1 carries its own.
+#[tokio::test]
+async fn a_clear_clip_can_precede_an_encrypted_one() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "mixed",
+        Answer::clips_with_encryption(
+            "v1",
+            &[
+                clip_encrypted("h264-aac.mp4", None, Some(1500), None),
+                clip_encrypted(
+                    "h264-aac.mp4",
+                    Some(1500),
+                    None,
+                    Some(clear_key_encryption(KEY)),
+                ),
+            ],
+        ),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/mixed/master.m3u8").await.2);
+
+    let playlist = text(&fetch(&h.app, "/hls/mixed/video/index.m3u8").await.2);
+    let map0 = playlist
+        .find("clips/0/init.mp4")
+        .expect("clip 0's EXT-X-MAP");
+    let map1 = playlist
+        .find("clips/1/init.mp4")
+        .expect("clip 1's EXT-X-MAP");
+    assert!(
+        playlist[..map0].find("#EXT-X-KEY:").is_none(),
+        "clip 0 is clear, so no key precedes it: {playlist}"
+    );
+    let key1 = playlist[map0..map1]
+        .find("#EXT-X-KEY:")
+        .expect("a key line between clip 0's MAP and clip 1's");
+    assert!(
+        playlist[map0..map0 + key1].contains("#EXT-X-DISCONTINUITY"),
+        "the key line follows the discontinuity: {playlist}"
+    );
+    assert!(
+        playlist[map0..map1].contains(r#"KEYFORMAT="org.w3.clearkey""#),
+        "{playlist}"
+    );
+
+    // Clip 0's segment is untouched; clip 1's is protected.
+    let clear_segment = fetch(
+        &h.app,
+        &format!("/hls/mixed/video/segments/0/media.m4s?v={version}"),
+    )
+    .await
+    .2;
+    let encrypted_segment = fetch(
+        &h.app,
+        &format!("/hls/mixed/video/segments/2/media.m4s?v={version}"),
+    )
+    .await
+    .2;
+    assert!(!clear_segment.windows(4).any(|w| w == b"senc"));
+    assert!(encrypted_segment.windows(4).any(|w| w == b"senc"));
+
+    // DASH: only clip 1's Period is protected, but the namespaces cover the whole MPD.
+    let manifest = text(&fetch(&h.app, "/dash/mixed/manifest.mpd").await.2);
+    assert!(manifest.contains("xmlns:cenc="), "{manifest}");
+    let period0 = &manifest[manifest.find("<Period id=\"clip-0\"").unwrap()
+        ..manifest.find("<Period id=\"clip-1\"").unwrap()];
+    let period1 = &manifest[manifest.find("<Period id=\"clip-1\"").unwrap()..];
+    assert!(!period0.contains("ContentProtection"), "{period0}");
+    assert!(period1.contains("ContentProtection"), "{period1}");
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&fetch(&h.app, "/admin/status").await.2).unwrap();
+    assert_eq!(json["cache"]["assets"][0]["encrypted"], true);
+    assert_eq!(
+        json["cache"]["assets"][0]["key_ids"][0], "01234567-89ab-cdef-0123-456789abcdef",
+        "status reports clip 1's key, the only one in use: {json}"
+    );
+}
+
+/// The reverse transition: an encrypted clip followed by a clear one needs an explicit
+/// `METHOD=NONE` line, or a player would keep decrypting with the first clip's key (RFC 8216).
+#[tokio::test]
+async fn an_encrypted_clip_followed_by_a_clear_one_turns_the_key_off() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "mixed",
+        Answer::clips_with_encryption(
+            "v1",
+            &[
+                clip_encrypted(
+                    "h264-aac.mp4",
+                    None,
+                    Some(1500),
+                    Some(clear_key_encryption(KEY)),
+                ),
+                clip_encrypted("h264-aac.mp4", Some(1500), None, None),
+            ],
+        ),
+    );
+
+    let playlist = text(&fetch(&h.app, "/hls/mixed/video/index.m3u8").await.2);
+
+    let map0 = playlist.find("clips/0/init.mp4").unwrap();
+    let map1 = playlist.find("clips/1/init.mp4").unwrap();
+    assert!(
+        playlist[..map0].contains("#EXT-X-KEY:METHOD=SAMPLE-AES"),
+        "clip 0 starts encrypted: {playlist}"
+    );
+    assert!(
+        playlist[map0..map1].contains("#EXT-X-KEY:METHOD=NONE\n"),
+        "clip 1 turns the key off: {playlist}"
+    );
+}
+
+/// Two clips, each its own key: the master playlist's `EXT-X-SESSION-KEY` lines cover both, and
+/// `/admin/status` lists both key IDs.
+#[tokio::test]
+async fn a_sequence_can_use_a_different_key_for_each_clip() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "mixed",
+        Answer::clips_with_encryption(
+            "v1",
+            &[
+                clip_encrypted(
+                    "h264-aac.mp4",
+                    None,
+                    Some(1500),
+                    Some(clear_key_encryption(KEY)),
+                ),
+                clip_encrypted(
+                    "h264-aac.mp4",
+                    Some(1500),
+                    None,
+                    Some(clear_key_encryption_b()),
+                ),
+            ],
+        ),
+    );
+
+    let master = text(&fetch(&h.app, "/hls/mixed/master.m3u8").await.2);
+    assert_eq!(
+        master.matches("#EXT-X-SESSION-KEY:").count(),
+        2,
+        "one session key per distinct clip key: {master}"
+    );
+    assert!(master.contains("https://l.example.net/ck\""), "{master}");
+    assert!(master.contains("https://l.example.net/ck-b\""), "{master}");
+
+    let media = text(&fetch(&h.app, "/hls/mixed/video/index.m3u8").await.2);
+    let map0 = media.find("clips/0/init.mp4").unwrap();
+    let map1 = media.find("clips/1/init.mp4").unwrap();
+    assert!(
+        media[..map0].contains("https://l.example.net/ck\""),
+        "{media}"
+    );
+    assert!(
+        media[map0..map1].contains("https://l.example.net/ck-b\""),
+        "clip 1's own key line replaces clip 0's: {media}"
+    );
+
+    assert_eq!(
+        status(&h.app, "/hls/mixed/master.m3u8").await,
+        StatusCode::OK
+    );
+    let json: serde_json::Value =
+        serde_json::from_slice(&fetch(&h.app, "/admin/status").await.2).unwrap();
+    let key_ids = json["cache"]["assets"][0]["key_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(key_ids.len(), 2, "{key_ids:?}");
+    assert!(key_ids.contains(&"01234567-89ab-cdef-0123-456789abcdef"));
+    assert!(key_ids.contains(&"fedcba98-7654-3210-fedc-ba9876543210"));
+}
+
+/// Changing only the second clip's key changes the whole sequence's version (`clip::version_of`
+/// hashes each clip's own encryption), and the mapper is never asked to echo a key back.
+#[tokio::test]
+async fn rekeying_one_clip_changes_the_sequence_version() {
+    let h = harness().await;
+    let make = |key: &str| {
+        Answer::clips_with_encryption(
+            "v1",
+            &[
+                clip_encrypted("h264-aac.mp4", None, Some(1500), None),
+                clip_encrypted(
+                    "h264-aac.mp4",
+                    Some(1500),
+                    None,
+                    Some(clear_key_encryption(key)),
+                ),
+            ],
+        )
+    };
+    h.mapper.state.set("a", make(KEY));
+    h.mapper.state.set("b", make(KEY_B));
+
+    let version_a = version_in(&fetch(&h.app, "/hls/a/master.m3u8").await.2);
+    let version_b = version_in(&fetch(&h.app, "/hls/b/master.m3u8").await.2);
+
+    assert_ne!(version_a, version_b);
+}
+
+/// Independent decryption of a mixed sequence: the clear clip plays with no key, the encrypted
+/// one only with its own, and a differently keyed clip is refused both the wrong key and the
+/// other clip's key (TDD 0009, "Testing").
+#[tokio::test]
+async fn ffmpeg_decrypts_a_mixed_sequence_clip_by_clip() {
+    if std::process::Command::new("ffprobe")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: ffprobe is not installed");
+        return;
+    }
+    let h = harness().await;
+    h.mapper.state.set(
+        "mixed",
+        Answer::clips_with_encryption(
+            "v1",
+            &[
+                clip_encrypted("h264-aac.mp4", None, Some(1500), None),
+                clip_encrypted(
+                    "h264-aac.mp4",
+                    Some(1500),
+                    None,
+                    Some(clear_key_encryption(KEY)),
+                ),
+                clip_encrypted(
+                    "h264-aac.mp4",
+                    None,
+                    Some(1500),
+                    Some(clear_key_encryption_b()),
+                ),
+            ],
+        ),
+    );
+    let directory =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/mixed-key-decode");
+    std::fs::create_dir_all(&directory).unwrap();
+
+    // Each clip's init and media URIs, as the playlist actually names them: segment numbers run
+    // across the whole sequence, not per clip (see `every_clip_of_a_sequence_decodes_...`).
+    let playlist = text(&fetch(&h.app, "/hls/mixed/video/index.m3u8").await.2);
+    let mut clips: Vec<(String, Vec<String>)> = Vec::new();
+    for line in playlist.lines() {
+        if let Some(uri) = line
+            .strip_prefix("#EXT-X-MAP:URI=\"")
+            .and_then(|rest| rest.strip_suffix('"'))
+        {
+            clips.push((uri.to_owned(), Vec::new()));
+        } else if !line.is_empty() && !line.starts_with('#') {
+            clips
+                .last_mut()
+                .expect("a map before any segment")
+                .1
+                .push(line.to_owned());
+        }
+    }
+    assert_eq!(clips.len(), 3);
+
+    let keys: [Option<&str>; 3] = [None, Some(KEY), Some(KEY_B)];
+    for (position, ((init, segments), key)) in clips.iter().zip(keys).enumerate() {
+        let mut bytes = fetch(&h.app, &format!("/hls/mixed/video/{init}"))
+            .await
+            .2
+            .to_vec();
+        for segment in segments {
+            bytes.extend_from_slice(
+                &fetch(&h.app, &format!("/hls/mixed/video/{segment}"))
+                    .await
+                    .2,
+            );
+        }
+        let path = directory.join(format!("clip-{position}.mp4"));
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert!(
+            decode_errors(&path, key).is_empty(),
+            "clip {position} with its own key"
+        );
+        if let Some(wrong) = keys.iter().find(|candidate| **candidate != key).copied() {
+            let errors = decode_errors(&path, wrong);
+            assert!(
+                key.is_none() || !errors.is_empty(),
+                "clip {position} must not decode cleanly under a different clip's key"
+            );
+        }
+    }
 }
 
 /// `FFmpeg`'s error output decoding `path`, optionally with a decryption key.

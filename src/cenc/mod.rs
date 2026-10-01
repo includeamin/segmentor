@@ -10,7 +10,10 @@ mod signal;
 
 pub(crate) use keys::{Encryption, WireEncryption};
 pub(crate) use segment::{AssetProtection, PendingEncryption};
-pub(crate) use signal::{dash_content_protection, hls_key_lines, hls_session_keys};
+pub(crate) use signal::{
+    dash_content_protection, hls_key_lines, hls_key_none, hls_session_keys,
+    hls_session_keys_for_sequence,
+};
 
 /// See `fuzzing::exercise_avc_slice_header`.
 pub(crate) fn fuzz_avc(data: &[u8]) {
@@ -37,6 +40,18 @@ pub(crate) mod tests_support {
             r#"{"scheme":"cbcs","keys":[{"key_id":"0123456789abcdef0123456789abcdef","key":"00112233445566778899aabbccddeeff"}],
             "systems":[{"system_id":"edef8ba9-79d6-4ace-a3c8-27dcd51d21ed","license_url":"https://l.example.net/wv"},
                        {"system_id":"94ce86fb-07ff-4f43-adb8-93d2fa968ca2","hls_uri":"skd://a"}]}"#,
+        )
+        .unwrap()
+        .validate()
+        .unwrap()
+    }
+
+    /// Like [`sample_encryption`], under a different key ID and key, with Clear Key only, so two
+    /// clips (or assets) can be given distinguishable, independently valid encryption.
+    pub(crate) fn rekeyed_encryption() -> Encryption {
+        serde_json::from_str::<WireEncryption>(
+            r#"{"scheme":"cbcs","keys":[{"key_id":"fedcba9876543210fedcba9876543210","key":"ffeeddccbbaa99887766554433221100"}],
+            "systems":[{"system_id":"e2719d58-a985-b3c9-781a-b030af78d30e","license_url":"https://l.example.net/ck"}]}"#,
         )
         .unwrap()
         .validate()

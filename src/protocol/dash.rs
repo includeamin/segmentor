@@ -232,10 +232,14 @@ pub(crate) fn sequence_manifest(
     total_nanos: u64,
     version: &str,
 ) -> Result<String> {
+    // A clip's own `ContentProtection` is written per Period by `write_video_adaptation` and
+    // `write_audio_adaptation` below, each reading that clip's own `Presentation`, so per-clip
+    // keys (TDD 0009) need no further change here. The namespaces must be declared whenever *any*
+    // clip is encrypted, not only the first, or a later Period's `cenc:`/`dashif:` elements would
+    // use undeclared prefixes.
     let encrypted = clips
-        .first()
-        .and_then(|clip| clip.presentation.encryption())
-        .is_some();
+        .iter()
+        .any(|clip| clip.presentation.encryption().is_some());
     let mut manifest = mpd_open(&nanos_as_seconds(total_nanos), encrypted);
     for (position, clip) in clips.iter().enumerate() {
         writeln!(

@@ -69,6 +69,10 @@ struct WireClip {
     location: WireLocation,
     from_ms: Option<u64>,
     to_ms: Option<u64>,
+    /// Overrides the answer's own `encryption` for this clip only (TDD 0009, "Different keys per
+    /// clip"). Absent means "use the answer's `encryption`", which may itself be absent (clear).
+    #[serde(default)]
+    encryption: Option<crate::cenc::WireEncryption>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -435,9 +439,20 @@ impl HttpResolver {
                         from_ms,
                         to_ms: clip.to_ms,
                     },
+                    encryption: Self::interpret_encryption(clip.encryption.as_ref()).map_err(
+                        |message| ResolveError::Rejected(format!("clip {position}: {message}")),
+                    )?,
                 })
             })
             .collect()
+    }
+
+    /// Validates an `encryption` object, from either the answer or one clip. `None` stays `None`.
+    fn interpret_encryption(
+        wire: Option<&crate::cenc::WireEncryption>,
+    ) -> Result<Option<Arc<crate::cenc::Encryption>>, String> {
+        wire.map(|encryption| encryption.validate().map(Arc::new))
+            .transpose()
     }
 
     /// Validates a `200` answer against the request and the location policy.
@@ -497,16 +512,8 @@ impl HttpResolver {
             let refresh_after = remaining.saturating_sub(margin).max(remaining / 2);
             valid_until = valid_until.min(now + refresh_after);
         }
-        let encryption = wire
-            .encryption
-            .as_ref()
-            .map(|encryption| {
-                encryption
-                    .validate()
-                    .map(Arc::new)
-                    .map_err(ResolveError::Rejected)
-            })
-            .transpose()?;
+        let encryption =
+            Self::interpret_encryption(wire.encryption.as_ref()).map_err(ResolveError::Rejected)?;
         Ok(ResolvedAsset {
             location,
             renditions,

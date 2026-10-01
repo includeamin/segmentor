@@ -39,7 +39,7 @@ impl ServedAsset {
                 .asset
                 .encryption()
                 .map(crate::cenc::Encryption::key_ids),
-            Self::Sequence(asset) => asset.encryption().map(crate::cenc::Encryption::key_ids),
+            Self::Sequence(asset) => asset.key_ids(),
         }
     }
 

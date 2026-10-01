@@ -47,21 +47,25 @@ struct SequenceManifests {
 /// Trims every clip from its already parsed file, in order, each starting where the one before
 /// ended, and builds what is served (TDD 0008, "Loading"). One clip is an ordinary asset; two or
 /// more are a sequence. Errors name the clip by its position in the mapper's list.
+///
+/// Each clip carries its own, already-resolved encryption (TDD 0009, "Different keys per clip"):
+/// the registry has already applied the answer's own `encryption` as the fallback for a clip that
+/// did not name its own, so `None` here means that clip is genuinely served clear.
 pub(crate) fn build(
     asset_id: &str,
     files: &[ClipFile],
-    clips: &[(usize, ClipWindow)],
+    clips: &[(usize, ClipWindow, Option<Arc<crate::cenc::Encryption>>)],
     mapper_version: &str,
     segment_duration_ms: u64,
     limits: &LimitsConfig,
-    encryption: Option<&Arc<crate::cenc::Encryption>>,
 ) -> Result<ServedAsset> {
     let named = |position: usize| {
         move |error: Error| Error::InvalidMedia(format!("clip {position}: {error}"))
     };
     let mut start = TimelinePosition::ZERO;
     let mut trimmed = Vec::with_capacity(clips.len());
-    for (position, &(file, window)) in clips.iter().enumerate() {
+    for (position, (file, window, encryption)) in clips.iter().enumerate() {
+        let (file, window) = (*file, *window);
         let trailing = if position + 1 == clips.len() {
             Trailing::Keep
         } else {
@@ -77,19 +81,23 @@ pub(crate) fn build(
             requested.to_ms = ?window.to_ms,
             served.from_ms = cut.served_from_ms,
             served.to_ms = cut.served_to_ms,
+            encrypted = encryption.is_some(),
         );
-        trimmed.push((file, start, cut.index));
+        trimmed.push((file, start, cut.index, encryption.clone()));
         start = cut.end;
     }
     let version = clip::version_of(
         mapper_version,
-        clips
-            .iter()
-            .map(|&(file, window)| (&files[file].parsed.index.source, window)),
-        encryption.map(AsRef::as_ref),
+        clips.iter().map(|(file, window, encryption)| {
+            (
+                &files[*file].parsed.index.source,
+                *window,
+                encryption.as_deref(),
+            )
+        }),
     );
     let mut assets = Vec::with_capacity(trimmed.len());
-    for (position, (file, clip_start, index)) in trimmed.into_iter().enumerate() {
+    for (position, (file, clip_start, index, encryption)) in trimmed.into_iter().enumerate() {
         let asset = PackagedAsset::assemble(
             files[file].source.clone(),
             index,
@@ -99,7 +107,7 @@ pub(crate) fn build(
             Extras {
                 subtitles: Vec::new(),
                 version: Some(version.clone()),
-                encryption: encryption.map(Arc::clone),
+                encryption,
             },
         )
         .map_err(named(position))?;
@@ -236,9 +244,20 @@ fn render(
 }
 
 impl SequenceAsset {
-    /// The encryption every clip shares, if any.
-    pub(crate) fn encryption(&self) -> Option<&crate::cenc::Encryption> {
-        self.clips[0].encryption()
+    /// Every key ID any clip is encrypted with, deduped and in clip order, or `None` if every
+    /// clip is served clear (TDD 0009, "Different keys per clip": clips may differ).
+    pub(crate) fn key_ids(&self) -> Option<Vec<String>> {
+        let mut ids: Vec<String> = Vec::new();
+        for clip in &self.clips {
+            if let Some(encryption) = clip.encryption() {
+                for id in encryption.key_ids() {
+                    if !ids.contains(&id) {
+                        ids.push(id);
+                    }
+                }
+            }
+        }
+        (!ids.is_empty()).then_some(ids)
     }
 
     pub(crate) fn version(&self) -> &str {
@@ -352,15 +371,20 @@ mod tests {
     };
 
     fn build_from(files: &[ClipFile], clips: &[(usize, ClipWindow)]) -> Result<ServedAsset> {
-        build(
-            "test",
+        build_encrypted(
             files,
-            clips,
-            "v1",
-            1000,
-            &LimitsConfig::default(),
-            None,
+            &clips
+                .iter()
+                .map(|&(file, window)| (file, window, None))
+                .collect::<Vec<_>>(),
         )
+    }
+
+    fn build_encrypted(
+        files: &[ClipFile],
+        clips: &[(usize, ClipWindow, Option<Arc<crate::cenc::Encryption>>)],
+    ) -> Result<ServedAsset> {
+        build("test", files, clips, "v1", 1000, &LimitsConfig::default())
     }
 
     fn sequence(asset: &ServedAsset) -> &SequenceAsset {
