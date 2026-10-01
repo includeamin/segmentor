@@ -133,7 +133,7 @@ Other system IDs have no standard HLS form and are signalled in DASH only; the m
 
 ### Versioning
 
-The URL version of an encrypted asset additionally hashes each key ID, a SHA-256 of each key, each IV, and the system list. Re-keying an asset, even under an unchanged mapper `version`, therefore gives new URLs, and a CDN never mixes segments encrypted under different keys. `FORMAT_REVISION` does not change, because nothing served for an unencrypted asset changes.
+The URL version of an encrypted asset additionally hashes each key ID, a SHA-256 of each key, each IV, and the system list. Re-keying an asset, even under an unchanged mapper `version`, therefore gives new URLs, and a CDN never mixes segments encrypted under different keys. This needs the mapper to answer `200` with the new keys: a `304` means nothing in the answer changed, so the server keeps the keys it holds. The mapper API reference tells mapper authors to re-key with a `200` and a new `version`. `FORMAT_REVISION` does not change, because nothing served for an unencrypted asset changes.
 
 ## Security and limits
 
