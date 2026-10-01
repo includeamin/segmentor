@@ -542,7 +542,7 @@ mod tests {
             !format!("{mapper:?}").contains("secret-value"),
             "tokens must be redacted"
         );
-        assert!(config.assets.is_empty());
+        assert_eq!(config.assets.len(), 0);
         assert_eq!(config.remote_media.allowed_hosts, ["origin.example.net"]);
     }
 

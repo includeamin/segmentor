@@ -663,7 +663,7 @@ async fn remote_ranges_reach_the_origin_as_ranges() {
     .await;
 
     let ranges = origin.state.ranges.lock().unwrap().clone();
-    assert!(!ranges.is_empty());
+    assert_ne!(ranges, Vec::<String>::new());
     assert!(
         ranges.iter().all(|range| range.starts_with("bytes=")),
         "{ranges:?}"
@@ -1031,7 +1031,7 @@ async fn a_rotated_signature_is_applied_in_place_without_reloading() {
     .await;
 
     assert_eq!(status_code, StatusCode::OK);
-    assert!(!segment.is_empty());
+    assert_ne!(segment, Vec::<u8>::new());
     let used = origin.state.queries.lock().unwrap()[before..].to_vec();
     assert!(
         !used.is_empty() && used.iter().all(|query| query == "sig=2"),
@@ -1793,7 +1793,7 @@ async fn a_whole_file_clip_serves_the_same_media_bytes_as_the_file() {
             )
             .await
             .2;
-            assert!(!plain.is_empty());
+            assert_ne!(plain, Vec::<u8>::new());
             assert_eq!(plain, whole, "{track} segment {segment}");
         }
     }
