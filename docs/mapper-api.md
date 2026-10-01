@@ -214,6 +214,7 @@ Instead of a single `location`, an answer may list clips: each a file and an opt
 | `location` | Yes | A `file` or `http` location with the same rules as a single asset's |
 | `from_ms` | No | Default `0`. A time on the file's own clock, the one subtitle cues are read against |
 | `to_ms` | No | Default: the end of the file. Must be later than `from_ms`; a value past the end is clamped to the end |
+| `encryption` | No | This clip's own [`encryption`](#encryption) object, with the same rules as the answer's. Absent means the clip uses the answer's own `encryption` (or is clear if the answer has none). See [Different keys per clip](#different-keys-per-clip) |
 
 Both times are at most 4294967295 ms, and an answer may list at most `limits.max_clips` (default 64) clips.
 
@@ -229,7 +230,7 @@ Both times are at most 4294967295 ms, and an answer may list at most `limits.max
 
 ## Encryption
 
-An answer may carry an `encryption` object. segmentor then encrypts what it serves with Common Encryption in the `cbcs` scheme, and signals the DRM systems you name in the HLS and DASH manifests. One set of segments plays under Widevine, FairPlay, PlayReady, and Clear Key. The object applies to the whole asset: every track, every rendition, and every clip.
+An answer may carry an `encryption` object. segmentor then encrypts what it serves with Common Encryption in the `cbcs` scheme, and signals the DRM systems you name in the HLS and DASH manifests. One set of segments plays under Widevine, FairPlay, PlayReady, and Clear Key. The object applies to the whole asset: every track, every rendition, and every clip that does not carry its own (see [Different keys per clip](#different-keys-per-clip)).
 
 ```json
 {
@@ -287,6 +288,33 @@ Any other system ID is accepted and signalled in DASH only (its `pssh` and `lice
 **Large `pssh` boxes need a larger answer limit.** The server rejects mapper answers over `resolver.http.max_response_bytes` (16 KiB by default). A 16 KiB `pssh` is about 22 KiB in base64, so an answer carrying large `pssh` boxes, or several, can exceed it; raise the limit to fit.
 
 **The answer now carries secrets.** The mapper must be reached over `https` and must require the bearer token; do not use `allow_insecure_mapper` with real keys.
+
+### Different keys per clip
+
+In a [clips](#clips) answer, each clip may carry its own `encryption` object. A clip without one uses the answer's own `encryption`; if the answer has none either, that clip is served clear. This covers a clear pre-roll before an encrypted movie, or two programmes under different keys:
+
+```json
+{
+  "asset_id": "movie-with-preroll",
+  "version": "2026-10-02-a",
+  "clips": [
+    { "location": { "type": "file", "path": "ads/preroll.mp4" } },
+    { "location": { "type": "file", "path": "movies/movie.mp4" },
+      "encryption": {
+        "scheme": "cbcs",
+        "keys": [{ "key_id": "0123456789abcdef0123456789abcdef", "key": "00112233445566778899aabbccddeeff" }],
+        "systems": [{ "system_id": "94ce86fb-07ff-4f43-adb8-93d2fa968ca2", "hls_uri": "skd://movie" }]
+      } }
+  ]
+}
+```
+
+- **HLS.** Each media playlist gives an `#EXT-X-KEY` line set wherever a clip's encryption differs from the clip before it, after the `#EXT-X-DISCONTINUITY` and before that clip's `#EXT-X-MAP`. Moving from an encrypted clip to a clear one writes `#EXT-X-KEY:METHOD=NONE`, because a key line otherwise applies to every later segment. The master playlist's `#EXT-X-SESSION-KEY` lines cover every key used by any clip, each system line given once.
+- **DASH.** Each clip's `Period` carries its own `ContentProtection` elements, or none if that clip is clear.
+- **Versioning.** Each clip's own keys are hashed into the URL version, so re-keying one clip, or turning its encryption on or off, gives the whole sequence new URLs.
+- **Validation.** A clip's `encryption` follows every rule above; a bad one makes the whole answer malformed (`502`), with the error naming the clip.
+- **Limitation.** A clip cannot opt out of the answer's own `encryption`: absent and `null` both mean "use the answer's". To mix clear and encrypted clips, leave the answer's `encryption` out and set it on the encrypted clips.
+- `/admin/status` lists the key IDs of every clip.
 
 ## What a `version` means to the server
 

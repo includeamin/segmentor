@@ -5,6 +5,7 @@
 # Design
 
 - [Architecture](architecture.md)
+- [Roadmap](roadmap.md)
 - [Using segmentor](usage.md)
 - [Supported input](supported-input.md)
 - [Deploying](deployment.md)
