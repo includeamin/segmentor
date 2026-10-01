@@ -9,7 +9,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::response::Response;
 use bytes::Bytes;
 use serde::Deserialize;
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::parse_track;
@@ -179,16 +179,27 @@ pub(crate) async fn iframe_segment(
 /// Reads an encrypted track's samples, encrypts them off the async workers, and returns the
 /// finished fragment as a header-only segment, so ranges, `HEAD`, and streaming from here on are
 /// the clear path's (TDD 0009, "The encrypted segment path").
+///
+/// The returned job slot covers the encrypted bytes for as long as they live: the caller hands
+/// it to the stream, which releases it when the response finishes or is aborted.
 async fn encrypt_segment(
     state: &AppState,
     source: &PackagedAsset,
     ranges: Vec<ByteRange>,
     pending: crate::cenc::PendingEncryption,
     what: &str,
-) -> HttpResult<PreparedSegment> {
+) -> HttpResult<(PreparedSegment, OwnedSemaphorePermit)> {
     let started = Instant::now();
     let permit = state.segment_permit().await?;
-    let mut payload = Vec::new();
+    let length = ranges
+        .iter()
+        .try_fold(0u64, |total, range| total.checked_add(range.length))
+        .and_then(|total| usize::try_from(total).ok())
+        .and_then(|total| total.checked_add(pending.header_room()))
+        .ok_or_else(|| {
+            HttpError::internal("encrypted segment does not fit in memory".to_owned())
+        })?;
+    let mut payload = Vec::with_capacity(length);
     for range in ranges {
         match source.read_range(range).await {
             Ok(bytes) => payload.extend_from_slice(&bytes),
@@ -198,19 +209,23 @@ async fn encrypt_segment(
             }
         }
     }
-    drop(permit);
-    let finished = tokio::task::spawn_blocking(move || pending.finish(payload))
-        .await
-        .map_err(|error| HttpError::internal(error.to_string()))?;
+    let finished = match tokio::task::spawn_blocking(move || pending.finish(payload)).await {
+        Ok(finished) => finished,
+        Err(error) => {
+            state.metrics.encryption_failed();
+            return Err(HttpError::internal(error.to_string()));
+        }
+    };
     match finished {
         Ok(bytes) => {
             state.metrics.encrypted_segment(started.elapsed());
-            Ok(PreparedSegment {
+            let prepared = PreparedSegment {
                 content_length: bytes.len() as u64,
                 header: bytes,
                 ranges: Vec::new(),
                 encryption: None,
-            })
+            };
+            Ok((prepared, permit))
         }
         Err(error) => {
             state.metrics.encryption_failed();
@@ -251,9 +266,14 @@ async fn serve_segment(
             .await
             .map_err(|error| HttpError::internal(error.to_string()))??
     };
-    let prepared = match prepared.encryption.take() {
-        None => prepared,
-        Some(pending) => encrypt_segment(state, &source, prepared.ranges, *pending, &what).await?,
+    // An encrypted segment arrives with the job slot that covers its bytes in memory.
+    let (prepared, encrypted_permit) = match prepared.encryption.take() {
+        None => (prepared, None),
+        Some(pending) => {
+            let (prepared, permit) =
+                encrypt_segment(state, &source, prepared.ranges, *pending, &what).await?;
+            (prepared, Some(permit))
+        }
     };
     let total_length = prepared.content_length;
     let requested_interval = match requested_range(headers, total_length, &etag) {
@@ -265,7 +285,9 @@ async fn serve_segment(
     };
     let content_length = requested_interval.end - requested_interval.start;
     if method == Method::HEAD {
-        // Length and range are fully determined by metadata; no source read or job slot needed.
+        // Length and range are known without streaming. A clear segment needs no source read or
+        // job slot; an encrypted one was read and encrypted to learn its length, and its slot is
+        // released as this returns.
         return media_response_builder(
             total_length,
             requested_interval,
@@ -276,7 +298,10 @@ async fn serve_segment(
         .map_err(|error| HttpError::internal(error.to_string()));
     }
 
-    let permit = state.segment_permit().await?;
+    let permit = match encrypted_permit {
+        Some(permit) => permit,
+        None => state.segment_permit().await?,
+    };
     let (sender, receiver) = mpsc::channel(2);
     tokio::spawn(
         StreamJob {

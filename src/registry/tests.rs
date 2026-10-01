@@ -2380,6 +2380,76 @@ async fn range_and_head_requests_work_on_an_encrypted_segment() {
     );
 }
 
+/// An encrypted segment is streamed in `stream_chunk_bytes` pieces like a clear one, so the idle
+/// timeout applies to it, and its job slot is back once the response finishes.
+#[tokio::test]
+async fn an_encrypted_segment_streams_in_chunks_and_frees_its_job_slot() {
+    use tokio_stream::StreamExt as _;
+    let h = harness_with(|config| {
+        config.limits.stream_chunk_bytes = 1024;
+        config.limits.max_segment_jobs = 2;
+    })
+    .await;
+    h.mapper.state.set(
+        "drm",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(clear_key_encryption(KEY)),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/drm/master.m3u8").await.2);
+    let uri = format!("/hls/drm/video/segments/0/media.m4s?v={version}");
+
+    let response = h
+        .app
+        .clone()
+        .oneshot(Request::get(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let mut stream = response.into_body().into_data_stream();
+    let (mut chunks, mut total) = (0usize, 0usize);
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.unwrap();
+        assert!(chunk.len() <= 1024, "a chunk of {} bytes", chunk.len());
+        chunks += 1;
+        total += chunk.len();
+    }
+
+    assert!(total > 1024, "the fixture segment is larger than one chunk");
+    assert!(chunks > 1, "{chunks} chunk(s) for {total} bytes");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(h.state.segment_jobs.available_permits(), 2);
+}
+
+/// A client that stops reading an encrypted segment is cut off after the idle timeout, and the
+/// segment's job slot is released with it.
+#[tokio::test]
+async fn a_stalled_encrypted_response_is_dropped_and_frees_its_job_slot() {
+    let h = harness_with(|config| {
+        config.limits.stream_chunk_bytes = 64;
+        config.limits.response_idle_timeout_ms = 50;
+        config.limits.max_segment_jobs = 1;
+    })
+    .await;
+    h.mapper.state.set(
+        "drm",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(clear_key_encryption(KEY)),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/drm/master.m3u8").await.2);
+    let uri = format!("/hls/drm/video/segments/0/media.m4s?v={version}");
+
+    let stalled = h
+        .app
+        .clone()
+        .oneshot(Request::get(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(stalled.status(), StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert!(metric(&h.state, "vod_segment_stream_aborts_idle_total 1"));
+    assert_eq!(h.state.segment_jobs.available_permits(), 1);
+    assert_eq!(status(&h.app, &uri).await, StatusCode::OK);
+    drop(stalled);
+}
+
 #[tokio::test]
 async fn an_unsupported_codec_with_encryption_fails_the_asset() {
     let h = harness().await;

@@ -119,6 +119,14 @@ pub(crate) struct PendingEncryption {
 }
 
 impl PendingEncryption {
+    /// Room to reserve ahead of the payload for the fragment header, so [`Self::finish`] can put
+    /// the header in front without copying the payload into a second buffer. An estimate: a
+    /// sample's `trun`, `senc` (a few subsamples), and `saiz` entries, plus the fixed boxes; a
+    /// larger header only costs a reallocation.
+    pub(crate) fn header_room(&self) -> usize {
+        self.samples.len().saturating_mul(64).saturating_add(1024)
+    }
+
     /// Encrypts `payload` (the samples' bytes, in order) and returns the finished fragment.
     pub(crate) fn finish(&self, mut payload: Vec<u8>) -> Result<Bytes> {
         let invalid = |message: &str| Error::InvalidMedia(message.to_owned());
@@ -157,7 +165,7 @@ impl PendingEncryption {
             maps.push(map);
             offset += size;
         }
-        let mut fragment = fmp4::encrypted_fragment_header(
+        let header = fmp4::encrypted_fragment_header(
             self.track_id,
             self.kind,
             &self.samples,
@@ -166,8 +174,11 @@ impl PendingEncryption {
             &maps,
             payload.len(),
         )?;
-        fragment.extend_from_slice(&payload);
-        Ok(Bytes::from(fragment))
+        // Put the header in front within the payload's own buffer (room is usually reserved by
+        // the caller), rather than copying the whole payload after the header.
+        payload.reserve_exact(header.len());
+        payload.splice(0..0, header);
+        Ok(Bytes::from(payload))
     }
 }
 
