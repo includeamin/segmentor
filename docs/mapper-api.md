@@ -68,6 +68,8 @@ A file on an HTTP origin:
 
 Send this when `If-None-Match` names the current version. The body is empty. A `Cache-Control: max-age=N` header sets the new reuse window. The server only sends `If-None-Match` when it already holds a usable answer, and never when the previous location has passed its `expires_at`, so a `304` can only be an answer to a valid question.
 
+A `304` means nothing in the answer changed, including `encryption`: the server keeps the answer it already holds. When you re-key an asset, answer `200` with the new `encryption` object (and change `version`), never `304`.
+
 ### Errors
 
 | Status | Meaning | What the server does |
@@ -270,6 +272,8 @@ An answer may carry an `encryption` object. segmentor then encrypts what it serv
 
 **Clear Key in browsers.** dash.js plays Clear Key from the manifest's `default_KID` with keys it is given directly, so `{ "system_id": "e2719d58-a985-b3c9-781a-b030af78d30e" }` alone is enough there. hls.js asks the browser's Clear Key CDM for a licence from the init data in the init segment, and Chrome only recognises the W3C common system ID `1077efec-c0b2-4d02-ace3-3c1e52e2fb4b` for that. For HLS, therefore, list Clear Key with its `license_url` and add a second system with that common ID and a `pssh` box listing the key ID.
 
+A Widevine or PlayReady entry without a `pssh` gets no HLS key line: HLS signals both from the `pssh`, so such an entry is signalled in DASH only.
+
 Any other system ID is accepted and signalled in DASH only (its `pssh` and `license_url` go into its `ContentProtection`); HLS has no standard form for it. The DASH manifest carries a `mp4protection` `ContentProtection` with `cenc:default_KID`, then one per system.
 
 **segmentor never contacts a licence server.** It encrypts with the keys you give it and tells players where to get a licence; the player fetches the licence from your DRM vendor. The `pssh` boxes and URLs are yours to produce.
@@ -278,7 +282,9 @@ Any other system ID is accepted and signalled in DASH only (its `pssh` and `lice
 
 **A malformed `encryption` object makes the whole answer malformed**: a `502` to players, never cached as valid, like any other bad answer. That covers an unknown scheme, a bad hex length, keys that do not cover every track, more than eight systems, a `pssh` that is not a well-formed box or names another system, a `license_url` that is not `https`, a FairPlay entry without `hls_uri`, and FairPlay listed with separate video and audio keys. Error messages and logs never contain key material.
 
-**The URL version covers the keys.** The key (as its SHA-256), the key IDs, the IVs, and the systems are hashed into the version in every URL. Re-keying an asset under an unchanged mapper `version` therefore reloads it and hands out new URLs, so no player mixes old and new segments.
+**The URL version covers the keys.** The key (as its SHA-256), the key IDs, the IVs, and the systems are hashed into the version in every URL. An answer whose keys changed therefore reloads the asset and hands out new URLs, even under an unchanged mapper `version`, so no player mixes old and new segments. That holds only when the mapper answers `200` with the new keys: a `304` tells the server nothing changed, and it keeps the old keys. Re-key with a `200` and a new `version`.
+
+**Large `pssh` boxes need a larger answer limit.** The server rejects mapper answers over `resolver.http.max_response_bytes` (16 KiB by default). A 16 KiB `pssh` is about 22 KiB in base64, so an answer carrying large `pssh` boxes, or several, can exceed it; raise the limit to fit.
 
 **The answer now carries secrets.** The mapper must be reached over `https` and must require the bearer token; do not use `allow_insecure_mapper` with real keys.
 
@@ -350,7 +356,8 @@ Then `curl http://127.0.0.1:3000/hls/movie/master.m3u8`.
 - The response `asset_id` echoes the request.
 - `version` changes whenever the media changes, and only then.
 - Removed assets answer `404` or `410`, not `200`.
-- Answers are small (the server's default limit is 16 KiB).
+- Answers are small (the server's default limit is 16 KiB; raise `resolver.http.max_response_bytes` for large `pssh` boxes).
+- A re-keyed asset is answered with `200` and a new `version`, never `304`.
 - The mapper answers quickly: the server's default per-request timeout is two seconds, with two retries.
 - `version` also changes when a subtitle file changes, or when any rendition's file changes.
 - Video renditions are encoded with the same keyframe interval, so their segments align.
