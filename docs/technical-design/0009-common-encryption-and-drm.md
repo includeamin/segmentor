@@ -1,8 +1,8 @@
 # TDD 0009: Common encryption and DRM
 
-- Status: Accepted; H.264 and audio implemented, HEVC pending
+- Status: Accepted; H.264 and audio implemented, different keys per clip implemented, HEVC pending
 - Created: 2026-10-01
-- Updated: 2026-10-01
+- Updated: 2026-10-02
 - Related ADRs: [ADR 0001](../adr/0001-use-fragmented-mp4-for-media-segments.md) (fragmented MP4 segments)
 - Related designs: [TDD 0002](0002-asset-map-interface.md) (the mapper interface this extends), [TDD 0006](0006-trick-play-subtitles-and-renditions.md) (its "DRM (later)" section recorded what this must not break), [TDD 0008](0008-clipping-and-concatenation.md) (sequences, which this covers)
 
@@ -12,7 +12,7 @@ segmentor encrypts what it serves with Common Encryption (ISO/IEC 23001-7) in th
 
 Encryption happens per request, like everything else segmentor serves. An encrypted segment is read into memory, encrypted, and returned; its output is deterministic, so immutable URLs, ETags, and CDN caching work unchanged. Assets without `encryption` are served byte for byte as today.
 
-This is the first stage of DRM: the shared core. It deliberately leaves out AV1 and VP9, different keys per clip, key rotation, whole-segment HLS AES-128, encrypted source files, and a SPEKE adapter (see [Deferred](#deferred)).
+This is the first stage of DRM: the shared core. It deliberately leaves out AV1 and VP9, key rotation, whole-segment HLS AES-128, encrypted source files, and a SPEKE adapter (see [Deferred](#deferred)). Different keys per clip was added afterwards (see [Different keys per clip](#different-keys-per-clip)).
 
 ## Context
 
@@ -38,7 +38,7 @@ The mapper already carries per-asset secrets under HTTPS and a bearer token, has
 - Licence servers, key generation, or talking to a DRM vendor. The operator's mapper supplies keys and system data.
 - The `cenc` (AES-CTR), `cbc1`, and `cens` schemes.
 - AV1, VP9, Opus, and FLAC encryption in this stage.
-- Different keys per clip, key rotation, whole-segment HLS AES-128, encrypted source passthrough, and SPEKE. See [Deferred](#deferred).
+- Key rotation, whole-segment HLS AES-128, encrypted source passthrough, and SPEKE. See [Deferred](#deferred).
 
 ## Design
 
@@ -107,7 +107,21 @@ Nothing encrypted is cached inside segmentor; a CDN caches it, as it caches ever
 
 ### Composites and sequences
 
-For adaptive renditions, every rendition's tracks are encrypted with the key for their kind, and the composite's manifests carry one set of signalling. For sequences, every clip is encrypted with the same keys; the DASH signalling repeats in each Period, and the HLS `#EXT-X-KEY` lines, placed once before the first `#EXT-X-MAP`, stay in force across discontinuities because the key does not change.
+For adaptive renditions, every rendition's tracks are encrypted with the key for their kind, and the composite's manifests carry one set of signalling. For sequences, each clip is encrypted with its own keys (see [Different keys per clip](#different-keys-per-clip)); when every clip shares the answer's keys, the HLS `#EXT-X-KEY` lines appear once before the first `#EXT-X-MAP` and stay in force across discontinuities.
+
+### Different keys per clip
+
+Added after the first stage. Each entry of a mapper answer's `clips` list may carry its own `encryption` object, validated by the same rules as the answer's. The registry resolves each clip's encryption as the clip's own, else the answer's, else none, and passes it to that clip's `PackagedAsset::assemble`. Each clip is already its own `PackagedAsset`, so init segments, fragments, and the segment path need no change.
+
+- **HLS media playlists** compare each clip's encryption with the previous clip's. When they differ, the new clip's `#EXT-X-KEY` lines go after the `#EXT-X-DISCONTINUITY` and before its `#EXT-X-MAP`. A move from encrypted to clear writes `#EXT-X-KEY:METHOD=NONE`, because RFC 8216 applies a key tag to every later segment until the next one.
+- **HLS master playlist.** `#EXT-X-SESSION-KEY` lines are the union over every clip's encryption, deduplicated by RFC 8216 identity across the whole sequence (`hls_session_keys_for_sequence`).
+- **DASH.** Each Period's `ContentProtection` already came from its own clip's `Presentation`, so it needed no change. The `cenc` and `dashif` namespaces are now declared when any clip is encrypted, not only the first.
+- **Versioning.** `clip::version_of` hashes each clip's own encryption fingerprint, or a "clear" marker, alongside its source and window.
+- **Reload detection.** A re-resolved answer is treated as changed if any clip's window or encryption changed, even under the same `version`. Locations are still compared loosely, so a re-signed URL keeps its in-place rotation.
+- **Status.** `/admin/status` reports the deduplicated key IDs of every clip.
+- **Not supported.** A clip cannot opt out of the answer's own `encryption` (serde reads absent and `null` alike). Mixed sequences leave the answer-level object out instead.
+
+Tested by: clear-then-encrypted and encrypted-then-clear sequences (key placement, `METHOD=NONE`, per-Period protection, namespace declaration); two clips under two keys (session-key union, `/admin/status`); re-keying one clip changing the version; a malformed clip-level object rejected without echoing its key; and FFmpeg decrypting each clip of a three-clip mixed sequence with only its own key. The key-transition and session-key logic were mutation-checked.
 
 ### Signalling: DASH
 
@@ -170,7 +184,6 @@ Additive: a mapper that sends no `encryption` gets byte-identical output, and th
 ## Deferred
 
 - **AV1 and VP9**, which need their own subsample rules (OBU and superframe aware).
-- **Different keys per clip**, such as a clear pre-roll before an encrypted movie, which needs HLS key changes at discontinuities and per-Period DASH signalling.
 - **Key rotation** within an asset.
 - **Whole-segment HLS AES-128**, a separate, simpler mode that protects without DRM.
 - **Encrypted source passthrough**: re-segmenting files that are already `cbcs`-encrypted.

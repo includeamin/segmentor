@@ -53,6 +53,7 @@ Architectural decision records (ADRs) capture durable choices, their context, an
 
 ## Guides
 
+- [Roadmap](roadmap.md) lists every step needed for segmentor to replace nginx-vod-module, by phase and status.
 - [Operating the origin](operations.md) covers probes, shutdown, CORS, metrics, and limits for production deployments.
 - [Performance budgets](benchmarks.md) records how the budgets are measured and the current results.
 - [Releasing](releasing.md) explains the commit convention, automatic version tags, and the manual release workflow.
