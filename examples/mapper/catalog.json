@@ -29,5 +29,14 @@
       { "location": { "type": "file", "path": "rendition-480p.mp4" } },
       { "location": { "type": "file", "path": "rendition-720p.mp4" }, "from_ms": 1500 }
     ]
+  },
+  "drm-clearkey": {
+    "version": "v1",
+    "location": { "type": "file", "path": "h264-aac.mp4" },
+    "encryption": {
+      "scheme": "cbcs",
+      "keys": [{ "key_id": "0123456789abcdef0123456789abcdef", "key": "00112233445566778899aabbccddeeff" }],
+      "systems": [{ "system_id": "e2719d58-a985-b3c9-781a-b030af78d30e" }]
+    }
   }
 }

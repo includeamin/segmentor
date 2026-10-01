@@ -62,6 +62,7 @@ A file on an HTTP origin:
 | `subtitles` | No | Sidecar WebVTT files; see [Subtitles](#subtitles) |
 | `renditions` | Instead of `location` | Several files served as one adaptive asset; see [Renditions](#renditions). Exactly one of `location`, `renditions`, or `clips` must be set |
 | `clips` | Instead of `location` | One file trimmed, or several played back to back; see [Clips](#clips) |
+| `encryption` | No | Content keys and DRM signalling; see [Encryption](#encryption). The answer then carries secrets |
 
 ### `304 Not Modified`
 
@@ -224,6 +225,64 @@ Both times are at most 4294967295 ms, and an answer may list at most `limits.max
 
 `subtitles` cannot be combined with `clips` yet: the mapper cannot know where a keyframe-aligned clip begins, so cues written for the output would drift. Such an answer is rejected.
 
+## Encryption
+
+An answer may carry an `encryption` object. segmentor then encrypts what it serves with Common Encryption in the `cbcs` scheme, and signals the DRM systems you name in the HLS and DASH manifests. One set of segments plays under Widevine, FairPlay, PlayReady, and Clear Key. The object applies to the whole asset: every track, every rendition, and every clip.
+
+```json
+{
+  "asset_id": "movie",
+  "version": "2026-10-01-a",
+  "location": { "type": "file", "path": "movies/movie.mp4" },
+  "encryption": {
+    "scheme": "cbcs",
+    "keys": [
+      { "tracks": "video", "key_id": "0123456789abcdef0123456789abcdef", "key": "00112233445566778899aabbccddeeff" },
+      { "tracks": "audio", "key_id": "fedcba9876543210fedcba9876543210", "key": "ffeeddccbbaa99887766554433221100" }
+    ],
+    "systems": [
+      { "system_id": "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed", "pssh": "<base64 pssh box>", "license_url": "https://license.example.net/widevine" },
+      { "system_id": "94ce86fb-07ff-4f43-adb8-93d2fa968ca2", "hls_uri": "skd://movie" },
+      { "system_id": "9a04f079-9840-4286-ab92-e65be0885f95", "pssh": "<base64 pssh box>", "license_url": "https://license.example.net/playready" }
+    ]
+  }
+}
+```
+
+| Field | Rules |
+| --- | --- |
+| `scheme` | `cbcs`. Anything else is rejected |
+| `keys` | One entry with `"tracks": "all"` (or no `tracks`), or one `"video"` and one `"audio"` entry. Every track of the asset must end up with exactly one key |
+| `key_id`, `key` | 16 bytes each, as 32 hex digits |
+| `iv` | Optional, 16 bytes as 32 hex digits: the constant IV declared in the init segment. When absent, it is the first 16 bytes of SHA-256(`"segmentor cbcs iv"` followed by `key_id`), so every replica derives the same one. It is never derived from the key |
+| `systems` | At most 8. Each names a DRM system by its standard system ID (a UUID) |
+| `pssh` | Optional base64 of a complete, well-formed `pssh` box whose system ID matches the entry's `system_id`, at most 16 KiB decoded |
+| `license_url` | Optional `https` URL. Written into the DASH manifest as `dashif:Laurl`, and used as Clear Key's HLS key URI |
+| `hls_uri` | The HLS key URI. Required for FairPlay (for example `skd://movie`); no quotes or control characters, at most 2048 bytes |
+
+**What each system needs:**
+
+| System | System ID | HLS signalling | Needs |
+| --- | --- | --- | --- |
+| Widevine | `edef8ba9-79d6-4ace-a3c8-27dcd51d21ed` | `SAMPLE-AES` key line with a data URI of the `pssh` and the key ID | `pssh`; `license_url` for DASH |
+| FairPlay | `94ce86fb-07ff-4f43-adb8-93d2fa968ca2` | `SAMPLE-AES` key line with `com.apple.streamingkeydelivery` | `hls_uri` |
+| PlayReady | `9a04f079-9840-4286-ab92-e65be0885f95` | `SAMPLE-AES` key line with a UTF-16 data URI of the PlayReady object taken from the `pssh` | `pssh`; `license_url` for DASH |
+| Clear Key | `e2719d58-a985-b3c9-781a-b030af78d30e` | `SAMPLE-AES` key line with `org.w3.clearkey` and the `license_url` | `license_url` for HLS; nothing for DASH |
+
+**Clear Key in browsers.** dash.js plays Clear Key from the manifest's `default_KID` with keys it is given directly, so `{ "system_id": "e2719d58-a985-b3c9-781a-b030af78d30e" }` alone is enough there. hls.js asks the browser's Clear Key CDM for a licence from the init data in the init segment, and Chrome only recognises the W3C common system ID `1077efec-c0b2-4d02-ace3-3c1e52e2fb4b` for that. For HLS, therefore, list Clear Key with its `license_url` and add a second system with that common ID and a `pssh` box listing the key ID.
+
+Any other system ID is accepted and signalled in DASH only (its `pssh` and `license_url` go into its `ContentProtection`); HLS has no standard form for it. The DASH manifest carries a `mp4protection` `ContentProtection` with `cenc:default_KID`, then one per system.
+
+**segmentor never contacts a licence server.** It encrypts with the keys you give it and tells players where to get a licence; the player fetches the licence from your DRM vendor. The `pssh` boxes and URLs are yours to produce.
+
+**Codecs.** H.264 video and AAC, AC-3, and E-AC-3 audio can be encrypted. HEVC encryption is not supported yet: an asset with HEVC and an `encryption` object fails with "HEVC encryption is not supported yet". VP9, AV1, Opus, and FLAC cannot be encrypted. A source file that is itself encrypted is still rejected.
+
+**A malformed `encryption` object makes the whole answer malformed**: a `502` to players, never cached as valid, like any other bad answer. That covers an unknown scheme, a bad hex length, keys that do not cover every track, more than eight systems, a `pssh` that is not a well-formed box or names another system, a `license_url` that is not `https`, and a FairPlay entry without `hls_uri`. Error messages and logs never contain key material.
+
+**The URL version covers the keys.** The key (as its SHA-256), the key IDs, the IVs, and the systems are hashed into the version in every URL. Re-keying an asset under an unchanged mapper `version` therefore reloads it and hands out new URLs, so no player mixes old and new segments.
+
+**The answer now carries secrets.** The mapper must be reached over `https` and must require the bearer token; do not use `allow_insecure_mapper` with real keys.
+
 ## What a `version` means to the server
 
 The server keeps one loaded copy per asset, keyed by `(asset_id, version)`. A different `version`, or the same version at a different location (a rotated signed URL), makes it reload from the new location. There is **no grace period**: players holding URLs from the old version get `404` and recover by fetching the playlist again. Change `version` only when the media actually changes.
@@ -299,3 +358,4 @@ Then `curl http://127.0.0.1:3000/hls/movie/master.m3u8`.
 - `expires_at` is set for anything signed, and re-signing keeps the same `version`.
 - `from_ms`/`to_ms` are on the file's own clock, and a clip may start up to one keyframe interval early.
 - The mapper is reachable over `https` in production and requires the bearer token.
+- Keys only travel over `https`: an answer with `encryption` is never served over plain HTTP outside development.

@@ -80,8 +80,9 @@ class Mapper(BaseHTTPRequestHandler):
             "version": entry["version"],
             "ttl_seconds": TTL_SECONDS,
         }
-        # Pass through whichever of the three alternatives the entry uses, and its subtitles.
-        for field in ("location", "renditions", "clips", "subtitles"):
+        # Pass through whichever of the three alternatives the entry uses, its subtitles, and any
+        # encryption (keys and DRM systems).
+        for field in ("location", "renditions", "clips", "subtitles", "encryption"):
             if field in entry:
                 answer[field] = entry[field]
         body = json.dumps(answer).encode()
