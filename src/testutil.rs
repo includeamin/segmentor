@@ -47,6 +47,10 @@ async fn serve(app: Router) -> SocketAddr {
 // Mapper
 // ---------------------------------------------------------------------------------------------
 
+/// One clip for [`Answer::clips_with_encryption`]: a location, its window, and its own optional
+/// `encryption` override.
+pub(crate) type EncryptedClip = (Value, Option<u64>, Option<u64>, Option<Value>);
+
 #[derive(Debug, Clone)]
 pub(crate) struct Answer {
     pub(crate) version: String,
@@ -124,19 +128,35 @@ impl Answer {
 
     /// A sequence (TDD 0008): each entry is a location with an optional `from_ms` and `to_ms`.
     pub(crate) fn clips(version: &str, clips: &[(Value, Option<u64>, Option<u64>)]) -> Self {
+        Self::clips_with_encryption(
+            version,
+            &clips
+                .iter()
+                .map(|&(ref location, from_ms, to_ms)| (location.clone(), from_ms, to_ms, None))
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// Like [`Self::clips`], with each clip's own `encryption` override (TDD 0009, "Different
+    /// keys per clip"); `None` leaves that clip without one, so it falls back to the answer's own
+    /// `encryption` (set separately with [`Self::with_encryption`]).
+    pub(crate) fn clips_with_encryption(version: &str, clips: &[EncryptedClip]) -> Self {
         Self {
             version: version.to_owned(),
             location: Value::Null,
             renditions: Vec::new(),
             clips: clips
                 .iter()
-                .map(|(location, from_ms, to_ms)| {
+                .map(|(location, from_ms, to_ms, encryption)| {
                     let mut clip = json!({ "location": location });
                     if let Some(from_ms) = from_ms {
                         clip["from_ms"] = json!(from_ms);
                     }
                     if let Some(to_ms) = to_ms {
                         clip["to_ms"] = json!(to_ms);
+                    }
+                    if let Some(encryption) = encryption {
+                        clip["encryption"] = encryption.clone();
                     }
                     clip
                 })

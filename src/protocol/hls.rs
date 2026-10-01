@@ -194,12 +194,25 @@ pub(crate) fn media_playlist(presentation: Presentation<'_>, key: TrackKey) -> R
 
 /// The `#EXT-X-KEY` lines for `track`, empty when the presentation is clear.
 fn key_lines(presentation: Presentation<'_>, track: &Track) -> String {
-    presentation
-        .encryption()
-        .map(|encryption| {
-            crate::cenc::hls_key_lines(encryption, encryption.key_for(track.kind), "EXT-X-KEY")
-        })
-        .unwrap_or_default()
+    key_transition_lines(None, presentation.encryption(), track.kind, "EXT-X-KEY")
+}
+
+/// What to write when moving from `previous` clip's encryption to `current` clip's, for `tag`
+/// (TDD 0009, "Different keys per clip"). An `EXT-X-KEY` tag applies to every segment until the
+/// next one, so a transition to clear after an encrypted clip needs an explicit
+/// `METHOD=NONE` line; a transition into or within encryption needs the new key's lines; staying
+/// clear needs nothing, since a playlist with no preceding key is clear by default.
+fn key_transition_lines(
+    previous: Option<&crate::cenc::Encryption>,
+    current: Option<&crate::cenc::Encryption>,
+    kind: crate::media::TrackKind,
+    tag: &str,
+) -> String {
+    match current {
+        Some(encryption) => crate::cenc::hls_key_lines(encryption, encryption.key_for(kind), tag),
+        None if previous.is_some() => crate::cenc::hls_key_none(tag),
+        None => String::new(),
+    }
 }
 
 /// The longest segment of `track`, in whole seconds rounded up, as `#EXT-X-TARGETDURATION` needs.
@@ -240,8 +253,10 @@ fn write_segment_entries(
     Ok(())
 }
 
-/// One track's playlist across every clip of a sequence: each clip names its own init segment,
-/// and a discontinuity separates it from the one before, since the encoding may change there.
+/// One track's playlist across every clip of a sequence: each clip names its own init segment, a
+/// discontinuity separates it from the one before, since the encoding may change there, and an
+/// `#EXT-X-KEY` (or `METHOD=NONE`) is given whenever a clip's encryption differs from the one
+/// before it (TDD 0009, "Different keys per clip").
 pub(crate) fn sequence_media_playlist(
     clips: &[SequenceClip<'_>],
     key: TrackKey,
@@ -257,16 +272,21 @@ pub(crate) fn sequence_media_playlist(
     let mut playlist = format!(
         "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n"
     );
-    if let Some(first) = clips.first() {
-        playlist.push_str(&key_lines(
-            first.presentation,
-            first.presentation.track(key)?,
-        ));
-    }
+    let mut previous_encryption: Option<&crate::cenc::Encryption> = None;
     for (position, clip) in clips.iter().enumerate() {
         let track = clip.presentation.track(key)?;
         if position > 0 {
             playlist.push_str("#EXT-X-DISCONTINUITY\n");
+        }
+        let encryption = clip.presentation.encryption();
+        if encryption != previous_encryption {
+            playlist.push_str(&key_transition_lines(
+                previous_encryption,
+                encryption,
+                track.kind,
+                "EXT-X-KEY",
+            ));
+            previous_encryption = encryption;
         }
         writeln!(
             playlist,
@@ -311,12 +331,11 @@ pub(crate) fn sequence_master_playlist(
     let audio_group = !audio_keys.is_empty() && (video_key.is_some() || audio_keys.len() > 1);
 
     let mut playlist = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
-    playlist.push_str(
-        &first
-            .encryption()
-            .map(crate::cenc::hls_session_keys)
-            .unwrap_or_default(),
-    );
+    playlist.push_str(&crate::cenc::hls_session_keys_for_sequence(
+        clips
+            .iter()
+            .filter_map(|clip| clip.presentation.encryption()),
+    ));
     if audio_group {
         for (index, key) in audio_keys.iter().enumerate() {
             // The first clip whose track names a language labels the rendition, so an unlabelled

@@ -558,6 +558,15 @@ impl AssetRegistry {
             let new_locations = new.locations();
             let same_objects = old.version == new.version
                 && old.encryption == new.encryption
+                // Each clip's own window and encryption override (TDD 0009, "Different keys per
+                // clip"); empty for non-clip assets, so this is a no-op there. Deliberately not a
+                // location comparison: that is `old_locations`/`new_locations` below, compared
+                // loosely by `same_object` so a re-signed URL still counts as unchanged.
+                && old.clips.len() == new.clips.len()
+                && old.clips.iter().zip(&new.clips).all(|(old_clip, new_clip)| {
+                    old_clip.window == new_clip.window
+                        && old_clip.encryption == new_clip.encryption
+                })
                 && old_locations.len() == new_locations.len()
                 && old_locations.iter().zip(&new_locations).all(
                     |((old_id, old_loc), (new_id, new_loc))| {
@@ -873,7 +882,13 @@ impl AssetRegistry {
                     files.push((position, clip.location.clone()));
                     files.len() - 1
                 });
-            clips.push((file, clip.window));
+            // This clip's own encryption (TDD 0009, "Different keys per clip"), falling back to
+            // the answer's own `encryption` when the clip did not name one.
+            let encryption = clip
+                .encryption
+                .clone()
+                .or_else(|| resolved.encryption.clone());
+            clips.push((file, clip.window, encryption));
         }
 
         let mut tasks = tokio::task::JoinSet::new();
@@ -922,7 +937,6 @@ impl AssetRegistry {
         let version = resolved.version.clone();
         let segment_duration_ms = self.settings.segment_duration_ms;
         let limits = self.limits.clone();
-        let encryption = resolved.encryption.clone();
         let asset = tokio::task::spawn_blocking(move || {
             sequence::build(
                 &asset_id,
@@ -931,7 +945,6 @@ impl AssetRegistry {
                 &version,
                 segment_duration_ms,
                 &limits,
-                encryption.as_ref(),
             )
         })
         .await

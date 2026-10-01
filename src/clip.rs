@@ -300,13 +300,21 @@ fn moved_track(track: &Track, range: (usize, usize), origin: u64, base: u64) -> 
     })
 }
 
-/// The URL version of an asset built from clips: the mapper's `version`, every clip's content
-/// and window, and the format revision. The window is included even for a single clip, so a
-/// trimmed copy never shares a version, and so cached immutable segments, with the whole file.
+/// The URL version of an asset built from clips: the mapper's `version`, every clip's content,
+/// window, and own encryption, and the format revision. The window is included even for a single
+/// clip, so a trimmed copy never shares a version, and so cached immutable segments, with the
+/// whole file. Each clip's encryption is hashed on its own, not once for the whole sequence, so
+/// re-keying one clip (or turning its encryption on or off) changes the URL even if no other clip
+/// changed (TDD 0009, "Different keys per clip").
 pub(crate) fn version_of<'a>(
     mapper_version: &str,
-    clips: impl IntoIterator<Item = (&'a SourceIdentity, ClipWindow)>,
-    encryption: Option<&crate::cenc::Encryption>,
+    clips: impl IntoIterator<
+        Item = (
+            &'a SourceIdentity,
+            ClipWindow,
+            Option<&'a crate::cenc::Encryption>,
+        ),
+    >,
 ) -> String {
     use std::fmt::Write;
 
@@ -317,7 +325,7 @@ pub(crate) fn version_of<'a>(
     hasher.update(crate::asset::FORMAT_REVISION.to_be_bytes());
     hasher.update((mapper_version.len() as u64).to_be_bytes());
     hasher.update(mapper_version.as_bytes());
-    for (source, window) in clips {
+    for (source, window, encryption) in clips {
         hasher.update(
             source
                 .metadata_sha256
@@ -331,10 +339,13 @@ pub(crate) fn version_of<'a>(
             }
             None => hasher.update([0]),
         }
-    }
-    if let Some(encryption) = encryption {
-        hasher.update(b"cbcs");
-        hasher.update(encryption.fingerprint());
+        match encryption {
+            Some(encryption) => {
+                hasher.update(b"cbcs");
+                hasher.update(encryption.fingerprint());
+            }
+            None => hasher.update(b"clear"),
+        }
     }
     hasher
         .finalize()
@@ -716,32 +727,32 @@ mod tests {
         let index = parse("h264-aac.mp4");
         let other = parse("hevc-aac.mp4");
         let source = &index.source;
-        let base = version_of("v1", [(source, window(0, Some(2000)))], None);
+        let base = version_of("v1", [(source, window(0, Some(2000)), None)]);
 
         assert_eq!(base.len(), 16);
         assert_eq!(
             base,
-            version_of("v1", [(source, window(0, Some(2000)))], None),
+            version_of("v1", [(source, window(0, Some(2000)), None)]),
             "stable"
         );
         assert_ne!(
             base,
-            version_of("v1", [(source, window(0, Some(3000)))], None),
+            version_of("v1", [(source, window(0, Some(3000)), None)]),
             "the window"
         );
         assert_ne!(
             base,
-            version_of("v1", [(source, window(0, None))], None),
+            version_of("v1", [(source, window(0, None), None)]),
             "an open end"
         );
         assert_ne!(
             base,
-            version_of("v2", [(source, window(0, Some(2000)))], None),
+            version_of("v2", [(source, window(0, Some(2000)), None)]),
             "the mapper version"
         );
         assert_ne!(
             base,
-            version_of("v1", [(&other.source, window(0, Some(2000)))], None),
+            version_of("v1", [(&other.source, window(0, Some(2000)), None)]),
             "the content"
         );
         assert_ne!(
@@ -749,12 +760,49 @@ mod tests {
             version_of(
                 "v1",
                 [
-                    (source, window(0, Some(2000))),
-                    (source, window(0, Some(2000)))
+                    (source, window(0, Some(2000)), None),
+                    (source, window(0, Some(2000)), None)
                 ],
-                None
             ),
             "the clip count"
+        );
+    }
+
+    #[test]
+    fn the_version_covers_each_clips_own_encryption() {
+        let index = parse("h264-aac.mp4");
+        let source = &index.source;
+        let one = crate::cenc::tests_support::sample_encryption();
+        let other = crate::cenc::tests_support::rekeyed_encryption();
+        let clear = version_of("v1", [(source, window(0, None), None)]);
+        let encrypted = version_of("v1", [(source, window(0, None), Some(&one))]);
+        let rekeyed = version_of("v1", [(source, window(0, None), Some(&other))]);
+
+        assert_ne!(
+            clear, encrypted,
+            "turning encryption on changes the version"
+        );
+        assert_ne!(encrypted, rekeyed, "a different key changes the version");
+
+        // Two clips: only the second is encrypted. Changing just that clip's key must still
+        // change the whole sequence's version, even though clip 0 and the window list match.
+        let base = version_of(
+            "v1",
+            [
+                (source, window(0, Some(1000)), None),
+                (source, window(1000, None), Some(&one)),
+            ],
+        );
+        let rekeyed_second = version_of(
+            "v1",
+            [
+                (source, window(0, Some(1000)), None),
+                (source, window(1000, None), Some(&other)),
+            ],
+        );
+        assert_ne!(
+            base, rekeyed_second,
+            "re-keying one clip changes the version even when the other clip is unchanged"
         );
     }
 

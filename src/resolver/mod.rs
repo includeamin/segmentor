@@ -74,6 +74,10 @@ pub(crate) struct RenditionLocation {
 pub(crate) struct ClipLocation {
     pub(crate) location: AssetLocation,
     pub(crate) window: ClipWindow,
+    /// This clip's own content keys and DRM systems (TDD 0009, "Different keys per clip"); falls
+    /// back to the answer's own `encryption` when absent, so a clear pre-roll before an encrypted
+    /// movie sets this to `None` on its own clip rather than on the whole answer.
+    pub(crate) encryption: Option<std::sync::Arc<crate::cenc::Encryption>>,
 }
 
 /// Which of an answer's locations something refers to: the single file, one rendition, or one

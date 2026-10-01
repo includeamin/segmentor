@@ -30,23 +30,43 @@ pub(crate) fn hls_key_lines(encryption: &Encryption, key: &ContentKey, tag: &str
 /// and `KEYFORMATVERSIONS`; `KEYID` does not tell them apart. Only Widevine's line depends on
 /// the key, and only through `KEYID`, so each system's line is given once, for the first key.
 pub(crate) fn hls_session_keys(encryption: &Encryption) -> String {
+    hls_session_keys_for_sequence(std::iter::once(encryption))
+}
+
+/// Like [`hls_session_keys`], for every encryption used by any clip of a sequence (TDD 0009,
+/// "Different keys per clip"), deduped by RFC 8216 identity across the whole sequence rather than
+/// within one clip, so a clip that repeats an earlier clip's key and system does not repeat its
+/// line, and a player sees every licence the sequence might need from the master playlist alone.
+pub(crate) fn hls_session_keys_for_sequence<'a>(
+    encryptions: impl Iterator<Item = &'a Encryption>,
+) -> String {
     let mut lines = String::new();
     let mut seen: Vec<String> = Vec::new();
-    for key in encryption.distinct_keys() {
-        for system in &encryption.systems {
-            let Some(identity) = hls_attributes(system, None) else {
-                continue;
-            };
-            if seen.contains(&identity) {
-                continue;
-            }
-            seen.push(identity);
-            if let Some(attributes) = hls_attributes(system, Some(&key.key_id)) {
-                push_key_line(&mut lines, "EXT-X-SESSION-KEY", &attributes);
+    for encryption in encryptions {
+        for key in encryption.distinct_keys() {
+            for system in &encryption.systems {
+                let Some(identity) = hls_attributes(system, None) else {
+                    continue;
+                };
+                if seen.contains(&identity) {
+                    continue;
+                }
+                seen.push(identity);
+                if let Some(attributes) = hls_attributes(system, Some(&key.key_id)) {
+                    push_key_line(&mut lines, "EXT-X-SESSION-KEY", &attributes);
+                }
             }
         }
     }
     lines
+}
+
+/// `#EXT-X-KEY:METHOD=NONE`, RFC 8216's way to say that the Media Segments from here on are not
+/// encrypted, needed when a sequence's clips move from encrypted to clear (TDD 0009, "Different
+/// keys per clip"): an `EXT-X-KEY` tag otherwise applies to everything until the next one, so
+/// without this a player would keep decrypting clear segments with the previous clip's key.
+pub(crate) fn hls_key_none(tag: &str) -> String {
+    format!("#{tag}:METHOD=NONE\n")
 }
 
 fn push_key_line(lines: &mut String, tag: &str, attributes: &str) {
