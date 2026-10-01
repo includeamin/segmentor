@@ -9,7 +9,7 @@ The service is an HTTP origin. It does not terminate TLS, authenticate viewers, 
 Two protections are built in because a proxy cannot fully provide them:
 
 - `limits.max_concurrent_requests` answers `503` with `Retry-After: 1` once that many handlers are running. `/health`, `/ready`, and `/metrics` are exempt.
-- `limits.response_idle_timeout_ms` closes a media response whose client stops reading, and a job slot is held only while a source read is in flight. A stalled client therefore cannot exhaust `limits.max_segment_jobs`.
+- `limits.response_idle_timeout_ms` closes a media response whose client stops reading, and for clear assets a job slot is held only while a source read is in flight. A stalled client therefore cannot exhaust `limits.max_segment_jobs`. An encrypted segment holds its slot until its response finishes (see [Content encryption](#content-encryption)), so a stalled client holds one for at most the idle timeout.
 
 - `limits.header_read_timeout_ms` (default 10 s) closes a connection that has not delivered a complete request header block in that time, which stops slow-header (slowloris) clients. It also bounds how long an idle keep-alive connection waits for its next request.
 - `limits.max_connections` (default 10,000) closes connections beyond the cap immediately at accept. Raise the process file-descriptor limit (`ulimit -n`, or `LimitNOFILE` under systemd) above this number plus headroom for media file handles; otherwise accept fails with `EMFILE` before the cap applies (the accept loop then logs `accept_failed` and backs off for a second).
@@ -92,7 +92,7 @@ Each loaded asset keeps its full sample index in memory, about 40 bytes per samp
 
 ## Content encryption
 
-Assets whose mapper answer carries an `encryption` object ([mapper API](mapper-api.md#encryption)) are encrypted per request. The segment is read into memory, encrypted, and sent, so it is not streamed. Memory for in-flight encrypted segments is bounded by `limits.max_segment_jobs` times `limits.max_segment_bytes`, 512 MiB by default; count it in the container's memory limit next to the index budget above.
+Assets whose mapper answer carries an `encryption` object ([mapper API](mapper-api.md#encryption)) are encrypted per request. The segment is read into memory, encrypted, and then sent in `limits.stream_chunk_bytes` pieces like any other. Its bytes are held under a segment-job slot from the read until the response finishes, so encrypted serving holds at most `limits.max_segment_jobs × limits.max_segment_bytes`. `max_segment_jobs` defaults to 2 × CPU cores, at most 32, and `max_segment_bytes` to 64 MiB: 512 MiB on a 4-core host, up to 2 GiB. Count it in the container's memory limit next to the index budget above, and lower either limit on small hosts. A client that stops reading an encrypted segment is cut off after `limits.response_idle_timeout_ms`, like any other, which frees its slot.
 
 | Metric | Type | Notes |
 | --- | --- | --- |

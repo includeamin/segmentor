@@ -99,7 +99,7 @@ The cipher is AES-128 from the RustCrypto `aes` crate (pure Rust, constant time,
 `PreparedSegment` today is a header plus the source byte ranges to stream after it. Its body becomes one of two kinds: byte ranges (today's zero-copy path, used for every clear track) or finished bytes in memory. An encrypted track's segment is prepared by a new step:
 
 1. Check the segment's payload against `limits.max_segment_bytes`, exactly as today, before reading anything.
-2. Take a segment-job slot and read the samples' byte ranges into memory.
+2. Take a segment-job slot and read the samples' byte ranges into memory. The slot stays with the finished bytes and is handed to the response stream, which releases it when the response finishes or is aborted; no second slot is taken.
 3. On the blocking pool: compute each sample's subsample map, encrypt in place, build the `moof` with `senc`, `saiz`, and `saio`, and return the finished fragment.
 
 Everything after that is unchanged: range requests slice the finished bytes, `If-None-Match` and ETags work as before, and the response carries the same headers. A `HEAD` of an encrypted segment also reads and encrypts it, because the `senc` size depends on the sample bytes. I-frame fragments of an encrypted video track take the same path, one sample each.
@@ -140,7 +140,7 @@ The URL version of an encrypted asset additionally hashes each key ID, a SHA-256
 
 - Every field of `encryption` is validated in the mapper client before use (see [Wire format](#wire-format)); `pssh` input is size-limited and parsed as a box, never trusted as a length.
 - Keys are secrets throughout (see [Keys are secrets](#keys-are-secrets)).
-- Memory: each in-flight encrypted segment is held whole, so encrypted serving can hold up to `limits.max_segment_jobs × limits.max_segment_bytes` (512 MiB with the defaults). The operations guide says so and suggests lowering either limit on small hosts.
+- Memory: each in-flight encrypted segment is held whole, under the segment-job slot taken to read it, from the read until its response finishes or is aborted; it is sent in `limits.stream_chunk_bytes` pieces, so a client that stops reading is cut off after `limits.response_idle_timeout_ms` like any other. Encrypted serving therefore holds at most `limits.max_segment_jobs × limits.max_segment_bytes`: `max_segment_jobs` defaults to min(2 × CPU cores, 32) and `max_segment_bytes` to 64 MiB, so 512 MiB on a 4-core host and up to 2 GiB. The payload buffer is allocated once at its final size, and the header is put in front of it in place. The operations guide says so and suggests lowering either limit on small hosts.
 - The slice-header parser reads only within its NAL unit and fails closed: a slice it cannot parse fails that segment rather than being encrypted with a guessed clear range.
 - Encryption requested for a codec this stage does not support fails the asset at load, naming the codec. Encrypted source files (`encv`, `enca`) stay rejected, as today.
 

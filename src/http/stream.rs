@@ -14,9 +14,12 @@ use crate::source::ByteRange;
 
 /// Streams one segment response as an async task.
 ///
-/// A job slot is held only while a source read is in flight, never while waiting for the
-/// client, so slow readers cannot exhaust `max_segment_jobs`. Each send is bounded by the idle
-/// timeout, so a client that stops reading is dropped instead of pinning the task.
+/// For a clear segment, a job slot is held only while a source read is in flight, never while
+/// waiting for the client, so slow readers cannot exhaust `max_segment_jobs`. An encrypted
+/// segment is already in memory: its slot arrives as `first_permit` and, with no source read to
+/// consume it, is held until the stream ends, which bounds resident encrypted bytes. Each send is
+/// bounded by the idle timeout, so a client that stops reading is dropped instead of pinning the
+/// task.
 pub(crate) struct StreamJob {
     pub(crate) asset: Arc<PackagedAsset>,
     pub(crate) prepared: fmp4::PreparedSegment,
@@ -45,8 +48,16 @@ impl StreamJob {
             else {
                 return self.fail("header range does not fit in memory").await;
             };
-            let chunk = self.prepared.header.slice(start..end);
-            self.send(Ok(chunk)).await?;
+            // Sent in `chunk_size` pieces like the source ranges, so a header-only (encrypted)
+            // segment is also bounded by the idle timeout instead of sitting whole in the queue.
+            let chunk_size = self.chunk_size.max(1);
+            let mut at = start;
+            while at < end {
+                let next = end.min(at.saturating_add(chunk_size));
+                let chunk = self.prepared.header.slice(at..next);
+                self.send(Ok(chunk)).await?;
+                at = next;
+            }
         }
         let mut virtual_offset = header_end;
         for source_range in std::mem::take(&mut self.prepared.ranges) {

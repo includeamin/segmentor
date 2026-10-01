@@ -94,8 +94,8 @@ The most involved handler:
 1. Look up asset, require `?v=`, parse the track, and answer `304` if the ETag matches.
 2. **Prepare** the segment on the blocking pool (`prepare_media_segment`): this yields the header bytes, source ranges, and total length without reading payload.
 3. Compute the requested byte interval from `Range` and `If-Range`; `416` if unsatisfiable.
-4. If the method is `HEAD`, return headers with an empty body. No job slot, no task.
-5. Otherwise acquire the first job slot (`503` on queue timeout), spawn a `StreamJob`, and return `Body::from_stream` over a two-item channel.
+4. If the method is `HEAD`, return headers with an empty body. No task; a clear segment takes no job slot (an encrypted one releases the slot it was encrypted under).
+5. Otherwise acquire the first job slot (`503` on queue timeout), or for an encrypted segment reuse the slot it was encrypted under, spawn a `StreamJob`, and return `Body::from_stream` over a two-item channel.
 
 The response's `Content-Length` and `Content-Range` are known up front because the header length and payload length are known from metadata.
 
@@ -103,13 +103,13 @@ The response's `Content-Length` and `Content-Range` are known up front because t
 
 An async task that produces the body. Its `stream` method:
 
-1. Sends the part of the header (`moof` plus `mdat` header) that overlaps the requested interval.
+1. Sends the part of the header (`moof` plus `mdat` header, or a whole encrypted fragment) that overlaps the requested interval, in chunks of `stream_chunk_bytes`.
 2. Walks the prepared source ranges. Byte positions in the response are "virtual offsets" (header first, then each range in order); for each range it intersects the requested interval and reads that overlap in chunks of `stream_chunk_bytes`.
 3. For each chunk: `read` acquires a job slot (the first read reuses the slot acquired by the handler), runs `PackagedAsset::read_range` on the blocking pool, **releases the slot**, then `send` pushes the chunk into the channel under `response_idle_timeout_ms`.
 
 Failure handling: a source-read or permit failure sends one generic `io::Error` into the body (so the connection aborts instead of ending cleanly short) and counts an `error` abort. A full channel for longer than the idle timeout drops the stream and counts `idle`. A closed channel means the client left and counts `client`.
 
-Invariants worth preserving: a slot is never held while waiting on the client; every send is time-bounded; nothing here reads more than the requested interval.
+Invariants worth preserving: for clear segments, a slot is never held while waiting on the client (an encrypted segment's slot covers its bytes in memory until the stream ends); every send is time-bounded; nothing here reads more than the requested interval.
 
 ## Conditional and range helpers
 
