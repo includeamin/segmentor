@@ -843,7 +843,7 @@ async fn rejects_connections_beyond_the_cap_and_recovers() {
         closed.is_ok(),
         "the over-limit connection should be closed at accept"
     );
-    assert!(received.is_empty());
+    assert_eq!(received, [] as [u8; 0]);
     assert_eq!(
         server
             .metrics

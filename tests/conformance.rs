@@ -778,7 +778,7 @@ fn audit_dash(server: &Server, asset: &str) -> HashMap<String, Audited> {
         if tag.name == "Representation" {
             representation = Some(tag);
             assert!(tag.attributes["bandwidth"].parse::<u64>().unwrap() > 0);
-            assert!(!tag.attributes["codecs"].is_empty());
+            assert_ne!(tag.attributes["codecs"], "");
         }
         if tag.name == "SegmentTemplate" {
             let rep = representation.expect("SegmentTemplate must sit inside a Representation");
@@ -903,7 +903,7 @@ fn media_objects_support_conditional_and_range_requests() {
 
     let unchanged = get_with(&server, &init_url, &[("If-None-Match", &etag)]);
     assert_eq!(unchanged.status, 304);
-    assert!(unchanged.body.is_empty());
+    assert_eq!(unchanged.body, [] as [u8; 0]);
 
     // A stale If-Range validator must yield the complete representation.
     let stale = get_with(
