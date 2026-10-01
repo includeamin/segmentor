@@ -50,8 +50,7 @@ The mapper answer gains an optional `encryption` object. It applies to the whole
 "encryption": {
   "scheme": "cbcs",
   "keys": [
-    { "tracks": "video", "key_id": "0123456789abcdef0123456789abcdef", "key": "…32 hex…", "iv": "…32 hex, optional…" },
-    { "tracks": "audio", "key_id": "…", "key": "…" }
+    { "tracks": "all", "key_id": "0123456789abcdef0123456789abcdef", "key": "…32 hex…", "iv": "…32 hex, optional…" }
   ],
   "systems": [
     { "system_id": "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed", "pssh": "<base64 pssh box>", "license_url": "https://license.example.net/widevine" },
@@ -65,7 +64,7 @@ The mapper answer gains an optional `encryption` object. It applies to the whole
 | Field | Rules |
 | --- | --- |
 | `scheme` | `cbcs`. Anything else is rejected |
-| `keys` | One entry with `"tracks": "all"` (or no `tracks`), or one `"video"` and one `"audio"` entry. Every track of the asset must end up with exactly one key |
+| `keys` | One entry with `"tracks": "all"` (or no `tracks`), or one `"video"` and one `"audio"` entry. Every track of the asset must end up with exactly one key. Separate video and audio keys cannot be combined with FairPlay, whose HLS key line carries no key ID: the answer is rejected with "FairPlay needs one key for all tracks" |
 | `key_id`, `key` | 16 bytes each, as 32 hex digits |
 | `iv` | Optional, 16 bytes as 32 hex digits: the constant IV declared in the init segment. When absent, it is the first 16 bytes of SHA-256(`"segmentor cbcs iv"` ‖ `key_id`), so every replica derives the same one. It is never derived from the key |
 | `systems` | At most 8. Each names a DRM system by its standard system ID (a UUID) |
