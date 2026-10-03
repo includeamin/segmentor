@@ -1326,3 +1326,37 @@ async fn ffmpeg_decodes_the_muxed_presentation_with_both_streams() {
     streams.dedup();
     assert_eq!(streams, ["audio", "video"]);
 }
+
+/// Audio that ends before the video's last segment starts (the video is delayed by its edit
+/// list) gets no empty segments: every segment a playlist lists is served, and none lasts zero.
+#[tokio::test]
+async fn a_track_that_ends_early_lists_only_segments_that_exist() {
+    let mut config = test_config(LimitsConfig::default(), CorsConfig::default());
+    config.assets.insert(
+        "delayed".to_owned(),
+        fixture().with_file_name("h264-aac-video-delay.mp4"),
+    );
+    let app = router(AppState::new(&config).unwrap());
+    for track in ["video", "audio-1"] {
+        let playlist = String::from_utf8(
+            body(get(&app, &format!("/hls/delayed/{track}/index.m3u8")).await)
+                .await
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!playlist.contains("#EXTINF:0.000"), "{track}: {playlist}");
+        for line in playlist
+            .lines()
+            .filter(|line| line.starts_with("segments/"))
+        {
+            let response = get(&app, &format!("/hls/delayed/{track}/{line}")).await;
+            assert_eq!(response.status(), StatusCode::OK, "{track}/{line}");
+        }
+    }
+    let manifest = body(get(&app, "/dash/delayed/manifest.mpd").await).await;
+    assert!(
+        !manifest.windows(6).any(|window| window == b"d=\"0\" "),
+        "{}",
+        String::from_utf8_lossy(&manifest)
+    );
+}
