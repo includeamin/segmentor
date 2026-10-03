@@ -14,7 +14,7 @@ On the head-to-head benchmark, with servers on one core, a viewer's playlists co
 
 ## Summary
 
-An option, `packaging.hls_mux_audio`, serves HLS video segments that carry the default audio track too: one `moof` with a `traf` per track, and one `mdat`. A viewer then fetches one media playlist and one stream of segments instead of two of each, as nginx-vod-module serves by default. It is off by default, and DASH is unchanged.
+`packaging.hls_mux_audio` serves HLS video segments that carry the default audio track too: one `moof` with a `traf` per track, and one `mdat`. A viewer then fetches one media playlist and one stream of segments instead of two of each, as nginx-vod-module serves by default. It is on by default (see Rollout), and DASH is unchanged.
 
 ## Context
 
@@ -26,7 +26,7 @@ nginx-vod-module muxes audio into the video segments by default. On the head-to-
 
 - An HLS presentation of a single-file asset where video segments carry the default audio track.
 - Byte-for-byte the same video and audio samples, decode times, and durations as the separate renditions.
-- No change unless the option is on, and no change to DASH, I-frame playlists, or subtitles.
+- No change with the option off, and no change to DASH, I-frame playlists, or subtitles.
 
 ## Non-goals
 
@@ -84,7 +84,7 @@ One `moov` with both `trak` boxes, copied as for a single track, and an `mvex` w
 
 ## Rollout
 
-Off by default. Turning it on changes the master playlist, which is not immutable (`max-age=60`), so players move to the muxed stream on their next master fetch.
+First shipped off by default, then turned on by default once the head-to-head benchmark showed it closes the per-viewer playlist gap: a single-file asset gains nothing from a separate audio playlist, since there is only one audio track to carry either way. Changing the option changes the master playlist, which is not immutable (`max-age=60`), so players move streams on their next master fetch; the separate `video/` and `audio-{n}/` streams stay available, so a player holding an older master keeps playing.
 
 ## Open questions
 

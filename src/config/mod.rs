@@ -59,7 +59,7 @@ impl Config {
             tls: None,
             cors: CorsConfig::default(),
             segment_duration_ms,
-            hls_mux_audio: false,
+            hls_mux_audio: default_hls_mux_audio(),
             assets,
             media_root,
             resolver: ResolverSettings::Static,
@@ -277,7 +277,7 @@ struct StorageConfig {
 struct PackagingConfig {
     #[serde(default = "default_segment_duration_ms")]
     segment_duration_ms: u64,
-    #[serde(default)]
+    #[serde(default = "default_hls_mux_audio")]
     hls_mux_audio: bool,
 }
 
@@ -285,7 +285,7 @@ impl Default for PackagingConfig {
     fn default() -> Self {
         Self {
             segment_duration_ms: default_segment_duration_ms(),
-            hls_mux_audio: false,
+            hls_mux_audio: default_hls_mux_audio(),
         }
     }
 }
@@ -298,6 +298,12 @@ struct AssetConfig {
 
 const fn default_segment_duration_ms() -> u64 {
     6000
+}
+
+/// On: a single-file asset's HLS video segments carry its default audio, so a viewer needs two
+/// playlists and one segment stream rather than three and two (TDD 0011).
+const fn default_hls_mux_audio() -> bool {
+    true
 }
 
 #[cfg(test)]
@@ -331,7 +337,7 @@ mod tests {
 
         assert_eq!(config.listen, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(config.segment_duration_ms, 1000);
-        assert!(!config.hls_mux_audio, "muxing is off unless asked for");
+        assert!(config.hls_mux_audio, "muxing is on unless turned off");
         assert_eq!(config.assets.len(), 1);
         assert_eq!(config.logging.level, LogLevel::Info);
         assert_eq!(config.logging.format, LogFormat::Json);
@@ -340,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn hls_mux_audio_can_be_turned_on() {
+    fn hls_mux_audio_can_be_turned_off() {
         let config = Config::parse(
             r#"
                 [server]
@@ -350,7 +356,7 @@ mod tests {
                 media_root = "."
 
                 [packaging]
-                hls_mux_audio = true
+                hls_mux_audio = false
 
                 [assets.sample]
                 path = "h264-aac.mp4"
@@ -359,7 +365,7 @@ mod tests {
         )
         .expect("configuration should be valid");
 
-        assert!(config.hls_mux_audio);
+        assert!(!config.hls_mux_audio);
     }
 
     #[test]

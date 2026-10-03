@@ -121,7 +121,7 @@ Where it stands (2026-10-03, 60-minute asset):
 | Inline fragment headers | To do | Below a sample-count threshold, skip the blocking-pool hop |
 | Vectored writes for coalesced reads | To do | No copy into a joined buffer |
 | `io_uring` for local reads | Evaluate | Keep only if the comparison shows a gain |
-| Muxed audio and video option | Done for clear single-file assets | `packaging.hls_mux_audio`, [TDD 0011](technical-design/0011-muxed-hls-audio.md): half the segment requests and one fewer playlist per viewer. Encrypted, adaptive, and sequence assets still serve audio separately |
+| Muxed audio and video | Done for clear single-file assets, on by default | `packaging.hls_mux_audio`, [TDD 0011](technical-design/0011-muxed-hls-audio.md): half the segment requests and one fewer playlist per viewer. Encrypted, adaptive, and sequence assets still serve audio separately |
 | Profile-guided optimization | To do | Release builds trained on the benchmark workload |
 | Comparison under remote sources, encryption, and many assets | To do | The places where the two read and cache most differently |
 

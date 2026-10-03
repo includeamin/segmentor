@@ -26,13 +26,14 @@ Fixtures: the main H.264/AAC file, the same with `moov` after `mdat`, video only
 
 ### Media bytes (ISO BMFF, CMAF-style layout)
 
-- Init segments have `ftyp`, `moov`, exactly one `trak`, `mvex/trex`, and empty sample tables.
+- Init segments have `ftyp`, `moov`, exactly one `trak`, `mvex/trex`, and empty sample tables, for the separate renditions these checks run against.
 - Media segments are `[styp] moof mdat`, every box size tiles its parent exactly, and `tfhd` uses default-base-is-moof.
 - The `trun` data offset lands exactly on the first payload byte, and the sample sizes sum to the `mdat` payload.
 - `mfhd` sequence numbers run 1, 2, 3 ...; `tfdt` values are contiguous, each starting where the previous segment ended.
 - Video segments begin with a sync sample.
 - The duration declared in the playlist or timeline matches the sum of sample durations in the fragment, within one millisecond of rounding.
 - **HLS and DASH serve byte-identical init and media segments** for every track.
+- **Muxed HLS** ([TDD 0011](technical-design/0011-muxed-hls-audio.md), the default): for every fixture with video and audio, the master points at the muxed stream, its init segment has both `trak` boxes, and each fragment's `mdat` is exactly the separate video fragment's payload followed by the audio fragment's, with a `traf` for each (audio only while it lasts). FFmpeg decodes each muxed presentation.
 
 ### Transport
 
