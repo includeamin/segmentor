@@ -1,0 +1,73 @@
+# Head-to-head benchmark: segmentor and nginx-vod-module serving the same file, one at a time,
+# on the same pinned cores, driven by k6 on the other cores. Run it through ./run.sh, which
+# starts one server at a time; see docs/benchmarks.md#segmentor-vs-nginx-vod-module.
+#
+# SERVER_CPUS and LOAD_CPUS pin the server and the load generator to disjoint cores, so the
+# client never competes with the server it measures.
+services:
+  segmentor:
+    build:
+      context: ../..
+    image: segmentor-bench
+    cpuset: "${SERVER_CPUS:-0-3}"
+    environment:
+      TOKIO_WORKER_THREADS: "4"
+    volumes:
+      - ./segmentor.toml:/etc/vod/vod.toml:ro
+      - ./media:/srv/vod:ro
+    ports:
+      - "18080:3000"
+    ulimits:
+      nofile: 65536
+    read_only: true
+
+  # segmentor with HLS audio as its own rendition instead of inside the video segments.
+  segmentor-separate:
+    image: segmentor-bench
+    cpuset: "${SERVER_CPUS:-0-3}"
+    environment:
+      TOKIO_WORKER_THREADS: "4"
+    volumes:
+      - ./segmentor-separate.toml:/etc/vod/vod.toml:ro
+      - ./media:/srv/vod:ro
+    ports:
+      - "18083:3000"
+    ulimits:
+      nofile: 65536
+    read_only: true
+
+  nginx:
+    build:
+      context: ./nginx-vod-module
+    image: nginx-vod-module-bench
+    cpuset: "${SERVER_CPUS:-0-3}"
+    volumes:
+      - ./media:/media:ro
+    ports:
+      - "18081:80"
+    ulimits:
+      nofile: 65536
+    tmpfs:
+      - /tmp
+
+  # nginx-vod-module with its response cache on: its best case for playlists.
+  nginx-cached:
+    image: nginx-vod-module-bench
+    cpuset: "${SERVER_CPUS:-0-3}"
+    volumes:
+      - ./media:/media:ro
+      - ./nginx-vod-module/response-cache-on.conf:/usr/local/nginx/conf/response-cache.conf:ro
+    ports:
+      - "18082:80"
+    ulimits:
+      nofile: 65536
+    tmpfs:
+      - /tmp
+
+  k6:
+    image: grafana/k6:0.57.0
+    cpuset: "${LOAD_CPUS:-4-7}"
+    volumes:
+      - ./k6:/scripts:ro
+      - ./results:/results
+    profiles: [load]

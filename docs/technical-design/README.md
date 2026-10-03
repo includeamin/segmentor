@@ -15,6 +15,8 @@ Technical design documents explain a proposed subsystem before or during impleme
 | [0007](0007-viewer-authorization.md) | Viewer authorization | Draft |
 | [0008](0008-clipping-and-concatenation.md) | Clipping and concatenation | Accepted; implemented |
 | [0009](0009-common-encryption-and-drm.md) | Common encryption and DRM | Accepted; H.264 and audio implemented, HEVC pending |
+| [0010](0010-compact-sample-index.md) | Compact sample index | Accepted; implemented |
+| [0011](0011-muxed-hls-audio.md) | Muxed audio and video for HLS | Accepted; implemented for clear single-file assets |
 
 ## Workflow
 

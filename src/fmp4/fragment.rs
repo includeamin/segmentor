@@ -46,10 +46,14 @@ pub(crate) fn prepare_media_segment(
     sequence_number: u32,
     limits: &LimitsConfig,
 ) -> Result<PreparedSegment> {
-    let samples = track
+    if segment.first_sample > segment.end_sample || segment.end_sample > track.samples.len() {
+        return Err(Error::InvalidMedia(
+            "segment sample range is invalid".to_owned(),
+        ));
+    }
+    let samples = &track
         .samples
-        .get(segment.first_sample..segment.end_sample)
-        .ok_or_else(|| Error::InvalidMedia("segment sample range is invalid".to_owned()))?;
+        .to_vec(segment.first_sample..segment.end_sample)[..];
     if samples.is_empty() {
         return Err(Error::InvalidMedia(
             "segment contains no samples".to_owned(),
@@ -106,6 +110,102 @@ pub(crate) fn prepare_media_segment(
     })
 }
 
+/// One fragment holding several tracks' samples for the same segment (TDD 0011): a `traf` per
+/// part in order, then one `mdat` with each part's samples after the previous part's. Parts
+/// with no samples are left out; the first part must have some.
+pub(crate) fn prepare_muxed_segment(
+    parts: &[(&Track, TrackSegment)],
+    sequence_number: u32,
+    limits: &LimitsConfig,
+) -> Result<PreparedSegment> {
+    let mut expanded = Vec::with_capacity(parts.len());
+    for (index, (track, segment)) in parts.iter().enumerate() {
+        if segment.first_sample > segment.end_sample || segment.end_sample > track.samples.len() {
+            return Err(Error::InvalidMedia(
+                "segment sample range is invalid".to_owned(),
+            ));
+        }
+        let samples = track
+            .samples
+            .to_vec(segment.first_sample..segment.end_sample);
+        if samples.is_empty() {
+            if index == 0 {
+                return Err(Error::InvalidMedia(
+                    "segment contains no samples".to_owned(),
+                ));
+            }
+            continue;
+        }
+        let payload = samples.iter().try_fold(0u64, |total, sample| {
+            total
+                .checked_add(u64::from(sample.size))
+                .ok_or_else(|| Error::InvalidMedia("fragment payload size overflow".to_owned()))
+        })?;
+        expanded.push((*track, *segment, samples, payload));
+    }
+    let payload_len = expanded
+        .iter()
+        .try_fold(0u64, |total, part| total.checked_add(part.3))
+        .ok_or_else(|| Error::InvalidMedia("fragment payload size overflow".to_owned()))?;
+    if payload_len > limits.max_segment_bytes {
+        return Err(Error::InvalidMedia(
+            "segment payload exceeds configured limit".to_owned(),
+        ));
+    }
+    let sample_count: usize = expanded.iter().map(|part| part.2.len()).sum();
+    if sample_count > limits.max_samples_per_segment {
+        return Err(Error::InvalidMedia(
+            "segment sample count exceeds configured limit".to_owned(),
+        ));
+    }
+    let trafs = |offsets: &[i32]| {
+        expanded
+            .iter()
+            .zip(offsets)
+            .map(|((track, segment, samples, _), &offset)| {
+                build_traf(
+                    track.id,
+                    track.kind,
+                    samples,
+                    segment.decode_time,
+                    offset,
+                    &[],
+                )
+            })
+            .collect::<Result<Vec<_>>>()
+    };
+    // Data offsets are fixed-width fields, so the `moof`'s length does not depend on them.
+    let moof_len = moof_of(sequence_number, &trafs(&vec![0; expanded.len()])?)?.len();
+    let mut offsets = Vec::with_capacity(expanded.len());
+    let mut offset = u64::try_from(moof_len + 8)
+        .map_err(|_| Error::InvalidMedia("fragment header is too large".to_owned()))?;
+    for part in &expanded {
+        offsets.push(
+            i32::try_from(offset)
+                .map_err(|_| Error::InvalidMedia("fragment is too large".to_owned()))?,
+        );
+        offset += part.3;
+    }
+    let moof = moof_of(sequence_number, &trafs(&offsets)?)?;
+    let mut header = Vec::with_capacity(moof.len() + 8);
+    header.extend_from_slice(&moof);
+    write_box_header(&mut header, payload_len + 8, *b"mdat")?;
+    let content_length = u64::try_from(header.len())
+        .ok()
+        .and_then(|length| length.checked_add(payload_len))
+        .ok_or_else(|| Error::InvalidMedia("fragment size overflow".to_owned()))?;
+    let mut ranges = Vec::new();
+    for part in &expanded {
+        ranges.extend(coalesced_ranges(&part.2)?);
+    }
+    Ok(PreparedSegment {
+        header: Bytes::from(header),
+        ranges,
+        content_length,
+        encryption: None,
+    })
+}
+
 fn coalesced_ranges(samples: &[Sample]) -> Result<Vec<ByteRange>> {
     let mut ranges: Vec<ByteRange> = Vec::new();
     for sample in samples {
@@ -133,10 +233,34 @@ fn build_moof(
     data_offset: i32,
     extra: &[u8],
 ) -> Result<Vec<u8>> {
+    let traf = build_traf(track_id, kind, samples, decode_time, data_offset, extra)?;
+    moof_of(sequence_number, &[traf])
+}
+
+/// A `moof` holding `trafs`, each a complete `traf` box.
+fn moof_of(sequence_number: u32, trafs: &[Vec<u8>]) -> Result<Vec<u8>> {
     let mut mfhd = Vec::new();
     write_full_box_fields(&mut mfhd, 0, 0);
     mfhd.extend_from_slice(&sequence_number.to_be_bytes());
+    let mut moof_payload = Vec::new();
+    write_box(&mut moof_payload, *b"mfhd", &mfhd)?;
+    for traf in trafs {
+        moof_payload.extend_from_slice(traf);
+    }
+    let mut moof = Vec::new();
+    write_box(&mut moof, *b"moof", &moof_payload)?;
+    Ok(moof)
+}
 
+/// One track's `traf` box, its `trun` pointing `data_offset` bytes past the start of the `moof`.
+fn build_traf(
+    track_id: u32,
+    kind: TrackKind,
+    samples: &[Sample],
+    decode_time: u64,
+    data_offset: i32,
+    extra: &[u8],
+) -> Result<Vec<u8>> {
     let mut tfhd = Vec::new();
     write_full_box_fields(&mut tfhd, 0, TFHD_DEFAULT_BASE_IS_MOOF);
     tfhd.extend_from_slice(&track_id.to_be_bytes());
@@ -168,13 +292,9 @@ fn build_moof(
     write_box(&mut traf_payload, *b"tfdt", &tfdt)?;
     write_box(&mut traf_payload, *b"trun", &trun)?;
     traf_payload.extend_from_slice(extra);
-
-    let mut moof_payload = Vec::new();
-    write_box(&mut moof_payload, *b"mfhd", &mfhd)?;
-    write_box(&mut moof_payload, *b"traf", &traf_payload)?;
-    let mut moof = Vec::new();
-    write_box(&mut moof, *b"moof", &moof_payload)?;
-    Ok(moof)
+    let mut traf = Vec::new();
+    write_box(&mut traf, *b"traf", &traf_payload)?;
+    Ok(traf)
 }
 
 fn write_full_box_fields(output: &mut Vec<u8>, version: u8, flags: u32) {

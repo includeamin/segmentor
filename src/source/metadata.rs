@@ -568,6 +568,11 @@ impl Metadata {
         &self.moov_bytes
     }
 
+    /// The same bytes, shared rather than borrowed.
+    pub(crate) fn moov_shared(&self) -> Bytes {
+        self.moov_bytes.clone()
+    }
+
     /// Every `moof` box in file order; empty for a progressive file.
     pub(crate) fn fragments(&self) -> &[Fragment] {
         &self.fragments

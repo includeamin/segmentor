@@ -113,16 +113,24 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// The server with audio as its own HLS rendition: the audits below check every stream as a
+/// single track and compare HLS with DASH byte for byte, and DASH never muxes.
 fn start_server() -> Server {
+    start_server_with(false)
+}
+
+/// The server with `packaging.hls_mux_audio` set as given; true is the shipped default.
+fn start_server_with(hls_mux_audio: bool) -> Server {
     let directory = root().join("target/conformance");
     fs::create_dir_all(&directory).unwrap();
     // The server picks its own port and says which. Choosing one here and handing it over would
     // leave a gap in which another test, or anything else on the machine, could take it, and a
     // connect check would then be answered by the wrong server.
     let mut config = format!(
-        "[server]\nlisten = \"127.0.0.1:0\"\n[storage]\nmedia_root = \"{}\"\n[packaging]\nsegment_duration_ms = 1000\n[logging]\nlevel = \"info\"\nformat = \"compact\"\n",
+        "[server]\nlisten = \"127.0.0.1:0\"\n[storage]\nmedia_root = \"{}\"\n[packaging]\nsegment_duration_ms = 1000\nhls_mux_audio = {hls_mux_audio}\n[logging]\nlevel = \"info\"\nformat = \"compact\"\n",
         root().join("tests/fixtures").display()
     );
+    let name_suffix = if hls_mux_audio { "-muxed" } else { "" };
     for (id, file, _) in FIXTURES {
         config.push_str(&format!("[assets.{id}]\npath = \"{file}\"\n"));
     }
@@ -133,7 +141,7 @@ fn start_server() -> Server {
             .name()
             .unwrap_or("test")
             .replace("::", "-")
-    );
+    ) + name_suffix;
     let config_path = directory.join(format!("vod-{name}.toml"));
     fs::write(&config_path, config).unwrap();
     let log_path = directory.join(format!("server-{name}.log"));
@@ -869,6 +877,86 @@ fn hls_and_dash_conform_and_agree_for_every_fixture() {
             );
         }
     }
+}
+
+/// The payload of a fragment's `mdat`.
+fn mdat(fragment: &[u8]) -> &[u8] {
+    child(&boxes(fragment), b"mdat")
+}
+
+/// TDD 0011: where a fixture has video and audio, the default HLS stream is muxed, and each of
+/// its fragments carries exactly the separate video fragment's samples followed by the first
+/// audio track's, with a `traf` for each (audio only while it lasts).
+#[test]
+fn muxed_fragments_carry_the_separate_streams_samples_for_every_fixture() {
+    let muxed = start_server_with(true);
+    let separate = start_server();
+    let mut assets = 0;
+    for (asset, _, _) in FIXTURES {
+        let (video, audio) = expected_codecs(asset);
+        let master = get_ok(&muxed, &format!("/hls/{asset}/master.m3u8")).text();
+        let has_both = video.is_some() && audio.is_some();
+        assert_eq!(
+            master.contains("\nmuxed/index.m3u8?v="),
+            has_both,
+            "{asset}: {master}"
+        );
+        if !has_both {
+            continue;
+        }
+        let playlist_path = format!("/hls/{asset}/muxed/index.m3u8");
+        let playlist = get_ok(&muxed, &playlist_path).text();
+        let map = playlist
+            .lines()
+            .find_map(|line| line.strip_prefix("#EXT-X-MAP:URI=\""))
+            .and_then(|rest| rest.split('"').next())
+            .expect("muxed playlist names its init segment");
+        let init = get_ok(&muxed, &resolve(&playlist_path, map)).body;
+        let moov = boxes(child(&boxes(&init), b"moov"));
+        let traks = moov.iter().filter(|(name, _)| name == b"trak").count();
+        assert_eq!(traks, 2, "{asset}: the muxed init carries video and audio");
+
+        for uri in playlist
+            .lines()
+            .filter(|line| line.starts_with("segments/"))
+        {
+            let path = resolve(&playlist_path, uri);
+            let fragment = get_ok(&muxed, &path).body;
+            let video = get_ok(&separate, &path.replace("/muxed/", "/video/")).body;
+            let audio = get(&separate, &path.replace("/muxed/", "/audio-1/"));
+            let mut expected = mdat(&video).to_vec();
+            let mut expected_trafs = 1;
+            if audio.status == 200 {
+                expected.extend_from_slice(mdat(&audio.body));
+                expected_trafs += 1;
+            } else {
+                assert_eq!(audio.status, 404, "{asset} {uri}: audio has ended");
+            }
+            assert_eq!(mdat(&fragment), &expected[..], "{asset} {uri}");
+            let fragment_boxes = boxes(child(&boxes(&fragment), b"moof"));
+            let found = fragment_boxes
+                .iter()
+                .filter(|(name, _)| name == b"traf")
+                .count();
+            assert_eq!(found, expected_trafs, "{asset} {uri}");
+        }
+        assets += 1;
+
+        if Command::new("ffmpeg").arg("-version").output().is_ok() {
+            let url = format!("http://{}/hls/{asset}/master.m3u8", muxed.address);
+            let decoded = Command::new("ffmpeg")
+                .args(["-v", "error", "-i", &url, "-f", "null", "-"])
+                .output()
+                .unwrap();
+            assert!(
+                decoded.status.success(),
+                "{asset}: {}",
+                String::from_utf8_lossy(&decoded.stderr)
+            );
+        }
+    }
+    // Every fixture except the audio-only and video-only ones.
+    assert_eq!(assets, FIXTURES.len() - 4, "assets with a muxed stream");
 }
 
 #[test]

@@ -57,7 +57,7 @@ pub(crate) fn plan(
         .filter(|track| track.id != reference.id)
         .copied()
         .collect::<Vec<_>>();
-    if reference.samples.is_empty() || !reference.samples[0].is_sync {
+    if reference.samples.is_empty() || reference.samples.nth_sync(0) != Some(0) {
         return Err(Error::InvalidMedia(
             "the first track must begin with a sync sample".to_owned(),
         ));
@@ -74,11 +74,11 @@ pub(crate) fn plan(
     for (segment_index, boundaries) in boundaries.windows(2).enumerate() {
         let first_sample = boundaries[0];
         let end_sample = boundaries[1];
-        let decode_time = reference.samples[first_sample].decode_time;
+        let decode_time = reference.samples.decode_time(first_sample);
         let end_time = if end_sample == reference.samples.len() {
             reference_end
         } else {
-            reference.samples[end_sample].decode_time
+            reference.samples.decode_time(end_sample)
         };
         let mut tracks = vec![TrackSegment {
             track_id: reference.id,
@@ -91,13 +91,20 @@ pub(crate) fn plan(
         }];
 
         for audio in &followers {
-            tracks.push(audio_segment(
+            let part = audio_segment(
                 audio,
                 reference,
                 decode_time,
                 end_time,
                 end_sample == reference.samples.len(),
-            )?);
+            )?;
+            // A track that has already ended (audio shorter than the video) has nothing in the
+            // remaining segments, so it is left out of them rather than given an empty one: its
+            // playlist ends where its samples do, and no request can ask for an empty fragment.
+            if part.first_sample == audio.samples.len() {
+                continue;
+            }
+            tracks.push(part);
         }
         if tracks
             .iter()
@@ -121,26 +128,31 @@ pub(crate) fn plan(
 /// Sample indexes at which segments start, plus the end: the first sync sample at or after each
 /// target duration.
 fn reference_boundaries(reference: &Track, target_ticks: u64) -> Vec<usize> {
+    let samples = &reference.samples;
     let mut boundaries = vec![0];
-    let mut current = 0usize;
-    loop {
-        let target = reference.samples[current]
-            .decode_time
-            .saturating_add(target_ticks);
-        let Some(next) = reference
-            .samples
-            .iter()
-            .enumerate()
-            .skip(current + 1)
-            .find(|(_, sample)| sample.is_sync && sample.decode_time >= target)
-            .map(|(index, _)| index)
-        else {
-            break;
-        };
-        boundaries.push(next);
-        current = next;
+    let mut target = samples.decode_time(0).saturating_add(target_ticks);
+    if samples.every_sample_is_sync() {
+        // Any sample can start a segment: jump straight to the first one at the target.
+        loop {
+            let current = *boundaries.last().expect("starts with 0");
+            let next = samples.partition_by_decode_time(target).max(current + 1);
+            if next >= samples.len() {
+                break;
+            }
+            boundaries.push(next);
+            target = samples.decode_time(next).saturating_add(target_ticks);
+        }
+    } else {
+        // Decode times only grow, so one pass over the sync samples finds every cut.
+        for next in samples.sync_indices().filter(|&index| index > 0) {
+            let decode_time = samples.decode_time(next);
+            if decode_time >= target {
+                boundaries.push(next);
+                target = decode_time.saturating_add(target_ticks);
+            }
+        }
     }
-    boundaries.push(reference.samples.len());
+    boundaries.push(samples.len());
     boundaries
 }
 
@@ -153,24 +165,21 @@ fn audio_segment(
 ) -> Result<TrackSegment> {
     let start = rescale(video_start, video.timescale, audio.timescale)?;
     let end = rescale(video_end, video.timescale, audio.timescale)?;
-    let first_sample = audio
-        .samples
-        .partition_point(|sample| sample.decode_time < start);
+    let first_sample = audio.samples.partition_by_decode_time(start);
     let end_sample = if is_final_segment {
         audio.samples.len()
     } else {
-        audio
-            .samples
-            .partition_point(|sample| sample.decode_time < end)
+        audio.samples.partition_by_decode_time(end)
     };
-    let decode_time = audio
-        .samples
-        .get(first_sample)
-        .map_or(start, |sample| sample.decode_time);
+    let decode_time = if first_sample < audio.samples.len() {
+        audio.samples.decode_time(first_sample)
+    } else {
+        start
+    };
     let actual_end = if end_sample == audio.samples.len() {
         track_end(audio)?
     } else {
-        audio.samples[end_sample].decode_time
+        audio.samples.decode_time(end_sample)
     };
 
     Ok(TrackSegment {
@@ -343,7 +352,7 @@ mod tests {
         assert!(
             video_segments
                 .iter()
-                .all(|segment| video.samples[segment.first_sample].is_sync)
+                .all(|segment| video.samples.all()[segment.first_sample].is_sync)
         );
         assert_eq!(
             video_segments.last().unwrap().end_sample,

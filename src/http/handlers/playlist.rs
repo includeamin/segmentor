@@ -1,15 +1,27 @@
 //! HLS playlists and the DASH manifest.
+//!
+//! Each is served compressed when the client accepts it: brotli, then gzip, then identity (see
+//! [`Encoding::negotiate`]). Every encoding is its own representation with its own strong
+//! entity tag, and responses carry `Vary: Accept-Encoding` so caches keep them apart.
 use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, ETAG};
+use axum::http::header::{
+    ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_TYPE, ETAG, VARY,
+};
 use axum::http::{HeaderMap, HeaderValue};
 use axum::response::Response;
-use bytes::Bytes;
 
 use super::parse_track;
+use crate::error::Result;
 use crate::http::error::{HttpError, HttpResult};
 use crate::http::state::AppState;
 use crate::http::validators::{entity_tag, not_modified, not_modified_response};
+use crate::protocol::hls::MUXED;
+use crate::protocol::{Encoding, Manifest};
+
+const HLS: &str = "application/vnd.apple.mpegurl";
+const DASH: &str = "application/dash+xml";
+const CACHE: &str = "public, max-age=60";
 
 pub(crate) async fn master_playlist(
     State(state): State<AppState>,
@@ -17,11 +29,9 @@ pub(crate) async fn master_playlist(
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
-    let etag = entity_tag(asset.version(), "hls-master");
-    if not_modified(&headers, &etag) {
-        return not_modified_response(etag, "public, max-age=60");
-    }
-    playlist_response(asset.hls_master_playlist(), etag)
+    serve(&headers, asset.version(), "hls-master", HLS, || {
+        Ok(asset.hls_master_playlist())
+    })
 }
 
 pub(crate) async fn media_playlist(
@@ -30,14 +40,18 @@ pub(crate) async fn media_playlist(
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
-    let requested = parse_track(&track)?;
-    let etag = entity_tag(asset.version(), &format!("hls-{track}-playlist"));
-    if not_modified(&headers, &etag) {
-        return not_modified_response(etag, "public, max-age=60");
+    if track == MUXED {
+        return serve(&headers, asset.version(), "hls-muxed-playlist", HLS, || {
+            asset.hls_muxed_playlist()
+        });
     }
-    playlist_response(
-        asset.hls_media_playlist(requested.rendition.as_deref(), requested.key)?,
-        etag,
+    let requested = parse_track(&track)?;
+    serve(
+        &headers,
+        asset.version(),
+        &format!("hls-{track}-playlist"),
+        HLS,
+        || asset.hls_media_playlist(requested.rendition.as_deref(), requested.key),
     )
 }
 
@@ -47,11 +61,13 @@ pub(crate) async fn iframe_playlist(
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
-    let etag = entity_tag(asset.version(), "hls-iframe-playlist");
-    if not_modified(&headers, &etag) {
-        return not_modified_response(etag, "public, max-age=60");
-    }
-    playlist_response(asset.hls_iframe_playlist()?, etag)
+    serve(
+        &headers,
+        asset.version(),
+        "hls-iframe-playlist",
+        HLS,
+        || asset.hls_iframe_playlist(),
+    )
 }
 
 pub(crate) async fn subtitle_playlist(
@@ -60,14 +76,13 @@ pub(crate) async fn subtitle_playlist(
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
-    let etag = entity_tag(
+    serve(
+        &headers,
         asset.version(),
         &format!("hls-subtitle-{}-playlist", language.to_ascii_lowercase()),
-    );
-    if not_modified(&headers, &etag) {
-        return not_modified_response(etag, "public, max-age=60");
-    }
-    playlist_response(asset.hls_subtitle_playlist(&language)?, etag)
+        HLS,
+        || asset.hls_subtitle_playlist(&language),
+    )
 }
 
 pub(crate) async fn dash_manifest(
@@ -76,41 +91,46 @@ pub(crate) async fn dash_manifest(
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
-    let etag = entity_tag(asset.version(), "dash-manifest");
-    if not_modified(&headers, &etag) {
-        return not_modified_response(etag, "public, max-age=60");
-    }
-    manifest_response(asset.dash_manifest(), etag)
+    serve(&headers, asset.version(), "dash-manifest", DASH, || {
+        asset.dash_manifest()
+    })
 }
 
-fn playlist_response(playlist: Bytes, etag: HeaderValue) -> HttpResult<Response> {
-    response(
-        Body::from(playlist),
-        HeaderValue::from_static("application/vnd.apple.mpegurl"),
-        HeaderValue::from_static("public, max-age=60"),
-        etag,
-    )
-}
-
-fn manifest_response(manifest: Bytes, etag: HeaderValue) -> HttpResult<Response> {
-    response(
-        Body::from(manifest),
-        HeaderValue::from_static("application/dash+xml"),
-        HeaderValue::from_static("public, max-age=60"),
-        etag,
-    )
-}
-
-fn response(
-    body: Body,
-    content_type: HeaderValue,
-    cache_control: HeaderValue,
-    etag: HeaderValue,
+/// Answers with `manifest` in the best encoding the client accepts, or with `304 Not Modified`
+/// before rendering anything when the client already holds that encoding.
+fn serve(
+    headers: &HeaderMap,
+    version: &str,
+    resource: &str,
+    content_type: &'static str,
+    manifest: impl FnOnce() -> Result<Manifest>,
 ) -> HttpResult<Response> {
-    Response::builder()
-        .header(CONTENT_TYPE, content_type)
-        .header(CACHE_CONTROL, cache_control)
+    let encoding = Encoding::negotiate(
+        headers
+            .get_all(ACCEPT_ENCODING)
+            .iter()
+            .filter_map(|value| value.to_str().ok()),
+    );
+    let etag = match encoding.header() {
+        Some(coding) => entity_tag(version, &format!("{resource}-{coding}")),
+        None => entity_tag(version, resource),
+    };
+    let vary = HeaderValue::from_static("Accept-Encoding");
+    if not_modified(headers, &etag) {
+        let mut response = not_modified_response(etag, CACHE)?;
+        response.headers_mut().insert(VARY, vary);
+        return Ok(response);
+    }
+    let body = manifest()?.encoded(encoding);
+    let mut response = Response::builder()
+        .header(CONTENT_TYPE, HeaderValue::from_static(content_type))
+        .header(CACHE_CONTROL, HeaderValue::from_static(CACHE))
         .header(ETAG, etag)
-        .body(body)
+        .header(VARY, vary);
+    if let Some(coding) = encoding.header() {
+        response = response.header(CONTENT_ENCODING, HeaderValue::from_static(coding));
+    }
+    response
+        .body(Body::from(body))
         .map_err(|error| HttpError::internal(error.to_string()))
 }

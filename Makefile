@@ -3,12 +3,13 @@
 CARGO ?= cargo
 MDBOOK ?= mdbook
 
-.PHONY: unused-deps admin dev-up dev-down bench test-scripts bench-enforce conformance book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve demo site test deny
+.PHONY: bench-compare unused-deps admin dev-up dev-down bench test-scripts bench-enforce conformance book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve demo site test deny
 
 help: ## Show the available targets
 	@printf '%s\n' \
 		'bench      Measure the performance budgets (generates a 60-minute asset on first run)' \
 		'bench-enforce Like bench, but fail when a budget is missed' \
+		'bench-compare Compare segmentor with nginx-vod-module (needs Docker)' \
 		'conformance Run the black-box HLS/DASH conformance suite' \
 		'test-scripts Test the release automation scripts and install.sh' \
 		'book       Build the mdBook documentation' \
@@ -41,6 +42,9 @@ help: ## Show the available targets
 test-scripts: ## Test the release automation scripts and install.sh
 	.github/scripts/test.sh
 	.github/scripts/test-install.sh
+
+bench-compare: ## Compare segmentor with nginx-vod-module (needs Docker)
+	bench/compare/run.sh
 
 bench: ## Measure the performance budgets
 	$(CARGO) bench --bench budgets

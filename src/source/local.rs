@@ -27,8 +27,8 @@ impl LocalMediaSource {
                 modified_nanoseconds: metadata.mtime_nsec(),
             },
             length: metadata.len(),
-            moov_sha256: None,
-            metadata_sha256: None,
+            moov_hash: None,
+            metadata_hash: None,
         };
 
         Ok(Self { file, identity })

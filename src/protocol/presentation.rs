@@ -4,7 +4,7 @@
 //! this view instead of the whole loaded asset keeps `protocol` independent of `asset`.
 
 use crate::error::{Error, Result};
-use crate::media::{Sample, Track, TrackKey, TrackKind};
+use crate::media::{Track, TrackKey, TrackKind};
 use crate::segment::{SegmentPlan, TrackSegment};
 use crate::subtitle::Subtitle;
 
@@ -23,6 +23,7 @@ pub(crate) struct Presentation<'a> {
     version: &'a str,
     subtitles: &'a [Subtitle],
     encryption: Option<&'a crate::cenc::Encryption>,
+    muxed: bool,
 }
 
 impl<'a> Presentation<'a> {
@@ -33,7 +34,18 @@ impl<'a> Presentation<'a> {
             version,
             subtitles: &[],
             encryption: None,
+            muxed: false,
         }
+    }
+
+    /// The same view, with HLS video segments carrying the default audio track (TDD 0011).
+    pub(crate) const fn with_muxed_audio(self, muxed: bool) -> Self {
+        Self { muxed, ..self }
+    }
+
+    /// Whether HLS video segments carry the default (first) audio track.
+    pub(crate) const fn muxed_audio(&self) -> bool {
+        self.muxed
     }
 
     /// The same view, encrypted with `encryption` (TDD 0009).
@@ -115,14 +127,18 @@ impl<'a> Presentation<'a> {
                 .checked_mul(u64::from(track.timescale))?
                 .checked_div(duration)
         };
-        let average = rate(payload_bytes(&track.samples)?, track.duration).ok_or_else(overflow)?;
+        let samples = &track.samples;
+        let average =
+            rate(samples.payload_bytes(0..samples.len()), track.duration).ok_or_else(overflow)?;
         let mut peak = average;
         for segment in self.track_segments(track.id) {
-            let samples = track
-                .samples
-                .get(segment.first_sample..segment.end_sample)
-                .ok_or_else(|| Error::InvalidMedia("segment sample range is invalid".to_owned()))?;
-            if let Some(segment_rate) = rate(payload_bytes(samples)?, segment.duration) {
+            if segment.first_sample > segment.end_sample || segment.end_sample > samples.len() {
+                return Err(Error::InvalidMedia(
+                    "segment sample range is invalid".to_owned(),
+                ));
+            }
+            let bytes = samples.payload_bytes(segment.first_sample..segment.end_sample);
+            if let Some(segment_rate) = rate(bytes, segment.duration) {
                 peak = peak.max(segment_rate);
             }
         }
@@ -137,14 +153,6 @@ pub(crate) struct SequenceClip<'a> {
     pub(crate) presentation: Presentation<'a>,
     pub(crate) first_segment: u32,
     pub(crate) start_nanos: u64,
-}
-
-fn payload_bytes(samples: &[Sample]) -> Result<u64> {
-    samples.iter().try_fold(0u64, |total, sample| {
-        total
-            .checked_add(u64::from(sample.size))
-            .ok_or_else(|| Error::InvalidMedia("track size overflow".to_owned()))
-    })
 }
 
 #[cfg(test)]

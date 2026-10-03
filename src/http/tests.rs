@@ -5,10 +5,12 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use axum::body::to_bytes;
-use axum::http::Request;
+use std::io::Read;
+
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS, ORIGIN, VARY,
 };
+use axum::http::{HeaderName, Request};
 use tower::ServiceExt;
 
 use std::sync::Arc;
@@ -18,7 +20,8 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_RANGE, CONTENT_TYPE, ETAG, IF_NONE_MATCH, IF_RANGE, RANGE, RETRY_AFTER,
+    ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_RANGE, CONTENT_TYPE, ETAG,
+    IF_NONE_MATCH, IF_RANGE, RANGE, RETRY_AFTER,
 };
 use axum::response::Response;
 use bytes::Bytes;
@@ -110,7 +113,8 @@ async fn serves_master_playlist_and_media_objects() {
     assert!(
         master_body
             .windows(16)
-            .any(|window| window == b"video/index.m3u8")
+            .any(|window| window == b"muxed/index.m3u8"),
+        "muxed audio is the default"
     );
 
     let init = get(&app(), &versioned("/hls/sample/video/init.mp4")).await;
@@ -192,6 +196,119 @@ async fn serves_dash_manifest() {
     assert_eq!(response.headers()[CONTENT_TYPE], "application/dash+xml");
     let body = body(response).await;
     assert!(body.windows(11).any(|window| window == b"<Adaptation"));
+}
+
+/// A GET with the given request headers.
+async fn get_with(app: &Router, uri: &str, headers: &[(HeaderName, &str)]) -> Response {
+    let mut request = Request::get(uri);
+    for (name, value) in headers {
+        request = request.header(name, *value);
+    }
+    app.clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+fn header_values(response: &Response, name: &HeaderName) -> Vec<String> {
+    response
+        .headers()
+        .get_all(name)
+        .iter()
+        .flat_map(|value| value.to_str().unwrap().split(','))
+        .map(|value| value.trim().to_ascii_lowercase())
+        .collect()
+}
+
+#[tokio::test]
+async fn playlists_are_compressed_when_the_client_accepts_it() {
+    let app = app();
+    for uri in [
+        "/hls/sample/master.m3u8",
+        "/hls/sample/video/index.m3u8",
+        "/hls/sample/audio-1/index.m3u8",
+        "/hls/sample/video/iframes.m3u8",
+        "/dash/sample/manifest.mpd",
+    ] {
+        let identity = get(&app, uri).await;
+        assert_eq!(identity.status(), StatusCode::OK, "{uri}");
+        assert!(identity.headers().get(CONTENT_ENCODING).is_none(), "{uri}");
+        assert!(header_values(&identity, &VARY).contains(&"accept-encoding".to_owned()));
+        let identity_tag = identity.headers()[ETAG].clone();
+        let text = body(identity).await;
+
+        let mut tags = vec![identity_tag];
+        for (accept, coding) in [("gzip, deflate", "gzip"), ("gzip, deflate, br", "br")] {
+            let response = get_with(&app, uri, &[(ACCEPT_ENCODING, accept)]).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri} {accept}");
+            assert_eq!(response.headers()[CONTENT_ENCODING], coding, "{uri}");
+            assert!(header_values(&response, &VARY).contains(&"accept-encoding".to_owned()));
+            tags.push(response.headers()[ETAG].clone());
+            let compressed = body(response).await;
+            let mut decoded = Vec::new();
+            if coding == "gzip" {
+                flate2::read::GzDecoder::new(&compressed[..])
+                    .read_to_end(&mut decoded)
+                    .unwrap();
+            } else {
+                brotli::Decompressor::new(&compressed[..], 4096)
+                    .read_to_end(&mut decoded)
+                    .unwrap();
+            }
+            assert_eq!(decoded, text, "{uri} {coding}");
+        }
+        // Each encoding is a different representation, so each has its own strong tag.
+        tags.dedup();
+        assert_eq!(tags.len(), 3, "{uri}: {tags:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_playlist_is_not_modified_only_for_the_tag_of_its_own_encoding() {
+    let app = app();
+    let uri = "/hls/sample/video/index.m3u8";
+    let gzip_tag = get_with(&app, uri, &[(ACCEPT_ENCODING, "gzip")])
+        .await
+        .headers()[ETAG]
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    let same = get_with(
+        &app,
+        uri,
+        &[(ACCEPT_ENCODING, "gzip"), (IF_NONE_MATCH, &gzip_tag)],
+    )
+    .await;
+    assert_eq!(same.status(), StatusCode::NOT_MODIFIED);
+    assert!(header_values(&same, &VARY).contains(&"accept-encoding".to_owned()));
+
+    // The same tag does not validate the identity representation.
+    let other = get_with(&app, uri, &[(IF_NONE_MATCH, &gzip_tag)]).await;
+    assert_eq!(other.status(), StatusCode::OK);
+    assert!(other.headers().get(CONTENT_ENCODING).is_none());
+}
+
+#[tokio::test]
+async fn vary_keeps_the_cors_values_alongside_accept_encoding() {
+    // With specific origins (not `*`), CORS adds its own `Vary` values.
+    let cors = CorsConfig {
+        allowed_origins: vec!["https://player.example.com".to_owned()],
+        ..CorsConfig::default()
+    };
+    let app = router(AppState::new(&test_config(LimitsConfig::default(), cors)).unwrap());
+    let response = get_with(
+        &app,
+        "/hls/sample/master.m3u8",
+        &[
+            (ORIGIN, "https://player.example.com"),
+            (ACCEPT_ENCODING, "gzip"),
+        ],
+    )
+    .await;
+    let vary = header_values(&response, &VARY);
+    assert!(vary.contains(&"accept-encoding".to_owned()), "{vary:?}");
+    assert!(vary.contains(&"origin".to_owned()), "{vary:?}");
 }
 
 #[tokio::test]
@@ -1000,4 +1117,283 @@ async fn a_plain_tcp_client_cannot_talk_to_a_tls_listener() {
         "{:?}",
         String::from_utf8_lossy(&response)
     );
+}
+
+/// An app serving `sample` (one audio track) and `two-audio`, with `packaging.hls_mux_audio`.
+fn muxed_app() -> Router {
+    let mut config = test_config(LimitsConfig::default(), CorsConfig::default());
+    config.assets.insert(
+        "two-audio".to_owned(),
+        fixture().with_file_name("h264-aac-two-audio.mp4"),
+    );
+    config.hls_mux_audio = true;
+    router(AppState::new(&config).unwrap())
+}
+
+/// The payload of a fragment's `mdat`, and how many `traf` and `trak`/`trex` boxes it holds.
+fn mdat_payload(fragment: &[u8]) -> &[u8] {
+    let moof_len = u32::from_be_bytes(fragment[0..4].try_into().unwrap()) as usize;
+    assert_eq!(&fragment[moof_len + 4..moof_len + 8], b"mdat");
+    &fragment[moof_len + 8..]
+}
+
+fn count(bytes: &[u8], name: [u8; 4]) -> usize {
+    bytes.windows(4).filter(|window| *window == name).count()
+}
+
+#[tokio::test]
+async fn muxed_hls_points_the_variant_at_one_stream_with_both_codecs() {
+    let app = muxed_app();
+    let master = String::from_utf8(
+        body(get(&app, "/hls/sample/master.m3u8").await)
+            .await
+            .to_vec(),
+    )
+    .unwrap();
+    let version = version();
+    assert!(
+        master.contains(&format!("\nmuxed/index.m3u8?v={version}\n")),
+        "{master}"
+    );
+    assert!(
+        !master.contains("TYPE=AUDIO"),
+        "one audio track needs no group: {master}"
+    );
+    assert!(
+        master.contains("CODECS=\"avc1.") && master.contains(",mp4a.40.2\""),
+        "{master}"
+    );
+    // I-frames stay video-only, and the separate renditions still answer.
+    assert!(master.contains("video/iframes.m3u8"), "{master}");
+    let video = body(get(&app, "/hls/sample/video/index.m3u8").await).await;
+    let muxed = body(get(&app, "/hls/sample/muxed/index.m3u8").await).await;
+    assert_eq!(muxed, video, "same segments and durations, relative URIs");
+
+    let two = String::from_utf8(
+        body(get(&app, "/hls/two-audio/master.m3u8").await)
+            .await
+            .to_vec(),
+    )
+    .unwrap();
+    let renditions = two
+        .lines()
+        .filter(|line| line.starts_with("#EXT-X-MEDIA:TYPE=AUDIO"))
+        .collect::<Vec<_>>();
+    assert_eq!(renditions.len(), 2, "{two}");
+    assert!(
+        renditions[0].contains("DEFAULT=YES") && !renditions[0].contains("URI="),
+        "{two}"
+    );
+    assert!(renditions[1].contains("URI=\"audio-2/index.m3u8"), "{two}");
+    assert!(
+        two.contains(",AUDIO=\"audio\"") && two.contains("\nmuxed/index.m3u8"),
+        "{two}"
+    );
+}
+
+#[tokio::test]
+async fn a_muxed_fragment_carries_the_video_then_the_audio_of_the_same_segment() {
+    let app = muxed_app();
+    let init = body(get(&app, &versioned("/hls/sample/muxed/init.mp4")).await).await;
+    assert_eq!((count(&init, *b"trak"), count(&init, *b"trex")), (2, 2));
+
+    let segments = String::from_utf8(
+        body(get(&app, "/hls/sample/muxed/index.m3u8").await)
+            .await
+            .to_vec(),
+    )
+    .unwrap()
+    .matches("#EXTINF")
+    .count();
+    assert!(segments > 1);
+    for index in 0..segments {
+        let path =
+            |track: &str| versioned(&format!("/hls/sample/{track}/segments/{index}/media.m4s"));
+        let muxed = get(&app, &path("muxed")).await;
+        assert_eq!(muxed.status(), StatusCode::OK);
+        assert_eq!(muxed.headers()[CONTENT_TYPE], "video/mp4");
+        let muxed = body(muxed).await;
+        let video = body(get(&app, &path("video")).await).await;
+        let audio = body(get(&app, &path("audio-1")).await).await;
+        assert_eq!(count(&muxed, *b"traf"), 2, "segment {index}");
+        assert_eq!(
+            mdat_payload(&muxed),
+            [mdat_payload(&video), mdat_payload(&audio)].concat(),
+            "segment {index}"
+        );
+        // Each `trun` data offset points at its track's first byte in the `mdat`.
+        let moof_len = u32::from_be_bytes(muxed[0..4].try_into().unwrap()) as usize;
+        let offsets = muxed[..moof_len]
+            .windows(4)
+            .enumerate()
+            .filter(|(_, window)| *window == b"trun")
+            .map(|(at, _)| {
+                // name, then version and flags (4), sample count (4), data offset (4).
+                usize::try_from(i32::from_be_bytes(
+                    muxed[at + 12..at + 16].try_into().unwrap(),
+                ))
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            offsets,
+            [moof_len + 8, moof_len + 8 + mdat_payload(&video).len()],
+            "segment {index}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_muxed_stream_exists_only_for_hls_and_only_when_turned_on() {
+    let muxed = muxed_app();
+    assert_eq!(
+        get(&muxed, &versioned("/dash/sample/muxed/init.mp4"))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(
+            &muxed,
+            &versioned("/dash/sample/muxed/segments/0/media.m4s")
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    let mut config = test_config(LimitsConfig::default(), CorsConfig::default());
+    config.hls_mux_audio = false;
+    let plain = router(AppState::new(&config).unwrap());
+    for path in [
+        "/hls/sample/muxed/index.m3u8".to_owned(),
+        versioned("/hls/sample/muxed/init.mp4"),
+        versioned("/hls/sample/muxed/segments/0/media.m4s"),
+    ] {
+        assert_eq!(
+            get(&plain, &path).await.status(),
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    let master = body(get(&plain, "/hls/sample/master.m3u8").await).await;
+    assert!(!master.windows(5).any(|window| window == b"muxed"));
+}
+
+#[tokio::test]
+async fn ffmpeg_decodes_the_muxed_presentation_with_both_streams() {
+    if Command::new("ffprobe").arg("-version").output().is_err() {
+        eprintln!("skipping media validation because ffprobe is unavailable");
+        return;
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, muxed_app()).await.unwrap();
+    });
+    let url = format!("http://{address}/hls/sample/muxed/index.m3u8");
+    let (probe, decode) = tokio::task::spawn_blocking(move || {
+        let probe = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "csv=p=0",
+                &url,
+            ])
+            .output()
+            .unwrap();
+        let decode = Command::new("ffmpeg")
+            .args(["-v", "error", "-i", &url, "-f", "null", "-"])
+            .output()
+            .unwrap();
+        (probe, decode)
+    })
+    .await
+    .unwrap();
+    server.abort();
+    assert!(
+        decode.status.success(),
+        "{}",
+        String::from_utf8_lossy(&decode.stderr)
+    );
+    let mut streams = String::from_utf8(probe.stdout)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    // ffprobe lists each stream once more under the HLS program.
+    streams.sort();
+    streams.dedup();
+    assert_eq!(streams, ["audio", "video"]);
+}
+
+/// Audio that ends before the video's last segment starts (the video is delayed by its edit
+/// list) gets no empty segments: every segment a playlist lists is served, and none lasts zero.
+#[tokio::test]
+async fn a_track_that_ends_early_lists_only_segments_that_exist() {
+    let mut config = test_config(LimitsConfig::default(), CorsConfig::default());
+    config.assets.insert(
+        "delayed".to_owned(),
+        fixture().with_file_name("h264-aac-video-delay.mp4"),
+    );
+    let app = router(AppState::new(&config).unwrap());
+    for track in ["video", "audio-1"] {
+        let playlist = String::from_utf8(
+            body(get(&app, &format!("/hls/delayed/{track}/index.m3u8")).await)
+                .await
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!playlist.contains("#EXTINF:0.000"), "{track}: {playlist}");
+        for line in playlist
+            .lines()
+            .filter(|line| line.starts_with("segments/"))
+        {
+            let response = get(&app, &format!("/hls/delayed/{track}/{line}")).await;
+            assert_eq!(response.status(), StatusCode::OK, "{track}/{line}");
+        }
+    }
+    let manifest = body(get(&app, "/dash/delayed/manifest.mpd").await).await;
+    assert!(
+        !manifest.windows(6).any(|window| window == b"d=\"0\" "),
+        "{}",
+        String::from_utf8_lossy(&manifest)
+    );
+}
+
+/// Range requests on a muxed segment, whose body is assembled from reads of both tracks, return
+/// exactly the slice of the full body.
+#[tokio::test]
+async fn byte_ranges_of_a_muxed_segment_slice_the_full_body() {
+    use axum::http::header::RANGE;
+
+    let app = muxed_app();
+    let path = versioned("/hls/sample/muxed/segments/0/media.m4s");
+    let full = body(get(&app, &path).await).await;
+    let total = full.len();
+    assert!(total > 4096);
+    for (start, end) in [
+        (0, 99),
+        (100, 4095),
+        (1, total - 2),
+        (total / 3, total / 3 + 7),
+        (total - 100, total - 1),
+    ] {
+        let response = get_with(&app, &path, &[(RANGE, &format!("bytes={start}-{end}"))]).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::PARTIAL_CONTENT,
+            "{start}-{end}"
+        );
+        assert_eq!(
+            body(response).await,
+            full.slice(start..=end),
+            "{start}-{end}"
+        );
+    }
+    let tail = get_with(&app, &path, &[(RANGE, "bytes=-1000")]).await;
+    assert_eq!(body(tail).await, full.slice(total - 1000..));
 }

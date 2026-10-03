@@ -16,6 +16,11 @@ media_root = "tests/fixtures"
 
 [packaging]
 segment_duration_ms = 1000
+# HLS video segments carry the default audio track too, so a viewer fetches one media playlist
+# and one segment stream instead of two (the default). false serves audio only as its own
+# rendition. Single-file clear assets only; DASH is unchanged. See
+# docs/technical-design/0011-muxed-hls-audio.md.
+hls_mux_audio = true
 
 [logging]
 level = "debug"

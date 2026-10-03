@@ -5,22 +5,24 @@ use bytes::Bytes;
 
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
-use crate::media::{MediaIndex, Sample, Track, TrackKey};
+use crate::media::{MediaIndex, Track, TrackKey, TrackKind};
 use crate::mp4::ParsedMedia;
-use crate::protocol::{Presentation, dash, hls};
+use crate::protocol::{Manifest, Presentation, dash, hls};
 use crate::segment::{SegmentPlan, TrackSegment};
 use crate::source::{ByteRange, LocalMediaSource, MediaSourceKind, Metadata};
 use crate::subtitle::{self, Subtitle};
 use crate::{fmp4, mp4, segment};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// What a load adds to the file itself: sidecar subtitles, a URL version chosen by the caller (a
-/// clip's), and content encryption.
+/// clip's), content encryption, and whether HLS carries audio inside the video segments.
 #[derive(Debug, Default)]
 pub(crate) struct Extras {
     pub(crate) subtitles: Vec<Subtitle>,
     pub(crate) version: Option<String>,
     pub(crate) encryption: Option<Arc<crate::cenc::Encryption>>,
+    /// Asks for a muxed HLS stream (TDD 0011); honoured only when the asset can have one.
+    pub(crate) hls_mux_audio: bool,
 }
 
 #[derive(Debug)]
@@ -34,16 +36,44 @@ pub(crate) struct PackagedAsset {
     rendered: RenderedManifests,
     subtitles: Vec<Subtitle>,
     protection: Option<crate::cenc::AssetProtection>,
+    /// The HLS stream that carries the default audio inside the video segments, when the load
+    /// asked for one and the asset can have it (TDD 0011).
+    muxed: Option<Muxed>,
 }
 
-/// Playlists and manifests rendered once at load so requests never walk sample tables.
+/// The muxed HLS stream: video plus the first audio track, in one init segment and one
+/// fragment per segment.
+#[derive(Debug)]
+struct Muxed {
+    video: TrackKey,
+    audio: TrackKey,
+    init: Bytes,
+}
+
+/// Playlists and manifests, each rendered at most once so requests never walk sample tables.
+///
+/// Only the master playlist is rendered when the asset loads: it is the first thing a player
+/// asks for. Everything else is rendered on its first request and kept, so a cold load does not
+/// pay for a DASH manifest an HLS player never fetches, and clips inside a sequence (which
+/// serves its own playlists) never render theirs at all.
 #[derive(Debug, Default)]
 struct RenderedManifests {
-    hls_master: Bytes,
-    hls_media: HashMap<TrackKey, Bytes>,
-    hls_iframes: Option<Bytes>,
-    hls_subtitle: Bytes,
-    dash: Bytes,
+    hls_master: Manifest,
+    hls_media: HashMap<TrackKey, OnceLock<Manifest>>,
+    hls_iframes: OnceLock<Option<Manifest>>,
+    hls_subtitle: OnceLock<Manifest>,
+    hls_muxed: OnceLock<Manifest>,
+    dash: OnceLock<Manifest>,
+}
+
+/// The cached value, or `render`'s result cached on first success. Two first requests racing
+/// may both render; the first to finish is kept and the other's identical copy is dropped.
+fn cached<T: Clone>(cell: &OnceLock<T>, render: impl FnOnce() -> Result<T>) -> Result<T> {
+    if let Some(value) = cell.get() {
+        return Ok(value.clone());
+    }
+    let value = render()?;
+    Ok(cell.get_or_init(|| value).clone())
 }
 
 impl PackagedAsset {
@@ -110,6 +140,7 @@ impl PackagedAsset {
             subtitles,
             version,
             encryption,
+            hls_mux_audio,
         } = extras;
         let plan = segment::plan(&index, segment_duration_ms, limits)?;
         let subtitles = prepare_subtitles(&index, subtitles)?;
@@ -136,12 +167,40 @@ impl PackagedAsset {
                 Ok((track.key, Bytes::from(bytes)))
             })
             .collect::<Result<HashMap<_, _>>>()?;
+        // Muxing needs a video and an audio track, and is not offered for encrypted content
+        // yet: a fragment would need encryption boxes per track (TDD 0011).
+        let muxed = if hls_mux_audio && protection.is_none() {
+            let video = index
+                .tracks
+                .iter()
+                .find(|track| track.kind == TrackKind::Video);
+            let audio = index
+                .tracks
+                .iter()
+                .find(|track| track.kind == TrackKind::Audio);
+            video
+                .zip(audio)
+                .map(|(video, audio)| {
+                    Ok::<_, Error>(Muxed {
+                        video: video.key,
+                        audio: audio.key,
+                        init: Bytes::from(fmp4::write_muxed_init_segment(
+                            metadata,
+                            &[video.id, audio.id],
+                        )?),
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let encryption_ref = protection.as_ref().map(|p| p.encryption.as_ref());
         let version = version.unwrap_or_else(|| version_of(&index, &subtitles, encryption_ref));
         let rendered = RenderedManifests::render(
             Presentation::new(&index.tracks, &plan, &version)
                 .with_subtitles(&subtitles)
-                .with_encryption(encryption_ref),
+                .with_encryption(encryption_ref)
+                .with_muxed_audio(muxed.is_some()),
         )?;
         Ok(Self {
             source,
@@ -153,6 +212,7 @@ impl PackagedAsset {
             rendered,
             subtitles,
             protection,
+            muxed,
         })
     }
 
@@ -165,6 +225,72 @@ impl PackagedAsset {
         Presentation::new(&self.index.tracks, &self.plan, &self.version)
             .with_subtitles(&self.subtitles)
             .with_encryption(self.encryption())
+            .with_muxed_audio(self.muxed.is_some())
+    }
+
+    /// Whether HLS serves the muxed stream (TDD 0011).
+    pub(crate) const fn is_muxed(&self) -> bool {
+        self.muxed.is_some()
+    }
+
+    fn muxed(&self) -> Result<&Muxed> {
+        self.muxed
+            .as_ref()
+            .ok_or(Error::NotFound("track does not exist"))
+    }
+
+    /// The muxed stream's init segment: the video and audio tracks in one `moov`.
+    pub(crate) fn muxed_init_segment(&self) -> Result<Bytes> {
+        Ok(self.muxed()?.init.clone())
+    }
+
+    /// The muxed stream's media playlist. Its segments are the video's, with the same
+    /// durations, and its URIs are relative, so the text is the video playlist's.
+    pub(crate) fn hls_muxed_playlist(&self) -> Result<Manifest> {
+        let muxed = self.muxed()?;
+        cached(&self.rendered.hls_muxed, || {
+            hls::media_playlist(self.presentation(), muxed.video).map(Manifest::from)
+        })
+    }
+
+    /// Segment `segment_index` of the muxed stream: the planned video and audio samples of that
+    /// segment in one fragment.
+    pub(crate) fn prepare_muxed_segment(
+        &self,
+        segment_index: u32,
+    ) -> Result<fmp4::PreparedSegment> {
+        let muxed = self.muxed()?;
+        let segment = self
+            .plan
+            .segments
+            .get(usize::try_from(segment_index).map_err(|_| {
+                Error::InvalidMedia("segment index does not fit in memory".to_owned())
+            })?)
+            .ok_or(Error::NotFound("segment does not exist"))?;
+        // Audio that ended before this segment has no part in it; the fragment is video alone.
+        let parts = [muxed.video, muxed.audio]
+            .into_iter()
+            .map(|key| {
+                let track = self.track(key)?;
+                Ok(segment
+                    .tracks
+                    .iter()
+                    .find(|candidate| candidate.track_id == track.id)
+                    .map(|part| (track, *part)))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        if parts
+            .first()
+            .is_none_or(|(track, _)| track.key != muxed.video)
+        {
+            return Err(Error::InvalidMedia(
+                "segment is missing its video".to_owned(),
+            ));
+        }
+        fmp4::prepare_muxed_segment(&parts, segment_index.saturating_add(1), &self.limits)
     }
 
     /// The content keys and DRM systems this asset is encrypted with, if any.
@@ -186,7 +312,9 @@ impl PackagedAsset {
             prepared.encryption = Some(Box::new(crate::cenc::PendingEncryption {
                 track_id: track.id,
                 kind: track.kind,
-                samples: track.samples[segment.first_sample..segment.end_sample].to_vec(),
+                samples: track
+                    .samples
+                    .to_vec(segment.first_sample..segment.end_sample),
                 decode_time: segment.decode_time,
                 sequence_number,
                 protection: Arc::clone(protection),
@@ -202,24 +330,27 @@ impl PackagedAsset {
             .ok_or(Error::NotFound("track does not exist"))
     }
 
-    pub(crate) fn hls_master_playlist(&self) -> Bytes {
+    pub(crate) fn hls_master_playlist(&self) -> Manifest {
         self.rendered.hls_master.clone()
     }
 
-    pub(crate) fn hls_media_playlist(&self, key: TrackKey) -> Result<Bytes> {
-        self.rendered
+    pub(crate) fn hls_media_playlist(&self, key: TrackKey) -> Result<Manifest> {
+        let cell = self
+            .rendered
             .hls_media
             .get(&key)
-            .cloned()
-            .ok_or(Error::NotFound("track does not exist"))
+            .ok_or(Error::NotFound("track does not exist"))?;
+        cached(cell, || {
+            hls::media_playlist(self.presentation(), key).map(Manifest::from)
+        })
     }
 
     /// The video track's I-frame playlist, absent for an audio-only asset.
-    pub(crate) fn hls_iframe_playlist(&self) -> Result<Bytes> {
-        self.rendered
-            .hls_iframes
-            .clone()
-            .ok_or(Error::NotFound("asset has no video track"))
+    pub(crate) fn hls_iframe_playlist(&self) -> Result<Manifest> {
+        cached(&self.rendered.hls_iframes, || {
+            Ok(hls::iframe_playlist(self.presentation())?.map(Manifest::from))
+        })?
+        .ok_or(Error::NotFound("asset has no video track"))
     }
 
     /// The fragment holding only the `frame_index`th keyframe of the video track.
@@ -230,15 +361,11 @@ impl PackagedAsset {
             .ok_or(Error::NotFound("asset has no video track"))?;
         let position = track
             .samples
-            .iter()
-            .enumerate()
-            .filter(|(_, sample)| sample.is_sync)
-            .nth(usize::try_from(frame_index).map_err(|_| {
+            .nth_sync(usize::try_from(frame_index).map_err(|_| {
                 Error::InvalidMedia("keyframe index does not fit in memory".to_owned())
             })?)
-            .map(|(position, _)| position)
             .ok_or(Error::NotFound("keyframe does not exist"))?;
-        let sample = track.samples[position];
+        let sample = track.samples.get(position);
         let segment = TrackSegment {
             track_id: track.id,
             first_sample: position,
@@ -254,9 +381,11 @@ impl PackagedAsset {
     }
 
     /// The HLS playlist that lists one subtitle file.
-    pub(crate) fn hls_subtitle_playlist(&self, language: &str) -> Result<Bytes> {
+    pub(crate) fn hls_subtitle_playlist(&self, language: &str) -> Result<Manifest> {
         self.subtitle(language)?;
-        Ok(self.rendered.hls_subtitle.clone())
+        cached(&self.rendered.hls_subtitle, || {
+            Ok(Manifest::from(hls::subtitle_playlist(self.presentation())))
+        })
     }
 
     /// How many sidecar subtitle files this asset has, for status reporting.
@@ -273,8 +402,10 @@ impl PackagedAsset {
             .ok_or(Error::NotFound("subtitle does not exist"))
     }
 
-    pub(crate) fn dash_manifest(&self) -> Bytes {
-        self.rendered.dash.clone()
+    pub(crate) fn dash_manifest(&self) -> Result<Manifest> {
+        cached(&self.rendered.dash, || {
+            dash::manifest(self.presentation()).map(Manifest::from)
+        })
     }
 
     pub(crate) fn prepare_media_segment(
@@ -303,12 +434,13 @@ impl PackagedAsset {
                 Error::InvalidMedia("segment index does not fit in memory".to_owned())
             })?)
             .ok_or(Error::NotFound("segment does not exist"))?;
+        // A track that ended before this segment has no part in it (see `segment::plan`).
         let track_segment = segment
             .tracks
             .iter()
             .find(|candidate| candidate.track_id == track.id)
             .copied()
-            .ok_or_else(|| Error::InvalidMedia("segment is missing a track".to_owned()))?;
+            .ok_or(Error::NotFound("segment does not exist"))?;
 
         let prepared =
             fmp4::prepare_media_segment(track, track_segment, sequence_number, &self.limits)?;
@@ -379,18 +511,12 @@ impl PackagedAsset {
             .index
             .tracks
             .iter()
-            .map(|track| track.samples.len())
+            .map(|track| track.samples.table_bytes())
             .sum::<usize>();
-        let init = self.init_segments.values().map(Bytes::len).sum::<usize>();
-        let rendered = self.rendered.hls_master.len()
-            + self.rendered.dash.len()
-            + self
-                .rendered
-                .hls_media
-                .values()
-                .map(Bytes::len)
-                .sum::<usize>();
-        (samples.saturating_mul(size_of::<Sample>()) as u64)
+        let init = self.init_segments.values().map(Bytes::len).sum::<usize>()
+            + self.muxed.as_ref().map_or(0, |muxed| muxed.init.len());
+        let rendered = self.rendered.len();
+        (samples as u64)
             .saturating_add(init as u64)
             .saturating_add(rendered as u64)
             .saturating_add(
@@ -404,21 +530,30 @@ impl PackagedAsset {
 
 impl RenderedManifests {
     fn render(presentation: Presentation<'_>) -> Result<Self> {
-        let hls_media = presentation
-            .tracks()
-            .iter()
-            .map(|track| {
-                hls::media_playlist(presentation, track.key)
-                    .map(|playlist| (track.key, Bytes::from(playlist)))
-            })
-            .collect::<Result<HashMap<_, _>>>()?;
         Ok(Self {
-            hls_master: Bytes::from(hls::master_playlist(presentation)?),
-            hls_media,
-            hls_iframes: hls::iframe_playlist(presentation)?.map(Bytes::from),
-            hls_subtitle: Bytes::from(hls::subtitle_playlist(presentation)),
-            dash: Bytes::from(dash::manifest(presentation)?),
+            hls_master: Manifest::from(hls::master_playlist(presentation)?),
+            hls_media: presentation
+                .tracks()
+                .iter()
+                .map(|track| (track.key, OnceLock::new()))
+                .collect(),
+            ..Self::default()
         })
+    }
+
+    /// Bytes held by what has been rendered so far, compressed forms included.
+    fn len(&self) -> usize {
+        let rendered = |cell: &OnceLock<Manifest>| cell.get().map_or(0, Manifest::len);
+        self.hls_master.len()
+            + rendered(&self.dash)
+            + rendered(&self.hls_subtitle)
+            + rendered(&self.hls_muxed)
+            + self.hls_media.values().map(rendered).sum::<usize>()
+            + self
+                .hls_iframes
+                .get()
+                .and_then(Option::as_ref)
+                .map_or(0, Manifest::len)
     }
 }
 
@@ -428,6 +563,9 @@ impl RenderedManifests {
 /// Media URLs are cached as immutable by browsers and CDNs, so a new build that answers an old
 /// URL with different bytes would be served stale content until the cache expires. Mixing the
 /// revision into the version gives such a build new URLs instead.
+///
+/// The content hash under every version changed from SHA-256 to BLAKE3, for cold-start speed,
+/// without a bump here: that change alone already gives every asset new URLs.
 pub(crate) const FORMAT_REVISION: u32 = 2;
 
 /// Validates each subtitle file and moves its cues onto the asset's timeline, by the offset the
@@ -460,7 +598,7 @@ fn version_of(
     hasher.update(
         index
             .source
-            .metadata_sha256
+            .metadata_hash
             .expect("parsed assets always have a metadata hash"),
     );
     hasher.update(FORMAT_REVISION.to_be_bytes());
@@ -506,7 +644,7 @@ mod tests {
             .expect("fixture should load");
 
         // What the version would be if it were only the first bytes of the moov hash.
-        let moov_only = asset.index.source.moov_sha256.unwrap().iter().take(8).fold(
+        let moov_only = asset.index.source.moov_hash.unwrap().iter().take(8).fold(
             String::new(),
             |mut hex, byte| {
                 write!(hex, "{byte:02x}").unwrap();
@@ -542,7 +680,7 @@ mod tests {
         let shifted = load("h264-aac-fragmented-offset.mp4").await;
 
         assert_eq!(
-            plain.index.source.moov_sha256, shifted.index.source.moov_sha256,
+            plain.index.source.moov_hash, shifted.index.source.moov_hash,
             "the premise: the moov boxes are the same"
         );
         assert_ne!(plain.version(), shifted.version());
@@ -554,6 +692,45 @@ mod tests {
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures")
             .join(name)
+    }
+
+    async fn load_muxed(name: &str, encrypted: bool) -> PackagedAsset {
+        let source = MediaSourceKind::Local(Arc::new(
+            LocalMediaSource::open(fixture_path(name)).unwrap(),
+        ));
+        PackagedAsset::load_with(
+            source,
+            Extras {
+                encryption: encrypted
+                    .then(|| Arc::new(crate::cenc::tests_support::sample_encryption())),
+                hls_mux_audio: true,
+                ..Extras::default()
+            },
+            1000,
+            &LimitsConfig::default(),
+        )
+        .await
+        .unwrap()
+    }
+
+    /// TDD 0011: muxing needs video and audio, and is not offered for encrypted content yet;
+    /// those assets keep separate renditions, and the muxed URLs are not there.
+    #[tokio::test]
+    async fn only_clear_assets_with_video_and_audio_are_muxed() {
+        assert!(load_muxed("h264-aac.mp4", false).await.is_muxed());
+        for (name, encrypted) in [
+            ("h264-aac.mp4", true),
+            ("aac-only.m4a", false),
+            ("h264-video-only.mp4", false),
+        ] {
+            let asset = load_muxed(name, encrypted).await;
+            assert!(!asset.is_muxed(), "{name}");
+            assert!(asset.hls_muxed_playlist().is_err(), "{name}");
+            assert!(asset.muxed_init_segment().is_err(), "{name}");
+            assert!(asset.prepare_muxed_segment(0).is_err(), "{name}");
+            let master = String::from_utf8(asset.hls_master_playlist().to_vec()).unwrap();
+            assert!(!master.contains("muxed"), "{name}: {master}");
+        }
     }
 
     #[tokio::test]

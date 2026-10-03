@@ -196,27 +196,23 @@ pub(super) fn apply(track: &mut Track, edit: TrackEdit, shift: u64) -> Result<()
     }
     if track.kind == TrackKind::Audio {
         // Whole leading samples that end before the edit starts are encoder padding.
+        // Sample ends only grow, so these are a prefix, usually one or two samples long.
         let keep_from = track
             .samples
-            .partition_point(|sample| sample_end(sample) <= edit.media_time);
-        track.samples.drain(..keep_from);
+            .iter()
+            .take_while(|sample| sample_end(sample) <= edit.media_time)
+            .count();
+        track.samples = track.samples.window(keep_from..track.samples.len());
     }
-    let last = track
+    let last = track.samples.last().ok_or_else(|| {
+        Error::InvalidMedia(format!(
+            "track {}: edit list removes every sample",
+            track.id
+        ))
+    })?;
+    track.samples = track
         .samples
-        .last()
-        .ok_or_else(|| {
-            Error::InvalidMedia(format!(
-                "track {}: edit list removes every sample",
-                track.id
-            ))
-        })?
-        .to_owned();
-    for sample in &mut track.samples {
-        sample.decode_time = sample
-            .decode_time
-            .checked_add(shift)
-            .ok_or_else(|| Error::InvalidMedia("decode timestamp overflow".to_owned()))?;
-    }
+        .shifted(i128::from(shift), "decode timestamp overflow")?;
     track.timeline_shift = shift;
     track.duration = sample_end(&last)
         .checked_add(shift)
@@ -239,13 +235,14 @@ fn trim_tail(track: &mut Track, end: u64) -> Result<()> {
     let Some(first_cut) = track
         .samples
         .iter()
-        .position(|sample| presents_at(sample) >= end)
+        .position(|sample| presents_at(&sample) >= end)
     else {
         return Ok(());
     };
-    if track.samples[first_cut..]
-        .iter()
-        .any(|sample| presents_at(sample) < end)
+    if track
+        .samples
+        .range(first_cut..track.samples.len())
+        .any(|sample| presents_at(&sample) < end)
     {
         return Err(unsupported(
             track.id,
@@ -258,7 +255,7 @@ fn trim_tail(track: &mut Track, end: u64) -> Result<()> {
             track.id
         )));
     }
-    track.samples.truncate(first_cut);
+    track.samples = track.samples.window(0..first_cut);
     Ok(())
 }
 
@@ -480,7 +477,7 @@ mod tests {
                 channels: 2,
                 object_type: 2,
             },
-            samples,
+            samples: samples.into(),
         }
     }
 
@@ -499,7 +496,7 @@ mod tests {
         apply(&mut audio, edit, 2176).unwrap();
 
         assert_eq!(audio.samples.len(), 3);
-        assert_eq!(audio.samples[0].decode_time, 1024 + 2176);
+        assert_eq!(audio.samples.all()[0].decode_time, 1024 + 2176);
         assert_eq!(audio.timeline_shift, 2176);
         assert_eq!(audio.duration, 4 * 1024 + 2176);
     }

@@ -25,7 +25,13 @@ pub(crate) struct InitProtection<'a> {
 }
 
 pub(crate) fn write_init_segment(metadata: &Metadata, track_id: u32) -> Result<Vec<u8>> {
-    write_init(metadata, track_id, None)
+    write_init(metadata, &[track_id], None)
+}
+
+/// One init segment for several tracks, in order: a `trak` and a `trex` each, for a stream
+/// whose fragments carry all of them (TDD 0011).
+pub(crate) fn write_muxed_init_segment(metadata: &Metadata, track_ids: &[u32]) -> Result<Vec<u8>> {
+    write_init(metadata, track_ids, None)
 }
 
 pub(crate) fn write_protected_init_segment(
@@ -33,12 +39,12 @@ pub(crate) fn write_protected_init_segment(
     track_id: u32,
     protection: &InitProtection<'_>,
 ) -> Result<Vec<u8>> {
-    write_init(metadata, track_id, Some(protection))
+    write_init(metadata, &[track_id], Some(protection))
 }
 
 fn write_init(
     metadata: &Metadata,
-    track_id: u32,
+    track_ids: &[u32],
     protection: Option<&InitProtection<'_>>,
 ) -> Result<Vec<u8>> {
     let moov = box_payload(metadata.moov_bytes(), 0)?;
@@ -47,24 +53,27 @@ fn write_init(
         .iter()
         .find(|child| child.name == *b"mvhd")
         .ok_or_else(|| Error::InvalidMedia("required MP4 box `mvhd` is missing".to_owned()))?;
-    let track = children
-        .iter()
-        .filter(|child| child.name == *b"trak")
-        .find(|track| track_id_of(track).is_ok_and(|id| id == track_id))
-        .ok_or_else(|| Error::InvalidMedia(format!("track {track_id} does not exist")))?;
-
     let mut movie = Vec::new();
     write_box(
         &mut movie,
         *b"mvhd",
         &with_zero_duration(movie_header.payload, DurationAt::MOVIE_OR_MEDIA)?,
     )?;
-    write_box(
-        &mut movie,
-        *b"trak",
-        &track_box(track, track_id, protection)?,
-    )?;
-    write_box(&mut movie, *b"mvex", &track_extends(track_id))?;
+    let mut extends = Vec::new();
+    for &track_id in track_ids {
+        let track = children
+            .iter()
+            .filter(|child| child.name == *b"trak")
+            .find(|track| track_id_of(track).is_ok_and(|id| id == track_id))
+            .ok_or_else(|| Error::InvalidMedia(format!("track {track_id} does not exist")))?;
+        write_box(
+            &mut movie,
+            *b"trak",
+            &track_box(track, track_id, protection)?,
+        )?;
+        extends.extend_from_slice(&track_extends(track_id));
+    }
+    write_box(&mut movie, *b"mvex", &extends)?;
     if let Some(protection) = protection {
         for pssh in protection.pssh {
             movie.extend_from_slice(pssh);

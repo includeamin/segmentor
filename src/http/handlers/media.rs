@@ -5,7 +5,7 @@ use std::time::Instant;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::header::{ACCEPT_RANGES, CACHE_CONTROL, CONTENT_RANGE, CONTENT_TYPE, ETAG};
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::Response;
 use bytes::Bytes;
 use serde::Deserialize;
@@ -22,6 +22,7 @@ use crate::http::state::AppState;
 use crate::http::stream::StreamJob;
 use crate::http::validators::{entity_tag, not_modified, not_modified_response};
 use crate::media::TrackKind;
+use crate::protocol::hls::MUXED;
 use crate::source::ByteRange;
 
 /// The `v` query parameter carried by every init and media URL.
@@ -42,14 +43,39 @@ impl VersionQuery {
     }
 }
 
+/// Whether `track` names the muxed HLS stream (TDD 0011). It exists only under `/hls/`: the
+/// DASH routes share these handlers, and DASH never offers it.
+fn is_muxed(track: &str, uri: &Uri) -> HttpResult<bool> {
+    if track != MUXED {
+        return Ok(false);
+    }
+    if uri.path().starts_with("/hls/") {
+        Ok(true)
+    } else {
+        Err(HttpError::not_found("track does not exist"))
+    }
+}
+
 pub(crate) async fn init_segment(
     State(state): State<AppState>,
     Path((asset_id, track)): Path<(String, String)>,
     Query(version): Query<VersionQuery>,
+    uri: Uri,
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
     version.require(asset.version())?;
+    if is_muxed(&track, &uri)? {
+        let etag = entity_tag(asset.version(), "muxed-init");
+        if not_modified(&headers, &etag) {
+            return not_modified_response(etag, "public, max-age=31536000, immutable");
+        }
+        let bytes = asset.muxed_init_segment()?;
+        let Ok(range) = requested_range(&headers, bytes.len() as u64, &etag) else {
+            return range_not_satisfiable(bytes.len() as u64);
+        };
+        return media_response(&bytes, TrackKind::Video, etag, range);
+    }
     let requested = parse_track(&track)?;
     let etag = entity_tag(asset.version(), &format!("{track}-init"));
     if not_modified(&headers, &etag) {
@@ -67,12 +93,27 @@ pub(crate) async fn media_segment(
     method: Method,
     Path((asset_id, track, segment_index)): Path<(String, String, u32)>,
     Query(version): Query<VersionQuery>,
+    uri: Uri,
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
     version.require(asset.version())?;
-    let requested = parse_track(&track)?;
     let etag = entity_tag(asset.version(), &format!("{track}-segment-{segment_index}"));
+    if is_muxed(&track, &uri)? {
+        let what = format!("{asset_id}/{track}/segments/{segment_index}");
+        return serve_segment(
+            &state,
+            &method,
+            &headers,
+            asset,
+            etag,
+            TrackKind::Video,
+            what,
+            move |asset| asset.prepare_muxed_segment(segment_index),
+        )
+        .await;
+    }
+    let requested = parse_track(&track)?;
     let kind = requested.key.kind;
     let what = format!("{asset_id}/{track}/segments/{segment_index}");
     serve_segment(

@@ -76,8 +76,8 @@ impl RemoteReader {
                     validator: validator.value().to_owned(),
                 },
                 length: total,
-                moov_sha256: None,
-                metadata_sha256: None,
+                moov_hash: None,
+                metadata_hash: None,
             },
         })
     }
