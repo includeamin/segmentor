@@ -610,7 +610,7 @@ mod tests {
         assert!(index.tables.sync.is_none());
         assert_eq!(index.tables.chunk_first, [0]);
         assert_eq!(index.tables.time_first, [0]);
-        assert!(index.tables.composition_first.is_empty());
+        assert_eq!(index.tables.composition_first, Vec::<u32>::new());
         assert_eq!(index.sync_indices().count(), 5);
         assert_eq!(index.window(1..3).nth_sync(1), Some(1));
     }
