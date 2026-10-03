@@ -21,14 +21,14 @@ services:
       nofile: 65536
     read_only: true
 
-  # segmentor with HLS audio muxed into the video segments, as nginx-vod-module serves.
-  segmentor-muxed:
+  # segmentor with HLS audio as its own rendition instead of inside the video segments.
+  segmentor-separate:
     image: segmentor-bench
     cpuset: "${SERVER_CPUS:-0-3}"
     environment:
       TOKIO_WORKER_THREADS: "4"
     volumes:
-      - ./segmentor-muxed.toml:/etc/vod/vod.toml:ro
+      - ./segmentor-separate.toml:/etc/vod/vod.toml:ro
       - ./media:/srv/vod:ro
     ports:
       - "18083:3000"

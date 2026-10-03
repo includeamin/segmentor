@@ -69,9 +69,12 @@ The budgets above say whether segmentor is fast enough. This comparison says how
 ### Running it
 
 ```sh
-make bench-compare                      # both servers, 64 virtual users, 30 s per scenario
+make bench-compare                      # every variant, 64 virtual users, 30 s per scenario
 VUS=256 DURATION=60s make bench-compare
+SERVERS="segmentor nginx-cached" make bench-compare
 ```
+
+It also runs on GitHub Actions: the `Benchmarks` workflow, run by hand from the Actions tab with `job: compare`, puts the report in the job summary and the raw results in an artifact. A hosted runner has 4 shared vCPUs, so servers get 2 and k6 the other 2; absolute figures vary from run to run there, but every server in one run is measured on the same machine, so the comparison between them holds.
 
 It needs Docker. Everything lives in [`bench/compare/`](https://github.com/includeamin/segmentor/tree/main/bench/compare):
 
@@ -88,7 +91,7 @@ It needs Docker. Everything lives in [`bench/compare/`](https://github.com/inclu
 | Output | HLS with fMP4 segments (nginx-vod-module's default is MPEG-TS, so `vod_hls_container_format fmp4`) and relative URLs |
 | Segmentation | 6-second target, keyframe-aligned (`vod_align_segments_to_key_frames on`), exact durations in playlists (`vod_manifest_segment_durations_mode accurate`) |
 | Caching | Parsed metadata cached; no segment cache. nginx-vod-module is measured twice: with its response cache off (`nginx`), and on (`nginx-cached`, its best case for playlists) |
-| Audio | nginx-vod-module muxes audio into the video segments by default. segmentor is measured twice: with audio as its own rendition (`segmentor`, its default), and muxed (`segmentor-muxed`, `packaging.hls_mux_audio = true`, [TDD 0011](technical-design/0011-muxed-hls-audio.md)) |
+| Audio | Both mux audio into the video segments by default. segmentor is also measured with audio as its own rendition (`segmentor-separate`, `packaging.hls_mux_audio = false`, [TDD 0011](technical-design/0011-muxed-hls-audio.md)) |
 | Compression | Playlists compressed when the client accepts it: nginx-vod-module with `gzip on` for playlist types, as its README recommends; segmentor with brotli or gzip. k6 sends `Accept-Encoding: gzip, deflate, br`, as browsers do |
 | Cold start | Both parse an asset on its first request (segmentor with `registry.preload = false`) |
 | CPU | Server pinned to cores 0-3 with 4 workers (`worker_processes 4`, `TOKIO_WORKER_THREADS=4`); k6 pinned to cores 4-7 |
@@ -100,6 +103,7 @@ With audio as its own rendition, a presentation is 1,202 requests from segmentor
 | Scenario | What it measures |
 | --- | --- |
 | Cold start | A fresh process each time: time to the first master playlist, then a media playlist, then a segment. Median of 5 |
+| Cold asset, running process | Then, in that running process, the same for five assets it has never loaded: hard links to the same file under other names, so only the servers' own caches are cold. This is the usual production case: a long-tail asset's first viewer rather than a restart |
 | Manifests | Random master and media playlist requests from 64 virtual users for 30 s. Bodies are discarded, so k6 spends no CPU parsing them; bytes on the wire are still counted |
 | Segments | Random init and media segments from 64 virtual users for 30 s, with server CPU and memory sampled from `docker stats` |
 
@@ -107,7 +111,7 @@ With audio as its own rendition, a presentation is 1,202 requests from segmentor
 
 Recorded 2026-10-03 on an Intel Core i7-8550U (4 cores, 8 threads), 15 GiB RAM, Linux, Docker 29, warm page cache, k6 0.57, CPU governor `powersave`. Servers on 4 cores and k6 on the other 4, except where marked "1 core": servers on 1 core and k6 on 7, so that the server is the limit and not the load generator.
 
-| Measurement | segmentor | segmentor, muxed | nginx-vod-module | nginx-vod-module, response cache | Best against best |
+| Measurement | segmentor, separate audio | segmentor (muxed, the default) | nginx-vod-module | nginx-vod-module, response cache | Best against best |
 | --- | ---: | ---: | ---: | ---: | --- |
 | Segments: throughput | 1,019 MiB/s | 1,001 MiB/s | 473 MiB/s | 474 MiB/s | segmentor 2.1× |
 | Segments, 1 core: throughput | 444 MiB/s | 447 MiB/s | 197 MiB/s | 192 MiB/s | segmentor 2.3× |
@@ -143,8 +147,11 @@ The first comparison had the first viewer of the 60-minute asset waiting 245 ms 
 | Write each table straight into the one sample list instead of four intermediate arrays | ~12 ms | `mp4::tables::expand_samples` |
 | Expand tracks in parallel, with the hash alongside | ~8.5 ms | `mp4::parser::parse_tracks` |
 | Keep the tables compact instead of a record per sample ([TDD 0010](technical-design/0010-compact-sample-index.md)); give every track its own thread; re-read `moov` for the mutation check while parsing | ~4 ms | `media::SampleIndex`, `mp4::tables::sample_index` |
+| mimalloc as the global allocator | about 20 % less, fresh process and running process alike | `src/main.rs` |
 
 Measured end to end, a fresh container's first master playlist went from 242 ms to 6.7 ms over these changes, and the index of the 60-minute asset from 8.9 to 4.4 MB. What is left is mostly the fresh process itself: starting threads, faulting in memory, and the CPU ramping up from idle under `powersave`; a load in an already-running process takes about 4 ms. The content hash is part of every URL's `?v=` version, so the switch to BLAKE3 changes every asset URL once. The version also covers the format revision, and nothing else about the output changed.
+
+The allocator change came from counting page faults, which, unlike timings, the laptop's background load cannot disturb. A cold load touched about 10 MB of fresh memory: the 4.4 MB index it keeps, plus the 3.8 MB `moov` copy and the intermediate tables it frees. With glibc, that held even for a second asset in a running process, because glibc returns large freed blocks to the kernel and keeps each thread's arena to itself, and a load's work runs on whichever blocking-pool and track threads are free. Measured over 12 fresh processes alternating between the two builds, mimalloc took the first master from a median of 25.8 to 20.4 ms, and a second asset's from 21.6 to 17.9 ms (on a busy laptop, hence the high absolute figures). It keeps about 35 MB more resident: 51 MB against 16 MB after one asset, 80 MB against 38 MB after four, a fixed cost rather than one per asset.
 
 ### What it found: one read per sample
 

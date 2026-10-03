@@ -3,10 +3,11 @@
 #
 #   ./run.sh                      # both servers, default settings
 #   VUS=256 DURATION=60s ./run.sh
-#   SERVERS=segmentor ./run.sh    # just one (segmentor, segmentor-muxed, nginx, nginx-cached)
+#   SERVERS=segmentor ./run.sh    # just one (segmentor, segmentor-separate, nginx, nginx-cached)
 #
 # For each server, one at a time on the same pinned cores:
-#   1. cold start: restart, then time the first master playlist, media playlist, and segment
+#   1. cold start: restart, then time the first master playlist, media playlist, and segment;
+#      then, in that running process, the same for assets it has not loaded yet
 #   2. manifests: playlists under load
 #   3. segments: init and media segments under load, sampling the server's CPU and memory
 #   4. correctness: FFmpeg decodes the first 30 s of what it served, and the presentation is
@@ -15,7 +16,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SERVERS=${SERVERS:-"segmentor segmentor-muxed nginx nginx-cached"}
+SERVERS=${SERVERS:-"segmentor segmentor-separate nginx nginx-cached"}
 VUS=${VUS:-64}
 DURATION=${DURATION:-30s}
 COLD_REPS=${COLD_REPS:-5}
@@ -34,14 +35,21 @@ if [[ ! -f media/long.mp4 ]]; then
     -i ../../tests/fixtures/h264-aac.mp4 -c copy -use_editlist 0 media/long.mp4
 fi
 
+# Five more names for the same file, so a running server can be asked for assets it has not
+# loaded. Hard links share the page cache, so only the servers' own caches are cold.
+for i in 1 2 3 4 5; do
+  [[ -e media/long-$i.mp4 ]] || ln media/long.mp4 "media/long-$i.mp4"
+done
+
 echo "building images..."
 docker compose build segmentor nginx >"$out/build.log" 2>&1
 
 # nginx-cached is the same nginx-vod-module image with its response cache on.
-# segmentor-muxed is the segmentor image with packaging.hls_mux_audio on.
-declare -A port=([segmentor]=18080 [segmentor-muxed]=18083 [nginx]=18081 [nginx-cached]=18082)
-declare -A internal=([segmentor]=http://segmentor:3000 [segmentor-muxed]=http://segmentor-muxed:3000 [nginx]=http://nginx:80 [nginx-cached]=http://nginx-cached:80)
-declare -A master=([segmentor]=/hls/long/master.m3u8 [segmentor-muxed]=/hls/long/master.m3u8 [nginx]=/hls/long.mp4/master.m3u8 [nginx-cached]=/hls/long.mp4/master.m3u8)
+# segmentor-separate is the segmentor image with packaging.hls_mux_audio off.
+declare -A port=([segmentor]=18080 [segmentor-separate]=18083 [nginx]=18081 [nginx-cached]=18082)
+declare -A internal=([segmentor]=http://segmentor:3000 [segmentor-separate]=http://segmentor-separate:3000 [nginx]=http://nginx:80 [nginx-cached]=http://nginx-cached:80)
+declare -A asset=([segmentor]=long [segmentor-separate]=long [nginx]=long.mp4 [nginx-cached]=long.mp4)
+declare -A master=([segmentor]=/hls/long/master.m3u8 [segmentor-separate]=/hls/long/master.m3u8 [nginx]=/hls/long.mp4/master.m3u8 [nginx-cached]=/hls/long.mp4/master.m3u8)
 
 wait_healthy() {
   for _ in $(seq 1 100); do
@@ -86,6 +94,19 @@ for server in $SERVERS; do
     t_playlist=$(curl -fs -o /dev/null -w '%{time_total}' "$playlist_url")
     t_segment=$(curl -fs -o /dev/null -w '%{time_total}' "$segment_url")
     echo "$rep,$t_master,$t_playlist,$t_segment" >>"$out/$server-cold.csv"
+  done
+
+  # 1b. Cold asset, running process: the server is already up and has served `long`; each of
+  # these names is one it has never loaded. This is the usual production case: a long-tail
+  # asset's first viewer, not a restart.
+  echo "rep,master_s,playlist_s,segment_s" >"$out/$server-cold-asset.csv"
+  for rep in 1 2 3 4 5; do
+    from="/hls/${asset[$server]}/"
+    to="/hls/${asset[$server]/long/long-$rep}/"
+    t_master=$(curl -fs -o /dev/null -w '%{time_total}' "$base${master[$server]/$from/$to}")
+    t_playlist=$(curl -fs -o /dev/null -w '%{time_total}' "${playlist_url/$from/$to}")
+    t_segment=$(curl -fs -o /dev/null -w '%{time_total}' "${segment_url/$from/$to}")
+    echo "$rep,$t_master,$t_playlist,$t_segment" >>"$out/$server-cold-asset.csv"
   done
 
   # 2 and 3. Load, with the server's resource use sampled during the segment run.

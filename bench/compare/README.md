@@ -16,7 +16,7 @@ Methodology, what is made equal between the two, results, and limits are in
 | --- | --- |
 | `run.sh` | Builds both images and runs the cold-start, manifest, segment, and correctness checks |
 | `docker-compose.yml` | segmentor, nginx-vod-module with and without its response cache (`nginx`, `nginx-cached`), and k6, with CPU pinning (`SERVER_CPUS`, `LOAD_CPUS`) |
-| `segmentor.toml`, `nginx-vod-module/nginx.conf` | Equivalent configurations; `segmentor-muxed.toml` turns on muxed HLS audio, as nginx-vod-module serves by default; `nginx-vod-module/response-cache-on.conf` is mounted over the empty `response-cache.conf` for `nginx-cached` |
+| `segmentor.toml`, `nginx-vod-module/nginx.conf` | Equivalent configurations; `segmentor-separate.toml` serves HLS audio as its own rendition instead of muxed; `nginx-vod-module/response-cache-on.conf` is mounted over the empty `response-cache.conf` for `nginx-cached` |
 | `nginx-vod-module/Dockerfile` | nginx with nginx-vod-module from the upstream release tarballs (AGPL-3.0; built and run separately, never copied into segmentor) |
 | `k6/load.js` | Discovers each server's playlists and segments from its master playlist, then loads them |
 | `crawl.py`, `sample.py`, `summarize.py` | Presentation check, CPU and memory sampling, report |

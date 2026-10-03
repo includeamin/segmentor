@@ -1,8 +1,25 @@
 name: Benchmarks
 
-# Manual only: shared runners are too noisy to gate every change on latency budgets.
+# Manual only: shared runners are too noisy to gate every change on latency budgets, and the
+# comparison takes about half an hour. Figures from a shared runner vary from run to run; within
+# one run, every server is measured on the same machine, so the comparison between them holds.
 on:
   workflow_dispatch:
+    inputs:
+      job:
+        description: Which benchmark to run
+        type: choice
+        options: [compare, budgets, both]
+        default: compare
+      servers:
+        description: Servers to compare (segmentor, segmentor-separate, nginx, nginx-cached)
+        default: segmentor segmentor-separate nginx nginx-cached
+      duration:
+        description: Length of each load scenario
+        default: 30s
+      vus:
+        description: k6 virtual users
+        default: "64"
 
 permissions:
   contents: read
@@ -10,6 +27,7 @@ permissions:
 jobs:
   budgets:
     name: Performance budgets
+    if: inputs.job != 'compare'
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -23,3 +41,47 @@ jobs:
 
       - name: Measure budgets
         run: ulimit -n 65536 && make bench-enforce
+
+  compare:
+    name: segmentor vs nginx-vod-module
+    if: inputs.job != 'budgets'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install --yes ffmpeg
+
+      # Hosted runners have 4 vCPUs: half for the server under test, half for k6.
+      - name: Run the comparison
+        working-directory: bench/compare
+        env:
+          SERVERS: ${{ inputs.servers }}
+          DURATION: ${{ inputs.duration }}
+          VUS: ${{ inputs.vus }}
+          SERVER_CPUS: 0-1
+          LOAD_CPUS: 2-3
+        run: ./run.sh
+
+      - name: Publish the report
+        if: always()
+        working-directory: bench/compare
+        run: |
+          latest=$(find results -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1)
+          if [ -n "$latest" ] && [ -f "$latest/report.md" ]; then
+            {
+              echo "Runner: $(nproc) vCPUs, $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2)"
+              echo
+              cat "$latest/report.md"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-compare
+          path: bench/compare/results/
+          if-no-files-found: ignore
