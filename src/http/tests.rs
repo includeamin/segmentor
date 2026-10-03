@@ -113,7 +113,8 @@ async fn serves_master_playlist_and_media_objects() {
     assert!(
         master_body
             .windows(16)
-            .any(|window| window == b"video/index.m3u8")
+            .any(|window| window == b"muxed/index.m3u8"),
+        "muxed audio is the default"
     );
 
     let init = get(&app(), &versioned("/hls/sample/video/init.mp4")).await;
@@ -1243,7 +1244,7 @@ async fn a_muxed_fragment_carries_the_video_then_the_audio_of_the_same_segment()
 }
 
 #[tokio::test]
-async fn the_muxed_stream_exists_only_for_hls_and_only_when_configured() {
+async fn the_muxed_stream_exists_only_for_hls_and_only_when_turned_on() {
     let muxed = muxed_app();
     assert_eq!(
         get(&muxed, &versioned("/dash/sample/muxed/init.mp4"))
@@ -1260,7 +1261,9 @@ async fn the_muxed_stream_exists_only_for_hls_and_only_when_configured() {
         .status(),
         StatusCode::NOT_FOUND
     );
-    let plain = app();
+    let mut config = test_config(LimitsConfig::default(), CorsConfig::default());
+    config.hls_mux_audio = false;
+    let plain = router(AppState::new(&config).unwrap());
     for path in [
         "/hls/sample/muxed/index.m3u8".to_owned(),
         versioned("/hls/sample/muxed/init.mp4"),
