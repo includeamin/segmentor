@@ -46,10 +46,14 @@ pub(crate) fn prepare_media_segment(
     sequence_number: u32,
     limits: &LimitsConfig,
 ) -> Result<PreparedSegment> {
-    let samples = track
+    if segment.first_sample > segment.end_sample || segment.end_sample > track.samples.len() {
+        return Err(Error::InvalidMedia(
+            "segment sample range is invalid".to_owned(),
+        ));
+    }
+    let samples = &track
         .samples
-        .get(segment.first_sample..segment.end_sample)
-        .ok_or_else(|| Error::InvalidMedia("segment sample range is invalid".to_owned()))?;
+        .to_vec(segment.first_sample..segment.end_sample)[..];
     if samples.is_empty() {
         return Err(Error::InvalidMedia(
             "segment contains no samples".to_owned(),

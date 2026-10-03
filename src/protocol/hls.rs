@@ -527,23 +527,23 @@ struct Keyframe {
 
 fn keyframes(track: &Track) -> Result<Keyframes> {
     let overflow = || Error::InvalidMedia("keyframe interval overflow".to_owned());
-    let sync = track
-        .samples
-        .iter()
-        .filter(|sample| sample.is_sync)
-        .collect::<Vec<_>>();
-    let end = track
-        .samples
+    let samples = &track.samples;
+    let sync = samples.sync_indices().collect::<Vec<_>>();
+    let end = samples
         .last()
         .map(|last| last.decode_time.checked_add(u64::from(last.duration)))
         .ok_or_else(overflow)?
         .ok_or_else(overflow)?;
     let mut entries = Vec::with_capacity(sync.len());
-    for (position, sample) in sync.iter().enumerate() {
-        let next = sync.get(position + 1).map_or(end, |next| next.decode_time);
+    for (position, &index) in sync.iter().enumerate() {
+        let next = sync
+            .get(position + 1)
+            .map_or(end, |&next| samples.decode_time(next));
         entries.push(Keyframe {
-            interval: next.checked_sub(sample.decode_time).ok_or_else(overflow)?,
-            bytes: u64::from(sample.size),
+            interval: next
+                .checked_sub(samples.decode_time(index))
+                .ok_or_else(overflow)?,
+            bytes: u64::from(samples.size(index)),
         });
     }
     Ok(Keyframes { entries })

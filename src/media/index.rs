@@ -1,5 +1,6 @@
 use std::fmt;
 
+use super::SampleIndex;
 use crate::source::SourceIdentity;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +51,8 @@ pub(crate) struct Track {
     pub(crate) timescale: u32,
     pub(crate) duration: u64,
     pub(crate) codec: CodecConfig,
-    pub(crate) samples: Vec<Sample>,
+    /// Compact: see [`SampleIndex`] and TDD 0010.
+    pub(crate) samples: SampleIndex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -6,10 +6,10 @@ use super::boxes::{
 use super::codec;
 use super::edit::{self, ElstEntry, TrackEdit};
 use super::fragments::{self, TrackDefaults};
-use super::tables::{expand_samples, parse_sample_tables};
+use super::tables::{parse_sample_tables, sample_index};
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
-use crate::media::{MediaIndex, SkippedTrack, Track, TrackKey, TrackKind};
+use crate::media::{MediaIndex, SampleIndex, SkippedTrack, Track, TrackKey, TrackKind};
 use crate::source::{Fragment, MediaSourceKind, Metadata, SourceIdentity};
 
 /// A parsed file: the sample index plus the `moov` box it was built from, which the init
@@ -33,18 +33,19 @@ pub(crate) async fn parse(source: &MediaSourceKind, limits: &LimitsConfig) -> Re
     let metadata = Metadata::fetch(source, limits).await?;
     let identity = source.identity().clone();
     let limits_for_parse = limits.clone();
-    let (metadata, index) = tokio::task::spawn_blocking(move || {
+    let moov_range = metadata.moov_range();
+    let moov = metadata.moov_shared();
+    let parsing = tokio::task::spawn_blocking(move || {
         parse_metadata(&metadata, identity, &limits_for_parse).map(|index| (metadata, index))
-    })
-    .await
-    .map_err(|error| Error::Io(std::io::Error::other(error)))??;
-
-    // Mutation check: the object must be unchanged, and `moov` must read back the same. The bytes
-    // parsed are still in memory, so they are compared directly rather than hashed again: the
-    // same answer in a fraction of a millisecond instead of a second full SHA-256 pass.
+    });
+    // Mutation check: the object must be unchanged, and `moov` must read back the same. The
+    // read-back runs while the tables are parsed, off the first viewer's critical path; a change
+    // that lands after it is still caught by `verify_unchanged`, which runs after both. The bytes
+    // parsed are still in memory, so they are compared directly rather than hashed again.
+    let (parsed, unchanged) = tokio::join!(parsing, source.matches(moov_range, moov));
+    let (metadata, index) = parsed.map_err(|error| Error::Io(std::io::Error::other(error)))??;
     source.verify_unchanged().await?;
-    let current = source.read_range(metadata.moov_range()).await?;
-    if current[..] != metadata.moov_bytes()[..] {
+    if !unchanged? {
         return Err(invalid_media("moov changed while it was being parsed"));
     }
     Ok(ParsedMedia { index, metadata })
@@ -162,13 +163,12 @@ fn parse_metadata(
     })
 }
 
-/// Expands every kept track, in parallel, while `hash` runs on this thread.
+/// Indexes every kept track, in parallel, while `hash` runs on this thread.
 ///
 /// A long file's tracks each have tens or hundreds of thousands of samples, and this is the
-/// first viewer's wait. The first track and the hash stay on this thread; each further track
-/// gets a scoped thread, so there is at most one thread per track and none for a single-track
-/// file. Results are returned in file order, so the first error is the one a sequential parse
-/// would report.
+/// first viewer's wait. Each track gets a scoped thread and the hash stays on this one, so the
+/// wait is the slowest of them rather than their sum. Results are returned in file order, so
+/// the first error is the one a sequential parse would report.
 fn parse_tracks<H: Send>(
     kept: &[&RawTrack<'_>],
     movie_timescale: u32,
@@ -180,20 +180,18 @@ fn parse_tracks<H: Send>(
     let parse_one =
         |raw: &&RawTrack<'_>| parse_track(raw, movie_timescale, source_len, limits, source);
     std::thread::scope(|scope| {
-        let rest = kept
+        let handles = kept
             .iter()
-            .skip(1)
             .map(|raw| scope.spawn(move || parse_one(raw)))
             .collect::<Vec<_>>();
-        let first = kept.first().map(parse_one);
         let hashes = hash();
-        let parsed = first
+        let parsed = handles
             .into_iter()
-            .chain(rest.into_iter().map(|handle| {
+            .map(|handle| {
                 handle
                     .join()
                     .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            }))
+            })
             .collect::<Vec<_>>();
         (parsed, hashes)
     })
@@ -224,9 +222,10 @@ fn normalise_fragmented_timeline(tracks: &mut [Track]) -> Result<()> {
             / u128::from(earliest_timescale);
         let origin =
             u64::try_from(origin).map_err(|_| invalid_media("timeline origin overflow"))?;
-        for sample in &mut track.samples {
-            sample.decode_time -= origin;
-        }
+        // Rounded down from the earliest first sample, so no decode time goes below zero.
+        track.samples = track
+            .samples
+            .shifted(-i128::from(origin), "timeline origin overflow")?;
         let last = track
             .samples
             .last()
@@ -312,7 +311,7 @@ fn parse_track(
     };
     let samples = match source {
         TrackSource::Tables => {
-            expand_samples(&parse_sample_tables(stbl.payload)?, source_len, limits)?
+            sample_index(parse_sample_tables(stbl.payload)?, source_len, limits)?
         }
         TrackSource::Fragmented {
             fragments,
@@ -320,7 +319,13 @@ fn parse_track(
         } => {
             fragments::reject_mixed(raw.id, sample_count(stbl.payload)?)?;
             let track_defaults = defaults.get(&raw.id).copied().unwrap_or_default();
-            fragments::track_samples(fragments, raw.id, track_defaults, source_len, limits)?
+            SampleIndex::from_samples(&fragments::track_samples(
+                fragments,
+                raw.id,
+                track_defaults,
+                source_len,
+                limits,
+            )?)
         }
     };
     if samples.is_empty() {
@@ -659,7 +664,7 @@ mod tests {
             assert_eq!(track.samples.len(), expected_packets.len());
 
             let first_dts = json_i64(expected_packets[0], "dts");
-            for (sample, packet) in track.samples.iter().zip(expected_packets) {
+            for (sample, packet) in track.samples.all().iter().zip(expected_packets) {
                 let dts = json_i64(packet, "dts");
                 let pts = json_i64(packet, "pts");
                 assert_eq!(sample.offset, json_u64(packet, "pos"));
@@ -719,9 +724,12 @@ mod tests {
         assert_eq!(audio.samples.len(), 141, "the priming frame is dropped");
         // The first frame and the first kept audio sample present at the same instant:
         // 1024 / 15360 s == 3200 / 48000 s.
-        let video_start = video.samples[0].decode_time
-            + u64::try_from(video.samples[0].composition_offset).unwrap();
-        assert_eq!(video_start * 48_000, audio.samples[0].decode_time * 15_360);
+        let video_start = video.samples.all()[0].decode_time
+            + u64::try_from(video.samples.all()[0].composition_offset).unwrap();
+        assert_eq!(
+            video_start * 48_000,
+            audio.samples.all()[0].decode_time * 15_360
+        );
     }
 
     #[test]
@@ -733,9 +741,9 @@ mod tests {
         assert_eq!(video.timeline_shift, 0);
         assert_eq!(audio.timeline_shift, 26_176);
         // The gap between the tracks is the empty edit: 22976 ticks of 48000.
-        let video_start = video.samples[0].decode_time
-            + u64::try_from(video.samples[0].composition_offset).unwrap();
-        let gap = audio.samples[0].decode_time * 15_360 - video_start * 48_000;
+        let video_start = video.samples.all()[0].decode_time
+            + u64::try_from(video.samples.all()[0].composition_offset).unwrap();
+        let gap = audio.samples.all()[0].decode_time * 15_360 - video_start * 48_000;
         assert_eq!(gap, 22_976 * 15_360);
     }
 
@@ -744,7 +752,7 @@ mod tests {
         let index = parse_fixture("h264-aac.mp4");
 
         assert!(index.tracks.iter().all(|track| track.timeline_shift == 0));
-        assert_eq!(index.tracks[1].samples[0].decode_time, 0);
+        assert_eq!(index.tracks[1].samples.all()[0].decode_time, 0);
         assert_eq!(index.tracks[1].samples.len(), 141 + 1);
     }
 
@@ -774,8 +782,8 @@ mod tests {
                         start..start + usize::try_from(sample.size).unwrap()
                     };
                     assert_eq!(
-                        fragmented_bytes[range(got)],
-                        progressive_bytes[range(want)],
+                        fragmented_bytes[range(&got)],
+                        progressive_bytes[range(&want)],
                         "{}: payload",
                         at(i)
                     );
@@ -805,9 +813,10 @@ mod tests {
             let fragmented = parse_fixture(name);
             for (fragment, original) in fragmented.tracks.iter().zip(&progressive.tracks) {
                 let relative = |track: &Track| {
-                    let first = &track.samples[0];
+                    let first = &track.samples.all()[0];
                     track
                         .samples
+                        .all()
                         .iter()
                         .map(|s| {
                             (
@@ -828,6 +837,7 @@ mod tests {
                     let absolute = |track: &Track| {
                         track
                             .samples
+                            .all()
                             .iter()
                             .map(|s| (s.decode_time, s.composition_offset))
                             .collect::<Vec<_>>()
@@ -863,7 +873,7 @@ mod tests {
         // The two files differ only in their `tfdt` values, so once the origin is moved every
         // sample, including where its bytes are, must be the same.
         for (moved, original) in offset.tracks.iter().zip(&plain.tracks) {
-            assert_eq!(moved.samples[0].decode_time, 0, "track {}", moved.id);
+            assert_eq!(moved.samples.all()[0].decode_time, 0, "track {}", moved.id);
             assert_eq!(moved.samples, original.samples, "track {}", moved.id);
             // The end is a duration, not a timestamp near 100 seconds.
             assert_eq!(moved.duration, original.duration, "track {}", moved.id);
@@ -877,6 +887,7 @@ mod tests {
         assert!(
             index.tracks[0]
                 .samples
+                .all()
                 .iter()
                 .any(|sample| sample.composition_offset < 0),
             "the fixture must carry negative offsets for this test to mean anything"
@@ -980,7 +991,7 @@ mod tests {
                     "{name} track {}: sample count",
                     track.id
                 );
-                for (position, sample) in track.samples.iter().enumerate() {
+                for (position, sample) in track.samples.all().iter().enumerate() {
                     let expected = reference
                         .read_sample(track.id, u32::try_from(position + 1).unwrap())
                         .unwrap()
@@ -1179,6 +1190,7 @@ mod tests {
             parse_index(&source, &LimitsConfig::default()).expect("VFR fixture should parse");
         let durations = index.tracks[0]
             .samples
+            .all()
             .iter()
             .map(|sample| sample.duration)
             .collect::<HashSet<_>>();
@@ -1294,6 +1306,44 @@ mod tests {
 
         assert!(error.to_string().contains("stts entry count"), "{error}");
         std::fs::remove_file(path).expect("temporary fixture should be removable");
+    }
+
+    /// TDD 0010: the compact index holds exactly the samples the one-record-per-sample
+    /// expansion produced, for every track of every progressive fixture.
+    #[test]
+    fn the_compact_index_matches_the_expansion_it_replaced_on_every_fixture() {
+        let limits = LimitsConfig::default();
+        let mut tracks = 0;
+        for entry in std::fs::read_dir(fixture("")).unwrap() {
+            let path = entry.unwrap().path();
+            if !matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("mp4" | "m4a" | "mov")
+            ) {
+                continue;
+            }
+            let source = open_kind(path.clone()).unwrap();
+            let metadata = block_on(Metadata::fetch(&source, &limits)).unwrap();
+            let moov = validate_raw_moov(metadata.moov_bytes()).unwrap();
+            if moov.fragmented {
+                continue;
+            }
+            for raw in &moov.tracks {
+                if matches!(raw.disposition, Disposition::Skip(_)) {
+                    continue;
+                }
+                let media = required_child(raw.trak, *b"mdia").unwrap();
+                let minf = required_child(media.payload, *b"minf").unwrap();
+                let stbl = required_child(minf.payload, *b"stbl").unwrap();
+                let tables = parse_sample_tables(stbl.payload).unwrap();
+                let expected =
+                    super::super::tables::expand_samples(&tables, source.len(), &limits).unwrap();
+                let index = sample_index(tables, source.len(), &limits).unwrap();
+                assert_eq!(index.all(), expected, "{} track {}", path.display(), raw.id);
+                tracks += 1;
+            }
+        }
+        assert!(tracks > 40, "only {tracks} tracks compared");
     }
 
     fn fixture_moov() -> Vec<u8> {

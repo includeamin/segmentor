@@ -99,6 +99,40 @@ impl MediaSourceKind {
         }
     }
 
+    /// Whether `range` of the source still holds exactly `expected`.
+    ///
+    /// A local file is compared a window at a time, so checking a `moov` of several megabytes
+    /// does not allocate (and, in a fresh process, fault in) a second copy of it. A remote
+    /// object is read in one request, as more requests would cost more than the memory.
+    pub(crate) async fn matches(&self, range: ByteRange, expected: Bytes) -> Result<bool> {
+        const WINDOW: u64 = 256 * 1024;
+        if u64::try_from(expected.len()).ok() != Some(range.length) {
+            return Ok(false);
+        }
+        match self {
+            Self::Local(source) => {
+                let source = Arc::clone(source);
+                tokio::task::spawn_blocking(move || {
+                    let mut checked = 0u64;
+                    while checked < range.length {
+                        let length = WINDOW.min(range.length - checked);
+                        let window = ByteRange::new(range.offset + checked, length);
+                        let start = usize::try_from(checked).expect("expected is in memory");
+                        let end = start + usize::try_from(length).expect("expected is in memory");
+                        if source.read_range(window)?[..] != expected[start..end] {
+                            return Ok(false);
+                        }
+                        checked += length;
+                    }
+                    Ok(true)
+                })
+                .await
+                .map_err(|error| Error::Io(std::io::Error::other(error)))?
+            }
+            Self::Http(source) => Ok(source.read_range(range).await?[..] == expected[..]),
+        }
+    }
+
     /// Points a remote source at a re-signed URL for the same object. A no-op for local files.
     pub(crate) fn update_location(&self, url: &reqwest::Url) {
         if let Self::Http(source) = self {
@@ -112,5 +146,36 @@ impl MediaSourceKind {
             Self::Local(source) => source.verify_unchanged(),
             Self::Http(source) => source.verify_unchanged().await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file a little over three comparison windows long, compared against copies that differ
+    /// at a window's first byte, its last byte, and in the final partial window.
+    #[tokio::test]
+    async fn matches_compares_a_local_range_window_by_window() {
+        let bytes = (0..800_000u32)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/source-matches.bin");
+        std::fs::write(&path, &bytes).unwrap();
+        let source = MediaSourceKind::Local(Arc::new(LocalMediaSource::open(&path).unwrap()));
+        let range = ByteRange::new(100, 790_000);
+        let expected = Bytes::copy_from_slice(&bytes[100..790_100]);
+
+        assert!(source.matches(range, expected.clone()).await.unwrap());
+        for position in [0, 262_143, 262_144, 789_999] {
+            let mut changed = expected.to_vec();
+            changed[position] ^= 1;
+            assert!(
+                !source.matches(range, Bytes::from(changed)).await.unwrap(),
+                "a change at {position} went unnoticed"
+            );
+        }
+        assert!(!source.matches(range, expected.slice(1..)).await.unwrap());
+        std::fs::remove_file(path).unwrap();
     }
 }

@@ -4,13 +4,15 @@
 //! is checked against the box that holds it before anything is allocated, and expansion is
 //! checked against the configured sample limit before it begins.
 
-use super::boxes::{Reader, invalid_media, optional_child, required_child};
+use super::boxes::{Reader, be_u32s, invalid_media, optional_child, required_child};
 use crate::config::LimitsConfig;
 use crate::error::Result;
+#[cfg(test)]
 use crate::media::Sample;
+use crate::media::{SampleIndex, SampleTablesData as Tables};
 
 /// The raw sample tables of one track.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct SampleTables {
     /// `(sample_count, sample_delta)` runs from `stts`.
     time_to_sample: Vec<(u32, u32)>,
@@ -24,7 +26,7 @@ pub(super) struct SampleTables {
     chunk_offsets: Vec<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum SampleSizes {
     /// Every sample has the same size, so no table exists.
     Constant {
@@ -77,25 +79,20 @@ pub(super) fn parse_sample_tables(stbl: &[u8]) -> Result<SampleTables> {
 fn parse_runs(payload: &[u8]) -> Result<Vec<(u32, u32)>> {
     let mut reader = Reader::new(payload);
     reader.full_box()?;
-    let count = reader.entry_count(8)?;
-    (0..count)
-        .map(|_| Ok((reader.u32()?, reader.u32()?)))
-        .collect()
+    Ok(pairs(reader.entries(8)?).collect())
 }
 
 /// `ctts` layout: `(count, offset)` pairs; version 0 offsets are unsigned, version 1 signed.
 fn parse_ctts(payload: &[u8]) -> Result<Vec<(u32, i32)>> {
     let mut reader = Reader::new(payload);
     let version = reader.full_box()?;
-    let count = reader.entry_count(8)?;
-    (0..count)
-        .map(|_| {
-            let run = reader.u32()?;
+    pairs(reader.entries(8)?)
+        .map(|(run, offset)| {
             let offset = if version == 0 {
-                i32::try_from(reader.u32()?)
+                i32::try_from(offset)
                     .map_err(|_| invalid_media("ctts version 0 offset is out of range"))?
             } else {
-                reader.i32()?
+                offset.cast_signed()
             };
             Ok((run, offset))
         })
@@ -105,23 +102,33 @@ fn parse_ctts(payload: &[u8]) -> Result<Vec<(u32, i32)>> {
 fn parse_stss(payload: &[u8]) -> Result<Vec<u32>> {
     let mut reader = Reader::new(payload);
     reader.full_box()?;
-    let count = reader.entry_count(4)?;
-    (0..count).map(|_| reader.u32()).collect()
+    Ok(be_u32s(reader.entries(4)?).collect())
 }
 
 /// `stsc` layout: `(first_chunk, samples_per_chunk, sample_description_index)` triples.
 fn parse_stsc(payload: &[u8]) -> Result<Vec<(u32, u32)>> {
     let mut reader = Reader::new(payload);
     reader.full_box()?;
-    let count = reader.entry_count(12)?;
-    (0..count)
-        .map(|_| {
-            let first_chunk = reader.u32()?;
-            let samples_per_chunk = reader.u32()?;
-            reader.skip(4)?;
-            Ok((first_chunk, samples_per_chunk))
-        })
-        .collect()
+    Ok(reader
+        .entries(12)?
+        .as_chunks::<12>()
+        .0
+        .iter()
+        .map(|entry| (be_u32(&entry[0..4]), be_u32(&entry[4..8])))
+        .collect())
+}
+
+/// Entries of two big-endian `u32`s each.
+fn pairs(bytes: &[u8]) -> impl Iterator<Item = (u32, u32)> + '_ {
+    bytes
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|entry| (be_u32(&entry[0..4]), be_u32(&entry[4..8])))
+}
+
+fn be_u32(bytes: &[u8]) -> u32 {
+    u32::from_be_bytes(bytes.try_into().expect("four bytes"))
 }
 
 fn parse_stsz(payload: &[u8]) -> Result<SampleSizes> {
@@ -141,7 +148,7 @@ fn parse_stsz(payload: &[u8]) -> Result<SampleSizes> {
         })
         .ok_or_else(|| invalid_media("stsz entry count exceeds its box"))?;
     Ok(SampleSizes::Table(
-        (0..entries).map(|_| reader.u32()).collect::<Result<_>>()?,
+        be_u32s(reader.take(entries * 4)?).collect(),
     ))
 }
 
@@ -191,19 +198,231 @@ fn parse_stz2(payload: &[u8]) -> Result<SampleSizes> {
 fn parse_chunk_offsets(payload: &[u8], wide: bool) -> Result<Vec<u64>> {
     let mut reader = Reader::new(payload);
     reader.full_box()?;
-    let count = reader.entry_count(if wide { 8 } else { 4 })?;
-    (0..count)
-        .map(|_| {
-            if wide {
-                reader.u64()
-            } else {
-                reader.u32().map(u64::from)
-            }
-        })
-        .collect()
+    if wide {
+        Ok(reader
+            .entries(8)?
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|entry| u64::from_be_bytes(*entry))
+            .collect())
+    } else {
+        Ok(be_u32s(reader.entries(4)?).map(u64::from).collect())
+    }
 }
 
-/// Expands the tables into one record per sample, checking every byte range against the source.
+/// Builds the compact index of the tables (TDD 0010), checking what expanding them would: the
+/// configured sample limit, that `stsc`, `stts`, and `ctts` each account for exactly the samples
+/// `stsz` has, and that every sample's bytes lie inside the source. Checks fail in the same
+/// order, with the same messages, as the one-record-per-sample expansion they replace.
+pub(super) fn sample_index(
+    tables: SampleTables,
+    source_len: u64,
+    limits: &LimitsConfig,
+) -> Result<SampleIndex> {
+    let sample_count = tables.sizes.count();
+    if sample_count > limits.max_samples_per_track {
+        return Err(invalid_media("sample count exceeds configured limit"));
+    }
+    let SampleTables {
+        time_to_sample,
+        composition,
+        sync,
+        sample_to_chunk,
+        sizes,
+        chunk_offsets,
+    } = tables;
+    let sizes = match sizes {
+        SampleSizes::Table(sizes) => sizes,
+        SampleSizes::Constant { size, .. } => vec![size; sample_count],
+    };
+    let chunks = chunks(&sample_to_chunk, chunk_offsets, &sizes, source_len)?;
+    let timing = timing_runs(&time_to_sample, sample_count)?;
+    let (composition_first, composition_offset) = match composition.as_deref() {
+        Some(runs) => composition_runs(runs, sample_count)?,
+        None => (Vec::new(), Vec::new()),
+    };
+    if let Some(message) = chunks.beyond_source {
+        return Err(invalid_media(message));
+    }
+    // `stss` lists one-based sample numbers, in no required order; numbers outside the track
+    // are ignored.
+    let sync = sync.map(|numbers| {
+        let mut sync = numbers
+            .iter()
+            .filter_map(|&number| number.checked_sub(1))
+            .filter(|&index| (index as usize) < sample_count)
+            .collect::<Vec<_>>();
+        sync.sort_unstable();
+        sync.dedup();
+        sync
+    });
+    Ok(SampleIndex::new(Tables {
+        sizes,
+        chunk_first: chunks.first,
+        chunk_offset: chunks.offset,
+        time_first: timing.first,
+        time_start: timing.start,
+        time_duration: timing.duration,
+        composition_first,
+        composition_offset,
+        sync,
+    }))
+}
+
+/// The chunk table: each chunk's first sample and byte offset.
+struct Chunks {
+    first: Vec<u32>,
+    offset: Vec<u64>,
+    /// The first byte-range failure, which is reported only after the timing tables are
+    /// checked, where the one-record-per-sample expansion found it.
+    beyond_source: Option<&'static str>,
+}
+
+/// Each chunk's first sample and offset, from `stsc` and `stco`/`co64`.
+///
+/// When `stsc` uses every chunk once, in order, which is how files are written, `offsets` is
+/// kept as the chunk table rather than copied.
+fn chunks(
+    sample_to_chunk: &[(u32, u32)],
+    mut offsets: Vec<u64>,
+    sizes: &[u32],
+    source_len: u64,
+) -> Result<Chunks> {
+    let sample_count = sizes.len();
+    if sample_to_chunk.is_empty() {
+        return Err(invalid_media("missing stsc entries"));
+    }
+    let mut chunk_first = Vec::with_capacity(offsets.len());
+    // `None` while every chunk used so far is the next one in `offsets`.
+    let mut chunk_offset: Option<Vec<u64>> = None;
+    let mut beyond_source = None;
+    let mut mapped = 0usize;
+    for (entry_index, &(first_chunk, samples_per_chunk)) in sample_to_chunk.iter().enumerate() {
+        if first_chunk == 0 || samples_per_chunk == 0 {
+            return Err(invalid_media("invalid stsc entry"));
+        }
+        let next_first_chunk = sample_to_chunk
+            .get(entry_index + 1)
+            .map_or(offsets.len() as u64 + 1, |next| u64::from(next.0));
+        let per_chunk = samples_per_chunk as usize;
+        for chunk_number in u64::from(first_chunk)..next_first_chunk {
+            let chunk_index = usize::try_from(chunk_number - 1)
+                .map_err(|_| invalid_media("chunk index does not fit in memory"))?;
+            let offset = *offsets
+                .get(chunk_index)
+                .ok_or_else(|| invalid_media("stsc references a missing chunk"))?;
+            let take = per_chunk.min(sample_count - mapped);
+            // The chunk's samples follow each other, so the last one ends at the offset plus
+            // all of their sizes; that is what every per-sample check came down to.
+            let end = sizes[mapped..mapped + take]
+                .iter()
+                .try_fold(offset, |end, &size| end.checked_add(u64::from(size)))
+                .ok_or_else(|| invalid_media("sample offset overflow"))?;
+            if take > 0 {
+                match &mut chunk_offset {
+                    None if chunk_index == chunk_first.len() => {}
+                    None => {
+                        let mut copied = offsets[..chunk_first.len()].to_vec();
+                        copied.push(offset);
+                        chunk_offset = Some(copied);
+                    }
+                    Some(copied) => copied.push(offset),
+                }
+                chunk_first.push(u32::try_from(mapped).expect("sample counts fit in u32"));
+                if end > source_len && beyond_source.is_none() {
+                    beyond_source = Some("sample byte range exceeds source length");
+                }
+            }
+            mapped += take;
+            if take < per_chunk {
+                return Err(invalid_media("stsc maps more samples than stsz"));
+            }
+        }
+    }
+    if mapped != sample_count {
+        return Err(invalid_media("stsc maps fewer samples than stsz"));
+    }
+    let chunk_offset = chunk_offset.unwrap_or_else(|| {
+        offsets.truncate(chunk_first.len());
+        offsets
+    });
+    Ok(Chunks {
+        first: chunk_first,
+        offset: chunk_offset,
+        beyond_source,
+    })
+}
+
+/// Timing runs: each run's first sample, first decode time, and sample duration.
+struct TimingRuns {
+    first: Vec<u32>,
+    start: Vec<u64>,
+    duration: Vec<u32>,
+}
+
+/// Timing runs from `stts`.
+fn timing_runs(runs: &[(u32, u32)], sample_count: usize) -> Result<TimingRuns> {
+    let mismatch = || invalid_media("stts entry count does not match sample count");
+    let mut first = Vec::with_capacity(runs.len());
+    let mut start = Vec::with_capacity(runs.len());
+    let mut duration = Vec::with_capacity(runs.len());
+    let mut decode_time = 0u64;
+    let mut at = 0usize;
+    for &(run_length, delta) in runs {
+        let run = usize::try_from(run_length)
+            .ok()
+            .filter(|run| at.saturating_add(*run) <= sample_count)
+            .ok_or_else(mismatch)?;
+        if run == 0 {
+            continue;
+        }
+        first.push(u32::try_from(at).expect("sample counts fit in u32"));
+        start.push(decode_time);
+        duration.push(delta);
+        decode_time = (run as u64)
+            .checked_mul(u64::from(delta))
+            .and_then(|span| decode_time.checked_add(span))
+            .ok_or_else(|| invalid_media("decode timestamp overflow"))?;
+        at += run;
+    }
+    if at != sample_count {
+        return Err(mismatch());
+    }
+    Ok(TimingRuns {
+        first,
+        start,
+        duration,
+    })
+}
+
+/// Composition runs from `ctts`: each run's first sample and offset.
+fn composition_runs(runs: &[(u32, i32)], sample_count: usize) -> Result<(Vec<u32>, Vec<i32>)> {
+    let mismatch = || invalid_media("ctts entry count does not match sample count");
+    let mut first = Vec::with_capacity(runs.len());
+    let mut offsets = Vec::with_capacity(runs.len());
+    let mut at = 0usize;
+    for &(run_length, offset) in runs {
+        let run = usize::try_from(run_length)
+            .ok()
+            .filter(|run| at.saturating_add(*run) <= sample_count)
+            .ok_or_else(mismatch)?;
+        if run == 0 {
+            continue;
+        }
+        first.push(u32::try_from(at).expect("sample counts fit in u32"));
+        offsets.push(offset);
+        at += run;
+    }
+    if at != sample_count {
+        return Err(mismatch());
+    }
+    Ok((first, offsets))
+}
+
+/// The expansion `sample_index` replaced, one record per sample: kept as the reference the
+/// compact index is tested against (TDD 0010).
+#[cfg(test)]
 pub(super) fn expand_samples(
     tables: &SampleTables,
     source_len: u64,
@@ -251,6 +470,7 @@ pub(super) fn expand_samples(
 
 /// Every sample's size and byte offset, from `stsz` and the chunk tables. Timing fields are
 /// zero and every sample is a sync sample until the later passes fill them in.
+#[cfg(test)]
 fn sample_positions(tables: &SampleTables, sample_count: usize) -> Result<Vec<Sample>> {
     let chunks = &tables.chunk_offsets;
     if tables.sample_to_chunk.is_empty() {
@@ -302,6 +522,7 @@ fn sample_positions(tables: &SampleTables, sample_count: usize) -> Result<Vec<Sa
 }
 
 /// Decode times and durations from `stts` runs.
+#[cfg(test)]
 fn apply_times(samples: &mut [Sample], runs: &[(u32, u32)]) -> Result<()> {
     let mismatch = || invalid_media("stts entry count does not match sample count");
     let mut decode_time = 0u64;
@@ -329,6 +550,7 @@ fn apply_times(samples: &mut [Sample], runs: &[(u32, u32)]) -> Result<()> {
 }
 
 /// Composition offsets from `ctts` runs.
+#[cfg(test)]
 fn apply_composition(samples: &mut [Sample], runs: &[(u32, i32)]) -> Result<()> {
     let mismatch = || invalid_media("ctts entry count does not match sample count");
     let mut at = 0usize;
@@ -477,6 +699,160 @@ mod tests {
 
         assert_eq!(parse_chunk_offsets(&narrow, false).unwrap(), [100, 200]);
         assert_eq!(parse_chunk_offsets(&wide, true).unwrap(), [0x1_0000_0000]);
+    }
+
+    /// A small deterministic generator, so a failure names a seed that reproduces it.
+    struct Random(u64);
+
+    impl Random {
+        fn below(&mut self, bound: u32) -> u32 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            u32::try_from(self.0 % u64::from(bound.max(1))).unwrap()
+        }
+    }
+
+    /// Splits `count` samples into runs of 1 to `longest`.
+    fn runs(random: &mut Random, count: u32, longest: u32) -> Vec<u32> {
+        let mut runs = Vec::new();
+        let mut left = count;
+        while left > 0 {
+            let run = 1 + random.below(left.min(longest));
+            runs.push(run);
+            left -= run;
+        }
+        runs
+    }
+
+    /// Consistent tables for a random track, then, half the time, one field broken.
+    fn random_tables(random: &mut Random) -> (SampleTables, u64) {
+        let count = random.below(40);
+        let sizes = (0..count).map(|_| random.below(50)).collect::<Vec<_>>();
+        let mut time_to_sample = runs(random, count, 10)
+            .into_iter()
+            .map(|run| (run, random.below(3) * 512))
+            .collect::<Vec<_>>();
+        let mut composition = (random.below(2) == 0).then(|| {
+            runs(random, count, 4)
+                .into_iter()
+                .map(|run| (run, i32::try_from(random.below(2048)).unwrap() - 1024))
+                .collect::<Vec<_>>()
+        });
+        // Chunks of 1 to 5 samples, written to `stsc` as runs of equal chunk sizes.
+        let per_chunk = runs(random, count, 5);
+        let mut sample_to_chunk: Vec<(u32, u32)> = Vec::new();
+        for (index, &samples) in per_chunk.iter().enumerate() {
+            if sample_to_chunk.last().is_none_or(|last| last.1 != samples) {
+                sample_to_chunk.push((u32::try_from(index).unwrap() + 1, samples));
+            }
+        }
+        if sample_to_chunk.is_empty() {
+            sample_to_chunk.push((1, 1 + random.below(3)));
+        }
+        let mut offset = 0u64;
+        let mut first = 0usize;
+        let mut chunk_offsets = Vec::new();
+        for &samples in &per_chunk {
+            offset += u64::from(random.below(100));
+            chunk_offsets.push(offset);
+            let samples = samples as usize;
+            offset += sizes[first..first + samples]
+                .iter()
+                .map(|&size| u64::from(size))
+                .sum::<u64>();
+            first += samples;
+        }
+        let mut source_len = offset + u64::from(random.below(3));
+        let sync = (random.below(2) == 0).then(|| {
+            (0..random.below(8))
+                .map(|_| random.below(count + 3))
+                .collect()
+        });
+        let mut sizes = if random.below(8) == 0 {
+            SampleSizes::Constant {
+                size: sizes.first().copied().unwrap_or(1),
+                count,
+            }
+        } else {
+            SampleSizes::Table(sizes)
+        };
+        if random.below(2) == 0 {
+            let nudge = |random: &mut Random, value: &mut u32| {
+                *value = match random.below(3) {
+                    0 => value.saturating_add(1),
+                    1 => value.saturating_sub(1),
+                    _ => 0,
+                };
+            };
+            match random.below(9) {
+                0 => {
+                    if let Some(run) = time_to_sample.last_mut() {
+                        nudge(random, &mut run.0);
+                    }
+                }
+                1 => time_to_sample.push((1 + random.below(3), 7)),
+                2 => {
+                    if let Some(run) = composition.as_mut().and_then(|runs| runs.last_mut()) {
+                        nudge(random, &mut run.0);
+                    }
+                }
+                3 => {
+                    let entry = random.below(u32::try_from(sample_to_chunk.len()).unwrap());
+                    nudge(random, &mut sample_to_chunk[entry as usize].0);
+                }
+                4 => {
+                    let entry = random.below(u32::try_from(sample_to_chunk.len()).unwrap());
+                    nudge(random, &mut sample_to_chunk[entry as usize].1);
+                }
+                5 => {
+                    chunk_offsets.pop();
+                }
+                6 => chunk_offsets.push(offset + 10),
+                7 => source_len = source_len.saturating_sub(1 + u64::from(random.below(60))),
+                _ => {
+                    if let SampleSizes::Table(sizes) = &mut sizes {
+                        sizes.pop();
+                    }
+                }
+            }
+        }
+        let tables = SampleTables {
+            time_to_sample,
+            composition,
+            sync,
+            sample_to_chunk,
+            sizes,
+            chunk_offsets,
+        };
+        (tables, source_len)
+    }
+
+    /// TDD 0010: on valid and broken tables alike, the compact index and the expansion it
+    /// replaced agree: the same samples, or the same error.
+    #[test]
+    fn the_compact_index_agrees_with_the_expansion_on_random_tables() {
+        let limits = LimitsConfig::default();
+        let mut outcomes = [0usize; 2];
+        for seed in 1..20_000u64 {
+            let mut random = Random(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            let (tables, source_len) = random_tables(&mut random);
+            let expected = expand_samples(&tables, source_len, &limits);
+            let actual = sample_index(tables.clone(), source_len, &limits).map(|index| index.all());
+            match (&expected, &actual) {
+                (Ok(expected), Ok(actual)) => {
+                    assert_eq!(actual, expected, "seed {seed}: {tables:?}");
+                    outcomes[0] += 1;
+                }
+                (Err(expected), Err(actual)) => {
+                    assert_eq!(actual.to_string(), expected.to_string(), "seed {seed}");
+                    outcomes[1] += 1;
+                }
+                _ => panic!("seed {seed}: expected {expected:?}, got {actual:?}, {tables:?}"),
+            }
+        }
+        // Both paths are exercised often enough to mean something.
+        assert!(outcomes.iter().all(|&count| count > 2_000), "{outcomes:?}");
     }
 
     #[test]

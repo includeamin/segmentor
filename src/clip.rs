@@ -6,7 +6,7 @@
 //! the result exactly like a whole file.
 
 use crate::error::{Error, Result};
-use crate::media::{MediaIndex, Sample, Track, TrackKind};
+use crate::media::{MediaIndex, Sample, SampleIndex, Track, TrackKind};
 use crate::source::SourceIdentity;
 
 /// The largest `from_ms` or `to_ms` accepted (`2^32 − 1`): every conversion to ticks then fits
@@ -99,12 +99,12 @@ pub(crate) fn trim(
     let reference = reference_track(index)?;
     let timescale = reference.timescale;
     let (first, end) = reference_window(index, reference, window)?;
-    let kept = &reference.samples[first..end];
-    let origin = reference.samples[first].decode_time;
-    let kept_end = sample_end(kept.last().expect("a window holds at least one sample"))?;
+    let kept = reference.samples.window(first..end);
+    let origin = reference.samples.decode_time(first);
+    let kept_end = sample_end(&kept.last().expect("a window holds at least one sample"))?;
     let earliest = kept
         .iter()
-        .map(presented)
+        .map(|sample| presented(&sample))
         .min()
         .expect("a window holds at least one sample");
     // Negative composition offsets can show a frame before its decode time; moving the clip later
@@ -180,7 +180,7 @@ fn reference_window(
     let timescale = reference.timescale;
     let offset = index.presentation_offset_ms;
     let reference_end = sample_end(
-        reference
+        &reference
             .samples
             .last()
             .ok_or_else(|| Error::InvalidMedia("track contains no samples".to_owned()))?,
@@ -216,76 +216,68 @@ fn reference_window(
 /// From the last keyframe shown at or before `from` (or the first keyframe, when even that is
 /// shown later), through the shortest decode-order prefix holding every frame shown before `to`.
 /// A decode-order prefix is always decodable; with B-frames it may keep a frame shown after `to`.
-fn video_window(samples: &[Sample], from: u64, to: Option<u64>) -> (usize, usize) {
+fn video_window(samples: &SampleIndex, from: u64, to: Option<u64>) -> (usize, usize) {
     let from = i128::from(from);
     let first = samples
-        .iter()
-        .rposition(|sample| sample.is_sync && presented(sample) <= from)
-        .or_else(|| samples.iter().position(|sample| sample.is_sync))
+        .sync_indices()
+        .filter(|&index| presented(&samples.get(index)) <= from)
+        .last()
+        .or_else(|| samples.sync_indices().next())
         .unwrap_or(0);
     let end = to.map_or(samples.len(), |to| {
         let to = i128::from(to);
-        samples[first..]
-            .iter()
-            .rposition(|sample| presented(sample) < to)
-            .map_or(first + 1, |position| first + position + 1)
+        samples
+            .range(first..samples.len())
+            .enumerate()
+            .filter(|(_, sample)| presented(sample) < to)
+            .last()
+            .map_or(first + 1, |(position, _)| first + position + 1)
     });
     (first, end.max(first + 1))
 }
 
 /// Every audio frame is a valid cut: from the frame that holds `from` up to the first frame that
 /// starts at or after `to`.
-fn audio_window(samples: &[Sample], from: u64, to: Option<u64>) -> (usize, usize) {
+fn audio_window(samples: &SampleIndex, from: u64, to: Option<u64>) -> (usize, usize) {
     let first = samples
-        .partition_point(|sample| sample.decode_time <= from)
+        .partition_by_decode_time(from.saturating_add(1))
         .saturating_sub(1);
-    let end = to.map_or(samples.len(), |to| {
-        samples.partition_point(|sample| sample.decode_time < to)
-    });
+    let end = to.map_or(samples.len(), |to| samples.partition_by_decode_time(to));
     (first, end.max(first + 1))
 }
 
 /// Another track's samples inside the reference's kept span, by the rule the segment planner
 /// cuts followers with. When the reference is kept to its end, so is every other track.
 fn follower_window(track: &Track, start: u64, end: u64, to_the_end: bool) -> (usize, usize) {
-    let first = track
-        .samples
-        .partition_point(|sample| sample.decode_time < start);
+    let first = track.samples.partition_by_decode_time(start);
     let last = if to_the_end {
         track.samples.len()
     } else {
-        track
-            .samples
-            .partition_point(|sample| sample.decode_time < end)
+        track.samples.partition_by_decode_time(end)
     };
     (first, last.max(first))
 }
 
 /// `track` with only `range` kept, each decode time moved from `origin` to `base`.
 fn moved_track(track: &Track, range: (usize, usize), origin: u64, base: u64) -> Result<Track> {
-    let kept = &track.samples[range.0..range.1];
+    let kept = track.samples.window(range.0..range.1);
     if kept.is_empty() {
         return Err(Error::InvalidMedia(format!(
             "the window leaves track `{}` with no samples",
             track.key
         )));
     }
-    let samples = kept
-        .iter()
-        .map(|sample| {
-            let decode_time = sample
-                .decode_time
-                .checked_sub(origin)
-                .and_then(|relative| relative.checked_add(base))
-                .ok_or_else(overflow)?;
-            Ok(Sample {
-                decode_time,
-                ..*sample
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let duration = sample_end(samples.last().expect("checked non-empty above"))?
-        .checked_sub(samples[0].decode_time)
+    // Every kept sample is at or after `origin`, so moving the first one from `origin` to
+    // `base` checks them all.
+    if kept.decode_time(0) < origin {
+        return Err(overflow());
+    }
+    let samples = kept.shifted(
+        i128::from(base) - i128::from(origin),
+        "clip timing overflow",
+    )?;
+    let duration = sample_end(&samples.last().expect("checked non-empty above"))?
+        .checked_sub(samples.decode_time(0))
         .ok_or_else(overflow)?;
     Ok(Track {
         id: track.id,
@@ -441,6 +433,7 @@ mod tests {
     fn original_position(original: &Track, kept: &Sample) -> usize {
         original
             .samples
+            .all()
             .iter()
             .position(|sample| sample.offset == kept.offset)
             .expect("kept samples come from the original")
@@ -460,8 +453,8 @@ mod tests {
 
         let kept = video(&trimmed.index);
         // Keyframes are one second apart; the one at 1 s (frame 30) is the last shown by 1.5 s.
-        assert_eq!(original_position(video(&index), &kept.samples[0]), 30);
-        assert!(kept.samples[0].is_sync);
+        assert_eq!(original_position(video(&index), &kept.samples.all()[0]), 30);
+        assert!(kept.samples.all()[0].is_sync);
         assert_eq!(kept.samples.len(), video(&index).samples.len() - 30);
     }
 
@@ -501,6 +494,7 @@ mod tests {
         let kept = video(&trimmed.index).samples.len();
         let last_shown_before = original
             .samples
+            .all()
             .iter()
             .rposition(|sample| presented(sample) < to_ticks)
             .unwrap();
@@ -526,22 +520,24 @@ mod tests {
         .unwrap();
 
         let (kept_video, kept_audio) = (video(&trimmed.index), audio(&trimmed.index));
-        let first =
-            &original_video.samples[original_position(original_video, &kept_video.samples[0])];
-        let last = &original_video.samples
-            [original_position(original_video, kept_video.samples.last().unwrap())];
+        let first = &original_video.samples.all()
+            [original_position(original_video, &kept_video.samples.all()[0])];
+        let last = &original_video.samples.all()
+            [original_position(original_video, kept_video.samples.all().last().unwrap())];
         let video_end = last.decode_time + u64::from(last.duration);
         let rescale = |ticks: u64| {
             ticks * u64::from(original_audio.timescale) / u64::from(original_video.timescale)
         };
         let expected_first = original_audio
             .samples
+            .all()
             .partition_point(|sample| sample.decode_time < rescale(first.decode_time));
         let expected_end = original_audio
             .samples
+            .all()
             .partition_point(|sample| sample.decode_time < rescale(video_end));
         assert_eq!(
-            original_position(original_audio, &kept_audio.samples[0]),
+            original_position(original_audio, &kept_audio.samples.all()[0]),
             expected_first
         );
         assert_eq!(kept_audio.samples.len(), expected_end - expected_first);
@@ -563,15 +559,15 @@ mod tests {
         .unwrap();
 
         let kept = audio(&trimmed.index);
-        let first = &original.samples[original_position(original, &kept.samples[0])];
+        let first = &original.samples.all()[original_position(original, &kept.samples.all()[0])];
         assert!(
             first.decode_time <= ticks(1000)
                 && ticks(1000) < first.decode_time + u64::from(first.duration),
             "the first kept frame holds from_ms"
         );
-        let end = original_position(original, kept.samples.last().unwrap()) + 1;
-        assert!(original.samples[end - 1].decode_time < ticks(2000));
-        assert!(original.samples[end].decode_time >= ticks(2000));
+        let end = original_position(original, kept.samples.all().last().unwrap()) + 1;
+        assert!(original.samples.all()[end - 1].decode_time < ticks(2000));
+        assert!(original.samples.all()[end].decode_time >= ticks(2000));
     }
 
     #[test]
@@ -618,7 +614,10 @@ mod tests {
         // 1000 ms falls in the first GOP; ffmpeg's default edit list shows it at exactly 1.000 s.
         let plain = parse("h264-aac.mp4");
         let edited = parse("h264-aac-default-edits.mp4");
-        assert!(presented(&video(&plain).samples[30]) > 15_360, "premise");
+        assert!(
+            presented(&video(&plain).samples.all()[30]) > 15_360,
+            "premise"
+        );
         assert!(edited.presentation_offset_ms > 0, "premise");
 
         let from_plain = trim(
@@ -637,11 +636,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            original_position(video(&plain), &video(&from_plain.index).samples[0]),
+            original_position(video(&plain), &video(&from_plain.index).samples.all()[0]),
             0
         );
         assert_eq!(
-            original_position(video(&edited), &video(&from_edited.index).samples[0]),
+            original_position(video(&edited), &video(&from_edited.index).samples.all()[0]),
             30
         );
     }
@@ -655,17 +654,18 @@ mod tests {
 
         let kept_video = video(&trimmed.index);
         assert_eq!(
-            kept_video.samples[0].decode_time, 38_400,
+            kept_video.samples.all()[0].decode_time,
+            38_400,
             "2.5 s at 15360 ticks per second"
         );
         let original_audio = audio(&index);
         let kept_audio = audio(&trimmed.index);
-        let original_first = original_audio.samples
-            [original_position(original_audio, &kept_audio.samples[0])]
+        let original_first = original_audio.samples.all()
+            [original_position(original_audio, &kept_audio.samples.all()[0])]
         .decode_time;
         // Audio moves by exactly as much as video (1 s to 2.5 s): its offset from the cut is kept.
         assert_eq!(
-            kept_audio.samples[0].decode_time - 120_000,
+            kept_audio.samples.all()[0].decode_time - 120_000,
             original_first - 48_000
         );
         let last = kept_video.samples.last().unwrap();
@@ -684,27 +684,29 @@ mod tests {
             .find(|track| track.kind == TrackKind::Video)
             .unwrap();
         // Every frame shown 256 ticks before it is decoded.
-        for sample in &mut track.samples {
+        let mut samples = track.samples.all();
+        for sample in &mut samples {
             sample.composition_offset = -256;
         }
+        track.samples = SampleIndex::from(samples);
         let start = TimelinePosition::from_nanos(1_000_000_000);
 
         let trimmed = trim(&index, window(0, None), start, Trailing::Keep).unwrap();
 
         let kept = video(&trimmed.index);
-        let earliest = kept.samples.iter().map(presented).min().unwrap();
+        let earliest = kept.samples.all().iter().map(presented).min().unwrap();
         assert_eq!(
             earliest, 15_360,
             "the first frame is shown exactly at the clip's start"
         );
-        assert_eq!(kept.samples[0].decode_time, 15_360 + 256);
+        assert_eq!(kept.samples.all()[0].decode_time, 15_360 + 256);
     }
 
     #[test]
     fn a_one_frame_window_still_plays() {
         let index = parse("h264-aac.mp4");
         // Just after keyframe 30 is shown, and 4 ms long: less than one frame interval (33 ms).
-        let shown = u64::try_from(presented(&video(&index).samples[30])).unwrap();
+        let shown = u64::try_from(presented(&video(&index).samples.all()[30])).unwrap();
         let from_ms = (shown * 1000).div_ceil(15_360);
 
         let trimmed = trim(
@@ -813,7 +815,7 @@ mod tests {
         let video_end_in_audio_ticks =
             (last_frame.decode_time + u64::from(last_frame.duration)) * 48_000 / 15_360;
         assert!(
-            audio(&index).samples.last().unwrap().decode_time >= video_end_in_audio_ticks,
+            audio(&index).samples.all().last().unwrap().decode_time >= video_end_in_audio_ticks,
             "premise: an audio frame starts after the video ends"
         );
 
@@ -833,7 +835,13 @@ mod tests {
         .unwrap();
 
         assert!(
-            audio(&middle.index).samples.last().unwrap().decode_time < video_end_in_audio_ticks,
+            audio(&middle.index)
+                .samples
+                .all()
+                .last()
+                .unwrap()
+                .decode_time
+                < video_end_in_audio_ticks,
             "a clip followed by another stops its audio where its video ends"
         );
         assert_eq!(audio(&last.index).samples, audio(&index).samples);
