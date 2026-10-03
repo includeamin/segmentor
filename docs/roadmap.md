@@ -118,6 +118,7 @@ Where it stands (2026-10-03, 60-minute asset):
 | Version in the path, short segment URIs | Dropped | Compression made it moot: the repeated `?v=` compresses to almost nothing, and it would change public URLs |
 | Compressed playlists | Done | brotli or gzip by `Accept-Encoding`, each made once on first request: 34 KB to 857 bytes for a one-hour media playlist |
 | Precomputed response headers | Not needed for now | Header building does not show at 16,900 requests/s per core; revisit with a profile |
+| Interleaved reads for muxed segments | Done | Each file region of a muxed segment is read once instead of once per track: 2-core throughput 488 to about 800 MiB/s |
 | Inline fragment headers | To do | Below a sample-count threshold, skip the blocking-pool hop |
 | Vectored writes for coalesced reads | To do | No copy into a joined buffer |
 | `io_uring` for local reads | Evaluate | Keep only if the comparison shows a gain |

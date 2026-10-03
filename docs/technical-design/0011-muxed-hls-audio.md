@@ -60,7 +60,7 @@ The variant points at `muxed/index.m3u8`, with `CODECS` naming both tracks, and 
 
 Segment `n` of the muxed stream is segment `n` of the plan: the video track's samples and the audio samples the planner already aligned to them. The `moof` has an `mfhd` and one `traf` per track, video first, each with its own `tfdt` in its own timescale. One `mdat` follows, with the video samples and then the audio samples. Each `trun`'s data offset points at its track's first byte in the `mdat`. An empty audio part, past the end of the audio, is left out rather than written as an empty `traf`.
 
-The byte ranges are the video ranges followed by the audio ranges. Streaming and read coalescing are unchanged; the audio ranges start a new run of reads, because they come earlier in the file than the last video range.
+The byte ranges are the video ranges followed by the audio ranges. Read as they are listed, that reads the interleaved file region once per track, so streaming reads such a segment in file order instead: each window of the region is read once, the video pieces in it go out at once, and the audio pieces are held until the video is done (`interleaved_windows`, `src/http/stream.rs`). The response bytes are the same; the reads fall from 1.89 to 0.97 times the segment's size, and 2-core throughput rose from 488 to about 800 MiB/s.
 
 ### Init segment
 

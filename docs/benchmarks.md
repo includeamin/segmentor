@@ -167,6 +167,12 @@ That showed the real difference: bytes. nginx-vod-module gzips playlists, as its
 
 Moving the URL version from a `?v=` on every segment URI into the path, which would shorten playlists, is not worth the URL change any more: the repeated `?v=` compresses to almost nothing.
 
+### What it found: muxed segments read the file twice
+
+The first run on a GitHub-hosted runner (servers on 2 cores) had muxed segmentor at 585 MiB/s against 764 MiB/s with audio as its own rendition, and 2 cores on a laptop reproduced it: 488 against 572. CPU was not the limit (143 % of 200 %). Counting bytes read from the file against bytes served showed why. A muxed response lists the video pieces, then the audio pieces; the audio pieces start back at the beginning of the same region, so the streaming task read that region once for each track, 1.89 times the segment's size, with each track's reads spanning the other's bytes. Read one after another, a muxed request did the work of two.
+
+`interleaved_windows` (`src/http/stream.rs`) now reads such a region once, in windows of at most `stream_chunk_bytes`, sends the video pieces from each window as it arrives, and holds the audio pieces (about a quarter of a segment) until the video is done, so the response bytes are unchanged. It is used only when it reads fewer bytes than the old plan, no piece is larger than a window, and the held-back part is at most four chunks. A muxed segment now reads 0.97 times its size, and 2-core throughput went from 488 to 770–825 MiB/s, faster than separate audio (493–533 MiB/s), which reads 1.33 times for video and 3.34 times for audio.
+
 ### Limits of this comparison
 
 - **One host, loopback.** The client and server share a machine on separate cores. Real deployments have network latency, TLS, and a CDN in front.

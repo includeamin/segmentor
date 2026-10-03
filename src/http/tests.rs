@@ -1363,3 +1363,37 @@ async fn a_track_that_ends_early_lists_only_segments_that_exist() {
         String::from_utf8_lossy(&manifest)
     );
 }
+
+/// Range requests on a muxed segment, whose body is assembled from reads of both tracks, return
+/// exactly the slice of the full body.
+#[tokio::test]
+async fn byte_ranges_of_a_muxed_segment_slice_the_full_body() {
+    use axum::http::header::RANGE;
+
+    let app = muxed_app();
+    let path = versioned("/hls/sample/muxed/segments/0/media.m4s");
+    let full = body(get(&app, &path).await).await;
+    let total = full.len();
+    assert!(total > 4096);
+    for (start, end) in [
+        (0, 99),
+        (100, 4095),
+        (1, total - 2),
+        (total / 3, total / 3 + 7),
+        (total - 100, total - 1),
+    ] {
+        let response = get_with(&app, &path, &[(RANGE, &format!("bytes={start}-{end}"))]).await;
+        assert_eq!(
+            response.status(),
+            StatusCode::PARTIAL_CONTENT,
+            "{start}-{end}"
+        );
+        assert_eq!(
+            body(response).await,
+            full.slice(start..=end),
+            "{start}-{end}"
+        );
+    }
+    let tail = get_with(&app, &path, &[(RANGE, "bytes=-1000")]).await;
+    assert_eq!(body(tail).await, full.slice(total - 1000..));
+}
