@@ -88,11 +88,12 @@ It needs Docker. Everything lives in [`bench/compare/`](https://github.com/inclu
 | Output | HLS with fMP4 segments (nginx-vod-module's default is MPEG-TS, so `vod_hls_container_format fmp4`) and relative URLs |
 | Segmentation | 6-second target, keyframe-aligned (`vod_align_segments_to_key_frames on`), exact durations in playlists (`vod_manifest_segment_durations_mode accurate`) |
 | Caching | Parsed metadata cached; no segment cache. nginx-vod-module is measured twice: with its response cache off (`nginx`), and on (`nginx-cached`, its best case for playlists) |
+| Audio | nginx-vod-module muxes audio into the video segments by default. segmentor is measured twice: with audio as its own rendition (`segmentor`, its default), and muxed (`segmentor-muxed`, `packaging.hls_mux_audio = true`, [TDD 0011](technical-design/0011-muxed-hls-audio.md)) |
 | Compression | Playlists compressed when the client accepts it: nginx-vod-module with `gzip on` for playlist types, as its README recommends; segmentor with brotli or gzip. k6 sends `Accept-Encoding: gzip, deflate, br`, as browsers do |
 | Cold start | Both parse an asset on its first request (segmentor with `registry.preload = false`) |
 | CPU | Server pinned to cores 0-3 with 4 workers (`worker_processes 4`, `TOKIO_WORKER_THREADS=4`); k6 pinned to cores 4-7 |
 
-One difference cannot be configured away. nginx-vod-module muxes audio into the video segments, and segmentor serves audio as its own rendition. A presentation is therefore 615 requests from nginx-vod-module and 1,202 from segmentor, for the same 160 MiB and the same 3,680 seconds. Compare throughput in MiB/s and MiB/s per core, not requests per second. Before each report, `run.sh` checks that both presentations decode with FFmpeg and have the same duration and payload.
+With audio as its own rendition, a presentation is 1,202 requests from segmentor; muxed, it is 601, and 615 from nginx-vod-module (which cuts 14 more segments), all for the same 160 MiB and the same 3,680 seconds. Compare throughput in MiB/s and MiB/s per core, and playlists per viewer, not raw requests per second. Before each report, `run.sh` checks that both presentations decode with FFmpeg and have the same duration and payload.
 
 ### Scenarios
 
@@ -106,28 +107,27 @@ One difference cannot be configured away. nginx-vod-module muxes audio into the 
 
 Recorded 2026-10-03 on an Intel Core i7-8550U (4 cores, 8 threads), 15 GiB RAM, Linux, Docker 29, warm page cache, k6 0.57, CPU governor `powersave`. Servers on 4 cores and k6 on the other 4, except where marked "1 core": servers on 1 core and k6 on 7, so that the server is the limit and not the load generator.
 
-| Measurement | segmentor | nginx-vod-module | nginx-vod-module, response cache | |
-| --- | ---: | ---: | ---: | --- |
-| Segments: throughput | 1,006 MiB/s | 475 MiB/s | 454 MiB/s | segmentor 2.1× |
-| Segments: per fully used core | 329 MiB/s | 162 MiB/s | 158 MiB/s | segmentor 2.0× |
-| Segments: latency p50 / p99 | 7.9 / 22.8 ms | 35.2 / 57.8 ms | 34.7 / 73.5 ms | |
-| Segments: peak memory | 112 MiB | 155 MiB | 141 MiB | |
-| Playlists: requests/s | 22,167 | 493 | 20,421 | k6-bound at 4 cores; see 1 core |
-| Playlists: latency p50 / p99 | 2.1 / 12.0 ms | 128 / 231 ms | 2.3 / 12.4 ms | |
-| Playlists: bytes on the wire | 19.9 MiB/s | 0.6 MiB/s | 24.6 MiB/s | |
-| Playlists, 1 core: requests/s | 16,872 | 187 | 12,589 | segmentor 1.34× |
-| Playlists, 1 core: a viewer's full set per second | 5,624 | 93 | 6,295 | nginx-vod-module 1.12×: 3 requests per set from segmentor, 2 from nginx-vod-module |
-| Cold start: first master playlist | 13.6 ms | 4.5 ms | 4.6 ms | nginx-vod-module 3× faster |
-| Cold start: master, media playlist, and first segment | 15.4 ms | 18.9 ms | 19.7 ms | segmentor 1.2× faster |
-| Errors | 0 | 0 | 0 | |
+| Measurement | segmentor | segmentor, muxed | nginx-vod-module | nginx-vod-module, response cache | Best against best |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Segments: throughput | 1,019 MiB/s | 1,001 MiB/s | 473 MiB/s | 474 MiB/s | segmentor 2.1× |
+| Segments, 1 core: throughput | 444 MiB/s | 447 MiB/s | 197 MiB/s | 192 MiB/s | segmentor 2.3× |
+| Segments: latency p50 / p99 | 7.9 / 21.5 ms | 16.8 / 23.7 ms | 35.1 / 53.7 ms | 35.1 / 53.3 ms | muxed segments are twice the size |
+| Segments: peak memory | 103 MiB | 94 MiB | 136 MiB | 130 MiB | |
+| Playlists: requests/s | 22,910 | 22,986 | 506 | 21,087 | k6-bound at 4 cores; see 1 core |
+| Playlists: bytes on the wire | 20.5 MiB/s | 17.6 MiB/s | 0.6 MiB/s | 25.4 MiB/s | |
+| Playlists, 1 core: requests/s | 17,603 | 17,108 | 174 | 12,988 | segmentor 1.36× |
+| Playlists, 1 core: a viewer's full set per second | 5,868 | 8,554 | 87 | 6,494 | segmentor muxed 1.32× |
+| Cold start: first master playlist | 6.6 ms | 6.7 ms | 4.6 ms | 4.6 ms | nginx-vod-module 1.4× faster |
+| Cold start: master, media playlist, and first segment | 8.5 ms | 8.9 ms | 19.4 ms | 19.7 ms | segmentor 2.3× faster |
+| Errors | 0 | 0 | 0 | 0 | |
 
 Segment throughput varies by about 10 % between runs on this laptop. Under `powersave`, a fresh process starts on cores that are clocked down, so cold-start figures are higher than on a server with the `performance` governor. That affects both servers.
 
 What this shows:
 
 - **Segments, the bulk of origin traffic:** segmentor serves twice the bandwidth on the same cores, at lower latency and with less memory.
-- **Playlists:** segmentor renders a playlist once, on its first request, and stores it with its brotli and gzip forms. nginx-vod-module regenerates playlists per request unless its response cache is on; with exact durations over a 600-segment playlist that costs about 130 ms each. With the cache on, segmentor still serves 1.34 times the requests on one core. A viewer needs one more playlist from segmentor (audio is its own playlist), so per viewer nginx-vod-module is 1.12 times ahead; the muxed audio option on the [roadmap](roadmap.md) closes that. Either way, a CDN in front caches playlists for both.
-- **Cold start:** the first viewer gets a segment sooner from segmentor. nginx-vod-module still answers the master playlist alone sooner, because it defers parsing to the media playlist, while segmentor parses the whole index first. The next section has the detail.
+- **Playlists:** segmentor renders a playlist once, on its first request, and stores it with its brotli and gzip forms. nginx-vod-module regenerates playlists per request unless its response cache is on; with exact durations over a 600-segment playlist that costs about 130 ms each. With the cache on, segmentor still serves 1.36 times the requests on one core. With audio as its own rendition a viewer needs one more playlist from segmentor, so per viewer nginx-vod-module is ahead (6,494 sets a second against 5,868); muxed, segmentor is 1.32 times ahead. Either way, a CDN in front caches playlists for both.
+- **Cold start:** the first viewer gets a segment in less than half the time from segmentor. nginx-vod-module still answers the master playlist alone sooner, because it defers parsing to the media playlist, while segmentor builds the whole index first. The next section has the detail.
 
 ### What it found: a slow first request
 
@@ -141,9 +141,10 @@ The first comparison had the first viewer of the 60-minute asset waiting 245 ms 
 | A flag per sample instead of a hash set for `stss` | ~15 ms | `mp4::tables` |
 | Render the master playlist at load and every other playlist on its first request | ~12.5 ms | `asset::RenderedManifests` |
 | Write each table straight into the one sample list instead of four intermediate arrays | ~12 ms | `mp4::tables::expand_samples` |
-| Expand tracks in parallel, with the hash alongside | | `mp4::parser::parse_tracks` |
+| Expand tracks in parallel, with the hash alongside | ~8.5 ms | `mp4::parser::parse_tracks` |
+| Keep the tables compact instead of a record per sample ([TDD 0010](technical-design/0010-compact-sample-index.md)); give every track its own thread; re-read `moov` for the mutation check while parsing | ~4 ms | `media::SampleIndex`, `mp4::tables::sample_index` |
 
-The last change is measured end to end: a fresh container's first master playlist went from 17.9 to 12.6 ms. The content hash is part of every URL's `?v=` version, so the switch to BLAKE3 changes every asset URL once. The version also covers the format revision, and nothing else about the output changed.
+Measured end to end, a fresh container's first master playlist went from 242 ms to 6.7 ms over these changes, and the index of the 60-minute asset from 8.9 to 4.4 MB. What is left is mostly the fresh process itself: starting threads, faulting in memory, and the CPU ramping up from idle under `powersave`; a load in an already-running process takes about 4 ms. The content hash is part of every URL's `?v=` version, so the switch to BLAKE3 changes every asset URL once. The version also covers the format revision, and nothing else about the output changed.
 
 ### What it found: one read per sample
 

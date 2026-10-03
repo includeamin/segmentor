@@ -129,10 +129,18 @@ pub(crate) fn master_playlist(presentation: Presentation<'_>) -> Result<String> 
     );
     // Audio joins the variant as a rendition group whenever there is something to choose
     // between: video plus audio, or several audio tracks. A lone audio track is just the variant.
-    let audio_group = audio.is_some() && (video.is_some() || audio_tracks.len() > 1);
+    // Muxed (TDD 0011), the default audio is in the variant's own segments: a group is still
+    // needed for any other language, and its default rendition then has no URI of its own.
+    let muxed = presentation.muxed_audio() && video.is_some() && audio.is_some();
+    let audio_group = if muxed {
+        audio_tracks.len() > 1
+    } else {
+        audio.is_some() && (video.is_some() || audio_tracks.len() > 1)
+    };
     if audio_group {
         for (index, track) in audio_tracks.iter().enumerate() {
-            write_audio_rendition(&mut playlist, track, index, version);
+            let own_uri = !(muxed && index == 0);
+            write_audio_rendition(&mut playlist, track, index, version, own_uri);
         }
     }
 
@@ -171,7 +179,14 @@ pub(crate) fn master_playlist(presentation: Presentation<'_>) -> Result<String> 
         codecs.join(",")
     )
     .expect("writing to a String cannot fail");
-    let variant = video.or(audio).map_or(TrackKey::VIDEO, |track| track.key);
+    let variant = if muxed {
+        MUXED.to_owned()
+    } else {
+        video
+            .or(audio)
+            .map_or(TrackKey::VIDEO, |track| track.key)
+            .to_string()
+    };
     writeln!(playlist, "{variant}/index.m3u8?v={version}")
         .expect("writing to a String cannot fail");
     Ok(playlist)
@@ -348,7 +363,7 @@ pub(crate) fn sequence_master_playlist(
                 Some(track) => track,
                 None => first.track(*key)?,
             };
-            write_audio_rendition(&mut playlist, track, index, version);
+            write_audio_rendition(&mut playlist, track, index, version, true);
         }
     }
     let variant = sequence_variant(clips)?;
@@ -592,7 +607,18 @@ fn write_subtitle_rendition(playlist: &mut String, subtitle: &Subtitle, version:
 
 /// One `#EXT-X-MEDIA` line. Renditions are named by position, because the handler names encoders
 /// write (`SoundHandler`) say nothing to a viewer; the language is added when the file has one.
-fn write_audio_rendition(playlist: &mut String, track: &Track, index: usize, version: &str) {
+/// The URL name of the muxed stream: video segments that carry the default audio (TDD 0011).
+pub(crate) const MUXED: &str = "muxed";
+
+/// One `EXT-X-MEDIA` audio line. `own_uri` is false for audio carried in the variant's own
+/// segments, which HLS signals by leaving the URI out.
+fn write_audio_rendition(
+    playlist: &mut String,
+    track: &Track,
+    index: usize,
+    version: &str,
+    own_uri: bool,
+) {
     let number = index + 1;
     let language = track_language(track);
     let name = language.map_or_else(
@@ -602,10 +628,14 @@ fn write_audio_rendition(playlist: &mut String, track: &Track, index: usize, ver
     let language_attribute =
         language.map_or_else(String::new, |language| format!(",LANGUAGE=\"{language}\""));
     let default = if index == 0 { "YES" } else { "NO" };
+    let uri = if own_uri {
+        format!(",URI=\"{}/index.m3u8?v={version}\"", track.key)
+    } else {
+        String::new()
+    };
     writeln!(
         playlist,
-        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"{name}\"{language_attribute},DEFAULT={default},AUTOSELECT=YES,URI=\"{}/index.m3u8?v={version}\"",
-        track.key
+        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"{name}\"{language_attribute},DEFAULT={default},AUTOSELECT=YES{uri}"
     )
     .expect("writing to a String cannot fail");
 }

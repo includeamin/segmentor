@@ -108,6 +108,8 @@ pub(crate) fn build(
                 subtitles: Vec::new(),
                 version: Some(version.clone()),
                 encryption,
+                // A sequence serves its own playlists; clips are never muxed (TDD 0011).
+                hls_mux_audio: false,
             },
         )
         .map_err(named(position))?;

@@ -83,6 +83,7 @@ impl AppState {
             config,
             RegistrySettings {
                 segment_duration_ms: config.segment_duration_ms,
+                hls_mux_audio: config.hls_mux_audio,
                 max_cached_resolutions: config.registry.max_cached_resolutions,
                 negative_ttl,
                 error_ttl,

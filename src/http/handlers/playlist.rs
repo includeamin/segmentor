@@ -16,6 +16,7 @@ use crate::error::Result;
 use crate::http::error::{HttpError, HttpResult};
 use crate::http::state::AppState;
 use crate::http::validators::{entity_tag, not_modified, not_modified_response};
+use crate::protocol::hls::MUXED;
 use crate::protocol::{Encoding, Manifest};
 
 const HLS: &str = "application/vnd.apple.mpegurl";
@@ -39,6 +40,11 @@ pub(crate) async fn media_playlist(
     headers: HeaderMap,
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
+    if track == MUXED {
+        return serve(&headers, asset.version(), "hls-muxed-playlist", HLS, || {
+            asset.hls_muxed_playlist()
+        });
+    }
     let requested = parse_track(&track)?;
     serve(
         &headers,

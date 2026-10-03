@@ -166,6 +166,39 @@ impl ServedAsset {
         }
     }
 
+    /// The muxed HLS stream's playlist (TDD 0011); only a single-file asset can have one.
+    pub(crate) fn hls_muxed_playlist(&self) -> Result<Manifest> {
+        match self {
+            Self::Single(asset) => asset.hls_muxed_playlist(),
+            _ => Err(Error::NotFound("track does not exist")),
+        }
+    }
+
+    pub(crate) fn muxed_init_segment(&self) -> Result<Bytes> {
+        match self {
+            Self::Single(asset) => asset.muxed_init_segment(),
+            _ => Err(Error::NotFound("track does not exist")),
+        }
+    }
+
+    pub(crate) fn prepare_muxed_segment(
+        &self,
+        segment_index: u32,
+    ) -> Result<(Arc<PackagedAsset>, fmp4::PreparedSegment)> {
+        match self {
+            Self::Single(asset) => Ok((
+                Arc::clone(asset),
+                asset.prepare_muxed_segment(segment_index)?,
+            )),
+            _ => Err(Error::NotFound("track does not exist")),
+        }
+    }
+
+    /// Whether HLS serves the muxed stream, for status reporting.
+    pub(crate) fn is_muxed(&self) -> bool {
+        matches!(self, Self::Single(asset) if asset.is_muxed())
+    }
+
     /// See [`Self::prepare_iframe`] on why the underlying asset comes back too.
     pub(crate) fn prepare_media_segment(
         &self,

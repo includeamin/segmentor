@@ -32,6 +32,8 @@ pub(crate) struct Config {
     pub(crate) tls: Option<TlsConfig>,
     pub(crate) cors: CorsConfig,
     pub(crate) segment_duration_ms: u64,
+    /// Carry the default audio track inside HLS video segments (TDD 0011).
+    pub(crate) hls_mux_audio: bool,
     pub(crate) assets: BTreeMap<String, PathBuf>,
     pub(crate) media_root: PathBuf,
     pub(crate) resolver: ResolverSettings,
@@ -57,6 +59,7 @@ impl Config {
             tls: None,
             cors: CorsConfig::default(),
             segment_duration_ms,
+            hls_mux_audio: false,
             assets,
             media_root,
             resolver: ResolverSettings::Static,
@@ -178,6 +181,7 @@ impl Config {
             tls,
             cors: raw.cors,
             segment_duration_ms: raw.packaging.segment_duration_ms,
+            hls_mux_audio: raw.packaging.hls_mux_audio,
             assets,
             media_root,
             resolver,
@@ -273,12 +277,15 @@ struct StorageConfig {
 struct PackagingConfig {
     #[serde(default = "default_segment_duration_ms")]
     segment_duration_ms: u64,
+    #[serde(default)]
+    hls_mux_audio: bool,
 }
 
 impl Default for PackagingConfig {
     fn default() -> Self {
         Self {
             segment_duration_ms: default_segment_duration_ms(),
+            hls_mux_audio: false,
         }
     }
 }
@@ -324,11 +331,35 @@ mod tests {
 
         assert_eq!(config.listen, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(config.segment_duration_ms, 1000);
+        assert!(!config.hls_mux_audio, "muxing is off unless asked for");
         assert_eq!(config.assets.len(), 1);
         assert_eq!(config.logging.level, LogLevel::Info);
         assert_eq!(config.logging.format, LogFormat::Json);
         assert_eq!(config.limits.max_tracks, 8);
         assert!(config.assets["sample"].ends_with("tests/fixtures/h264-aac.mp4"));
+    }
+
+    #[test]
+    fn hls_mux_audio_can_be_turned_on() {
+        let config = Config::parse(
+            r#"
+                [server]
+                listen = "127.0.0.1:8080"
+
+                [storage]
+                media_root = "."
+
+                [packaging]
+                hls_mux_audio = true
+
+                [assets.sample]
+                path = "h264-aac.mp4"
+            "#,
+            &fixture_directory(),
+        )
+        .expect("configuration should be valid");
+
+        assert!(config.hls_mux_audio);
     }
 
     #[test]

@@ -1117,3 +1117,212 @@ async fn a_plain_tcp_client_cannot_talk_to_a_tls_listener() {
         String::from_utf8_lossy(&response)
     );
 }
+
+/// An app serving `sample` (one audio track) and `two-audio`, with `packaging.hls_mux_audio`.
+fn muxed_app() -> Router {
+    let mut config = test_config(LimitsConfig::default(), CorsConfig::default());
+    config.assets.insert(
+        "two-audio".to_owned(),
+        fixture().with_file_name("h264-aac-two-audio.mp4"),
+    );
+    config.hls_mux_audio = true;
+    router(AppState::new(&config).unwrap())
+}
+
+/// The payload of a fragment's `mdat`, and how many `traf` and `trak`/`trex` boxes it holds.
+fn mdat_payload(fragment: &[u8]) -> &[u8] {
+    let moof_len = u32::from_be_bytes(fragment[0..4].try_into().unwrap()) as usize;
+    assert_eq!(&fragment[moof_len + 4..moof_len + 8], b"mdat");
+    &fragment[moof_len + 8..]
+}
+
+fn count(bytes: &[u8], name: [u8; 4]) -> usize {
+    bytes.windows(4).filter(|window| *window == name).count()
+}
+
+#[tokio::test]
+async fn muxed_hls_points_the_variant_at_one_stream_with_both_codecs() {
+    let app = muxed_app();
+    let master = String::from_utf8(
+        body(get(&app, "/hls/sample/master.m3u8").await)
+            .await
+            .to_vec(),
+    )
+    .unwrap();
+    let version = version();
+    assert!(
+        master.contains(&format!("\nmuxed/index.m3u8?v={version}\n")),
+        "{master}"
+    );
+    assert!(
+        !master.contains("TYPE=AUDIO"),
+        "one audio track needs no group: {master}"
+    );
+    assert!(
+        master.contains("CODECS=\"avc1.") && master.contains(",mp4a.40.2\""),
+        "{master}"
+    );
+    // I-frames stay video-only, and the separate renditions still answer.
+    assert!(master.contains("video/iframes.m3u8"), "{master}");
+    let video = body(get(&app, "/hls/sample/video/index.m3u8").await).await;
+    let muxed = body(get(&app, "/hls/sample/muxed/index.m3u8").await).await;
+    assert_eq!(muxed, video, "same segments and durations, relative URIs");
+
+    let two = String::from_utf8(
+        body(get(&app, "/hls/two-audio/master.m3u8").await)
+            .await
+            .to_vec(),
+    )
+    .unwrap();
+    let renditions = two
+        .lines()
+        .filter(|line| line.starts_with("#EXT-X-MEDIA:TYPE=AUDIO"))
+        .collect::<Vec<_>>();
+    assert_eq!(renditions.len(), 2, "{two}");
+    assert!(
+        renditions[0].contains("DEFAULT=YES") && !renditions[0].contains("URI="),
+        "{two}"
+    );
+    assert!(renditions[1].contains("URI=\"audio-2/index.m3u8"), "{two}");
+    assert!(
+        two.contains(",AUDIO=\"audio\"") && two.contains("\nmuxed/index.m3u8"),
+        "{two}"
+    );
+}
+
+#[tokio::test]
+async fn a_muxed_fragment_carries_the_video_then_the_audio_of_the_same_segment() {
+    let app = muxed_app();
+    let init = body(get(&app, &versioned("/hls/sample/muxed/init.mp4")).await).await;
+    assert_eq!((count(&init, *b"trak"), count(&init, *b"trex")), (2, 2));
+
+    let segments = String::from_utf8(
+        body(get(&app, "/hls/sample/muxed/index.m3u8").await)
+            .await
+            .to_vec(),
+    )
+    .unwrap()
+    .matches("#EXTINF")
+    .count();
+    assert!(segments > 1);
+    for index in 0..segments {
+        let path =
+            |track: &str| versioned(&format!("/hls/sample/{track}/segments/{index}/media.m4s"));
+        let muxed = get(&app, &path("muxed")).await;
+        assert_eq!(muxed.status(), StatusCode::OK);
+        assert_eq!(muxed.headers()[CONTENT_TYPE], "video/mp4");
+        let muxed = body(muxed).await;
+        let video = body(get(&app, &path("video")).await).await;
+        let audio = body(get(&app, &path("audio-1")).await).await;
+        assert_eq!(count(&muxed, *b"traf"), 2, "segment {index}");
+        assert_eq!(
+            mdat_payload(&muxed),
+            [mdat_payload(&video), mdat_payload(&audio)].concat(),
+            "segment {index}"
+        );
+        // Each `trun` data offset points at its track's first byte in the `mdat`.
+        let moof_len = u32::from_be_bytes(muxed[0..4].try_into().unwrap()) as usize;
+        let offsets = muxed[..moof_len]
+            .windows(4)
+            .enumerate()
+            .filter(|(_, window)| *window == b"trun")
+            .map(|(at, _)| {
+                // name, then version and flags (4), sample count (4), data offset (4).
+                usize::try_from(i32::from_be_bytes(
+                    muxed[at + 12..at + 16].try_into().unwrap(),
+                ))
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            offsets,
+            [moof_len + 8, moof_len + 8 + mdat_payload(&video).len()],
+            "segment {index}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_muxed_stream_exists_only_for_hls_and_only_when_configured() {
+    let muxed = muxed_app();
+    assert_eq!(
+        get(&muxed, &versioned("/dash/sample/muxed/init.mp4"))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        get(
+            &muxed,
+            &versioned("/dash/sample/muxed/segments/0/media.m4s")
+        )
+        .await
+        .status(),
+        StatusCode::NOT_FOUND
+    );
+    let plain = app();
+    for path in [
+        "/hls/sample/muxed/index.m3u8".to_owned(),
+        versioned("/hls/sample/muxed/init.mp4"),
+        versioned("/hls/sample/muxed/segments/0/media.m4s"),
+    ] {
+        assert_eq!(
+            get(&plain, &path).await.status(),
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
+    let master = body(get(&plain, "/hls/sample/master.m3u8").await).await;
+    assert!(!master.windows(5).any(|window| window == b"muxed"));
+}
+
+#[tokio::test]
+async fn ffmpeg_decodes_the_muxed_presentation_with_both_streams() {
+    if Command::new("ffprobe").arg("-version").output().is_err() {
+        eprintln!("skipping media validation because ffprobe is unavailable");
+        return;
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, muxed_app()).await.unwrap();
+    });
+    let url = format!("http://{address}/hls/sample/muxed/index.m3u8");
+    let (probe, decode) = tokio::task::spawn_blocking(move || {
+        let probe = Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "csv=p=0",
+                &url,
+            ])
+            .output()
+            .unwrap();
+        let decode = Command::new("ffmpeg")
+            .args(["-v", "error", "-i", &url, "-f", "null", "-"])
+            .output()
+            .unwrap();
+        (probe, decode)
+    })
+    .await
+    .unwrap();
+    server.abort();
+    assert!(
+        decode.status.success(),
+        "{}",
+        String::from_utf8_lossy(&decode.stderr)
+    );
+    let mut streams = String::from_utf8(probe.stdout)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    // ffprobe lists each stream once more under the HLS program.
+    streams.sort();
+    streams.dedup();
+    assert_eq!(streams, ["audio", "video"]);
+}

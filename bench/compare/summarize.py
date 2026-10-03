@@ -7,10 +7,10 @@ import statistics
 import sys
 
 out = sys.argv[1]
-servers = [s for s in ("segmentor", "nginx", "nginx-cached")
+servers = [s for s in ("segmentor", "segmentor-muxed", "nginx", "nginx-cached")
            if os.path.exists(f"{out}/{s}-cold.csv")]
-label = {"segmentor": "segmentor", "nginx": "nginx-vod-module",
-         "nginx-cached": "nginx-vod-module, response cache"}
+label = {"segmentor": "segmentor", "segmentor-muxed": "segmentor, muxed audio",
+         "nginx": "nginx-vod-module", "nginx-cached": "nginx-vod-module, response cache"}
 
 
 def k6(server, scenario):

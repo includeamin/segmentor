@@ -88,7 +88,7 @@ Alert on a rising `vod_segment_queue_timeouts_total` or `vod_http_requests_shed_
 
 ## Memory
 
-Each loaded asset keeps its full sample index in memory, about 40 bytes per sample. `limits.max_index_bytes` (default 4 GiB) rejects a catalog whose combined indexes exceed it, and startup fails with the measured size. Size the container's memory limit above that budget plus headroom for in-flight segment reads (`stream_chunk_bytes` times `max_segment_jobs`).
+Each loaded asset keeps its sample index in memory in compact form, about 16 bytes per sample: 4 for the sample's size, and the rest for chunk and timing tables, more when a file has many small chunks ([TDD 0010](technical-design/0010-compact-sample-index.md)). `limits.max_index_bytes` (default 4 GiB) rejects a catalog whose combined indexes exceed it, and startup fails with the measured size. Size the container's memory limit above that budget plus headroom for in-flight segment reads (`stream_chunk_bytes` times `max_segment_jobs`).
 
 ## Content encryption
 
@@ -122,8 +122,9 @@ bearer_token_env = "VOD_MAPPER_TOKEN"
 Behavior worth knowing before you run it:
 
 - **Assets load on first request.** The first viewer of an asset pays the resolve, open, and parse cost (about 15 ms for a one-hour local file; more for a remote object). Later requests are served from memory. Warm popular assets with a request after deployment if that matters.
+- **Audio can ride in the video segments.** With `packaging.hls_mux_audio = true`, a single-file asset with video and audio serves an HLS stream (`muxed/`) whose segments carry the default audio track, as nginx-vod-module does by default: a viewer fetches one media playlist and one segment per interval instead of two. Other audio languages stay alternate renditions. Encrypted assets, adaptive assets, and clip sequences keep separate audio for now, and DASH is unchanged. The `asset_loaded` log line says whether an asset is muxed (`hls.muxed`).
 - **Playlists are compressed.** HLS playlists and the DASH manifest are sent with brotli or gzip when the client's `Accept-Encoding` allows it, with `Vary: Accept-Encoding` and a separate ETag per encoding. Each compressed form is made once, on its first request, and kept with the asset. A one-hour media playlist goes from 34 KB to under 1 KB. A CDN in front must keep `Accept-Encoding` in its cache key (most do by default for `Vary`) or normalize it.
-- **Memory is bounded by bytes.** Loaded assets are kept in a least-recently-used cache limited by `limits.max_index_bytes` (about 40 bytes per sample). An evicted asset reloads transparently.
+- **Memory is bounded by bytes.** Loaded assets are kept in a least-recently-used cache limited by `limits.max_index_bytes` (about 16 bytes per sample). An evicted asset reloads transparently.
 - **Mapper answers are cached** for their TTL (clamped by `min_ttl_ms` and `max_ttl_ms`), revalidated with `If-None-Match`, and a missing asset is remembered for `negative_ttl_ms`.
 - **A mapper outage does not stop playback of known assets.** An expired answer is served for up to `stale_if_error_ms` while the mapper is down. A location with an `expires_at` (a signed URL) is never served past that time. Unknown assets return `503` until the mapper recovers.
 - **An upgrade can change URLs.** The `v` in a media URL hashes everything the index was built from (`moov`, and every `moof` of a fragmented file) together with a format revision that is bumped whenever a build changes the bytes it serves for an unchanged file (init segment layout, timeline mapping, playlist format). A CDN or browser holding immutable objects from the old build therefore never receives different bytes under an old URL: players fetch the playlist again and get new URLs.
