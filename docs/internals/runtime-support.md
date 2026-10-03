@@ -14,7 +14,7 @@ Every section uses `#[serde(deny_unknown_fields)]`, so a misspelled key is an er
 | --- | --- | --- |
 | `[server]` | `ServerConfig` | `listen`, `shutdown_delay_ms` (default 0), `shutdown_grace_ms` (default 30,000, must be greater than zero) |
 | `[storage]` | `StorageConfig` | `media_root`, resolved against the config file's directory if relative |
-| `[packaging]` | `PackagingConfig` | `segment_duration_ms` (default 6000, must be greater than zero) |
+| `[packaging]` | `PackagingConfig` | `segment_duration_ms` (default 6000, must be greater than zero), `hls_mux_audio` (default false; [TDD 0011](../technical-design/0011-muxed-hls-audio.md)) |
 | `[logging]` | `LoggingConfig` | `level`, `format` (`json` or `compact`), `buffer_capacity` |
 | `[limits]` | `LimitsConfig` | Resource limits, all greater than zero (table below) |
 | `[cors]` | `CorsConfig` | See [TDD 0003](../technical-design/0003-production-grade-http-api.md#cors) |

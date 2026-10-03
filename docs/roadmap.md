@@ -92,16 +92,15 @@ Where it stands (2026-10-03, 60-minute asset):
 
 | Measurement | segmentor | nginx-vod-module | Gap |
 | --- | ---: | ---: | --- |
-| First segment from a fresh process | 15.4 ms | 18.9 ms | segmentor 1.2× ahead (was 245 ms against 69 ms) |
-| First master playlist from a fresh process | 13.6 ms | 4.5 ms | nginx-vod-module 3× faster |
-| Playlist requests/s on 1 core, response cache on | 16,872 | 12,589 | segmentor 1.34× ahead (was nginx-vod-module 1.3× ahead) |
-| A viewer's playlists per second on 1 core, response cache on | 5,624 | 6,295 | nginx-vod-module 1.12× faster: one more request per viewer from segmentor |
-| Playlists, response cache off | 22,167 req/s | 493 req/s | segmentor ahead |
-| Segment throughput, 4 cores | 1,006 MiB/s | 475 MiB/s | segmentor 2.1× ahead |
+| First segment from a fresh process | 8.5 ms | 19.4 ms | segmentor 2.3× ahead (was 245 ms against 69 ms) |
+| First master playlist from a fresh process | 6.6 ms | 4.6 ms | nginx-vod-module 1.4× faster, by deferring its parse to the media playlist |
+| Playlist requests/s on 1 core, response cache on | 17,603 | 12,988 | segmentor 1.36× ahead |
+| A viewer's playlists per second on 1 core, response cache on | 8,554 muxed, 5,868 separate | 6,494 | segmentor 1.32× ahead when muxed; behind with audio as its own rendition |
+| Segment throughput, 1 core | 447 MiB/s | 197 MiB/s | segmentor 2.3× ahead |
 
 **How.** Work largest gap first: cold start, then playlists, then segments.
 
-- **Cold start:** do less before the first answer and do the rest faster. Render playlists only when first asked for. Hash less, and with a faster hash. Answer the master playlist before the full index is built. Keep a compact index (raw tables or columns, expanded one segment at a time) instead of a 40-byte record per sample. Keep parsed indexes on disk across restarts.
+- **Cold start:** do less before the first answer and do the rest faster. Render playlists only when first asked for. Hash less, and with a faster hash. Keep a compact index, expanded one segment at a time, instead of a 32-byte record per sample. Keep parsed indexes on disk across restarts.
 - **Playlists:** send fewer bytes and fewer requests. Compress playlists once and keep the compressed forms. Offer audio muxed into the video playlist, so a viewer needs two playlists instead of three.
 - **Segments:** remove what is left of the per-request overhead. Build small fragment headers inline instead of on the blocking pool. Send coalesced reads as vectored writes instead of copying. Evaluate `io_uring`, and offer muxed audio and video as an option.
 - **Measure, don't guess:** a CPU profiler, `make bench-compare` as a recorded regression check, and profile-guided optimization of release builds.
@@ -113,8 +112,8 @@ Where it stands (2026-10-03, 60-minute asset):
 | Cold-start profiling | Done | Hashing dominated: `moov` is hashed once, with BLAKE3, and the mutation check compares bytes. See [benchmarks](benchmarks.md#what-it-found-a-slow-first-request) |
 | Lazy playlist rendering | Done | The master is rendered on load and every other playlist on its first request |
 | Direct sample-table parsing | Done | The tables are read from the `moov` bytes and written straight into the sample list, with tracks expanded in parallel |
-| Header-only master playlist | To do | Answer the first master playlist before the sample tables are expanded, which is where nginx-vod-module is still faster. Needs bandwidth figures that do not depend on the segment plan, or a fast estimate of them |
-| Compact sample index | To do | Lower load time and memory per asset several times over; segments expand only their own samples |
+| Header-only master playlist | Decide first | The compact index made a full load about 4 ms in process; most of the remaining 6.7 ms is fresh-process cost. A two-stage load (master first, index after) would save perhaps 2 ms more, at the cost of a second load path whose bandwidth figures must match the full one |
+| Compact sample index | Done | [TDD 0010](technical-design/0010-compact-sample-index.md). Load 8.5 to 4 ms in process, index 8.9 to 4.4 MB on the 60-minute asset, output byte-identical |
 | Persistent index cache | To do | Indexes on disk keyed by the `moov` hash, so restarts and deploys are not cold |
 | Version in the path, short segment URIs | Dropped | Compression made it moot: the repeated `?v=` compresses to almost nothing, and it would change public URLs |
 | Compressed playlists | Done | brotli or gzip by `Accept-Encoding`, each made once on first request: 34 KB to 857 bytes for a one-hour media playlist |
@@ -122,7 +121,7 @@ Where it stands (2026-10-03, 60-minute asset):
 | Inline fragment headers | To do | Below a sample-count threshold, skip the blocking-pool hop |
 | Vectored writes for coalesced reads | To do | No copy into a joined buffer |
 | `io_uring` for local reads | Evaluate | Keep only if the comparison shows a gain |
-| Muxed audio and video option | To do | Half the segment requests and one fewer playlist per viewer, as nginx-vod-module serves by default. The remaining playlist gap per viewer |
+| Muxed audio and video option | Done for clear single-file assets | `packaging.hls_mux_audio`, [TDD 0011](technical-design/0011-muxed-hls-audio.md): half the segment requests and one fewer playlist per viewer. Encrypted, adaptive, and sequence assets still serve audio separately |
 | Profile-guided optimization | To do | Release builds trained on the benchmark workload |
 | Comparison under remote sources, encryption, and many assets | To do | The places where the two read and cache most differently |
 

@@ -24,6 +24,8 @@
   - [Viewer authorization](technical-design/0007-viewer-authorization.md)
   - [Clipping and concatenation](technical-design/0008-clipping-and-concatenation.md)
   - [Common encryption and DRM](technical-design/0009-common-encryption-and-drm.md)
+  - [Compact sample index](technical-design/0010-compact-sample-index.md)
+  - [Muxed audio and video for HLS](technical-design/0011-muxed-hls-audio.md)
   - [Technical design template](technical-design/template.md)
 
 # Implementation

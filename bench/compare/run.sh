@@ -3,7 +3,7 @@
 #
 #   ./run.sh                      # both servers, default settings
 #   VUS=256 DURATION=60s ./run.sh
-#   SERVERS=segmentor ./run.sh    # just one (segmentor, nginx, nginx-cached)
+#   SERVERS=segmentor ./run.sh    # just one (segmentor, segmentor-muxed, nginx, nginx-cached)
 #
 # For each server, one at a time on the same pinned cores:
 #   1. cold start: restart, then time the first master playlist, media playlist, and segment
@@ -15,7 +15,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SERVERS=${SERVERS:-"segmentor nginx nginx-cached"}
+SERVERS=${SERVERS:-"segmentor segmentor-muxed nginx nginx-cached"}
 VUS=${VUS:-64}
 DURATION=${DURATION:-30s}
 COLD_REPS=${COLD_REPS:-5}
@@ -38,9 +38,10 @@ echo "building images..."
 docker compose build segmentor nginx >"$out/build.log" 2>&1
 
 # nginx-cached is the same nginx-vod-module image with its response cache on.
-declare -A port=([segmentor]=18080 [nginx]=18081 [nginx-cached]=18082)
-declare -A internal=([segmentor]=http://segmentor:3000 [nginx]=http://nginx:80 [nginx-cached]=http://nginx-cached:80)
-declare -A master=([segmentor]=/hls/long/master.m3u8 [nginx]=/hls/long.mp4/master.m3u8 [nginx-cached]=/hls/long.mp4/master.m3u8)
+# segmentor-muxed is the segmentor image with packaging.hls_mux_audio on.
+declare -A port=([segmentor]=18080 [segmentor-muxed]=18083 [nginx]=18081 [nginx-cached]=18082)
+declare -A internal=([segmentor]=http://segmentor:3000 [segmentor-muxed]=http://segmentor-muxed:3000 [nginx]=http://nginx:80 [nginx-cached]=http://nginx-cached:80)
+declare -A master=([segmentor]=/hls/long/master.m3u8 [segmentor-muxed]=/hls/long/master.m3u8 [nginx]=/hls/long.mp4/master.m3u8 [nginx-cached]=/hls/long.mp4/master.m3u8)
 
 wait_healthy() {
   for _ in $(seq 1 100); do

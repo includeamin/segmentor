@@ -23,6 +23,7 @@ pub(crate) struct Presentation<'a> {
     version: &'a str,
     subtitles: &'a [Subtitle],
     encryption: Option<&'a crate::cenc::Encryption>,
+    muxed: bool,
 }
 
 impl<'a> Presentation<'a> {
@@ -33,7 +34,18 @@ impl<'a> Presentation<'a> {
             version,
             subtitles: &[],
             encryption: None,
+            muxed: false,
         }
+    }
+
+    /// The same view, with HLS video segments carrying the default audio track (TDD 0011).
+    pub(crate) const fn with_muxed_audio(self, muxed: bool) -> Self {
+        Self { muxed, ..self }
+    }
+
+    /// Whether HLS video segments carry the default (first) audio track.
+    pub(crate) const fn muxed_audio(&self) -> bool {
+        self.muxed
     }
 
     /// The same view, encrypted with `encryption` (TDD 0009).

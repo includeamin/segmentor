@@ -1,0 +1,30 @@
+# segmentor-muxed: segmentor.toml with HLS audio carried in the video segments, which is how
+# nginx-vod-module serves by default (TDD 0011). Otherwise the same work: local files,
+# 6-second keyframe-aligned segments, fMP4 HLS. Assets load on first request (preload off), as
+# nginx-vod-module parses on first request, so the cold-start scenario measures the same thing.
+[server]
+listen = "0.0.0.0:3000"
+
+[storage]
+media_root = "/srv/vod"
+
+[packaging]
+segment_duration_ms = 6000
+hls_mux_audio = true
+
+[logging]
+level = "warn"
+format = "json"
+
+[limits]
+max_connections = 60000
+max_concurrent_requests = 60000
+
+[registry]
+preload = false
+
+[cors]
+enabled = false
+
+[assets.long]
+path = "long.mp4"

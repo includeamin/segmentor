@@ -85,6 +85,8 @@ pub(crate) struct CacheStatus {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RegistrySettings {
     pub(crate) segment_duration_ms: u64,
+    /// `packaging.hls_mux_audio`: applies to single-file assets only (TDD 0011).
+    pub(crate) hls_mux_audio: bool,
     pub(crate) max_cached_resolutions: usize,
     pub(crate) negative_ttl: Duration,
     pub(crate) error_ttl: Duration,
@@ -360,6 +362,7 @@ impl AssetRegistry {
                 media.segments = asset.segment_count(),
                 media.clips = asset.clip_count(),
                 media.encrypted = asset.key_ids().is_some(),
+                hls.muxed = asset.is_muxed(),
                 index.bytes = asset.index_bytes(),
                 elapsed_ms = started.elapsed().as_millis(),
             );
@@ -724,6 +727,7 @@ impl AssetRegistry {
                     media.segments = asset.segment_count(),
                     media.clips = asset.clip_count(),
                     media.encrypted = asset.key_ids().is_some(),
+                    hls.muxed = asset.is_muxed(),
                     index.bytes = asset.index_bytes(),
                     elapsed_ms = started.elapsed().as_millis(),
                 );
@@ -769,6 +773,7 @@ impl AssetRegistry {
                 subtitles,
                 version: None,
                 encryption: resolved.encryption.clone(),
+                hls_mux_audio: self.settings.hls_mux_audio,
             },
             self.settings.segment_duration_ms,
             &self.limits,
