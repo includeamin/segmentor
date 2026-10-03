@@ -184,6 +184,23 @@ impl<'a> Reader<'a> {
         }
         Ok(count)
     }
+
+    /// An entry count, then the bytes of that many entries of `entry_size` bytes each.
+    pub(crate) fn entries(&mut self, entry_size: usize) -> Result<&'a [u8]> {
+        let count = self.entry_count(entry_size)?;
+        self.take(count * entry_size)
+    }
+}
+
+/// Big-endian `u32`s, one per four bytes. Decoding a whole table this way sizes the vector once
+/// and lets the loop vectorize, where reading entry by entry through a [`Reader`] checks bounds
+/// on every read and grows the vector as it goes.
+pub(crate) fn be_u32s(bytes: &[u8]) -> impl ExactSizeIterator<Item = u32> + '_ {
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_be_bytes(*chunk))
 }
 
 #[cfg(test)]

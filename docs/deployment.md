@@ -60,7 +60,7 @@ Its `stop_grace_period` is longer than the configuration's `shutdown_delay_ms` p
 
 - **Media.** It mounts a PersistentVolumeClaim named `segmentor-media`, which you create. Or remove the volume and the `[assets.*]` table and resolve assets through a [mapper](mapper-api.md), which is the usual choice at scale.
 - **Probes.** `/health` is liveness. `/ready` is readiness and also the startup probe, and it turns `503` when shutdown begins, which is what takes a terminating pod out of the Service before its connections close. `terminationGracePeriodSeconds` is longer than the configured drain time.
-- **Memory.** The memory limit must exceed `limits.max_index_bytes` (512 MiB in the example) plus headroom for segments being streamed. The sample index costs about 40 bytes per sample.
+- **Memory.** The memory limit must exceed `limits.max_index_bytes` (512 MiB in the example) plus headroom for segments being streamed. The sample index costs about 16 bytes per sample ([TDD 0010](technical-design/0010-compact-sample-index.md)).
 - **Ingress.** Put an Ingress or CDN with TLS in front of the Service.
 
 ## Release binary and systemd

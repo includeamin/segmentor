@@ -5,7 +5,7 @@ use bytes::Bytes;
 
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
-use crate::media::{MediaIndex, Sample, Track, TrackKey};
+use crate::media::{MediaIndex, Track, TrackKey};
 use crate::mp4::ParsedMedia;
 use crate::protocol::{Manifest, Presentation, dash, hls};
 use crate::segment::{SegmentPlan, TrackSegment};
@@ -201,7 +201,9 @@ impl PackagedAsset {
             prepared.encryption = Some(Box::new(crate::cenc::PendingEncryption {
                 track_id: track.id,
                 kind: track.kind,
-                samples: track.samples[segment.first_sample..segment.end_sample].to_vec(),
+                samples: track
+                    .samples
+                    .to_vec(segment.first_sample..segment.end_sample),
                 decode_time: segment.decode_time,
                 sequence_number,
                 protection: Arc::clone(protection),
@@ -248,15 +250,11 @@ impl PackagedAsset {
             .ok_or(Error::NotFound("asset has no video track"))?;
         let position = track
             .samples
-            .iter()
-            .enumerate()
-            .filter(|(_, sample)| sample.is_sync)
-            .nth(usize::try_from(frame_index).map_err(|_| {
+            .nth_sync(usize::try_from(frame_index).map_err(|_| {
                 Error::InvalidMedia("keyframe index does not fit in memory".to_owned())
             })?)
-            .map(|(position, _)| position)
             .ok_or(Error::NotFound("keyframe does not exist"))?;
-        let sample = track.samples[position];
+        let sample = track.samples.get(position);
         let segment = TrackSegment {
             track_id: track.id,
             first_sample: position,
@@ -401,11 +399,11 @@ impl PackagedAsset {
             .index
             .tracks
             .iter()
-            .map(|track| track.samples.len())
+            .map(|track| track.samples.table_bytes())
             .sum::<usize>();
         let init = self.init_segments.values().map(Bytes::len).sum::<usize>();
         let rendered = self.rendered.len();
-        (samples.saturating_mul(size_of::<Sample>()) as u64)
+        (samples as u64)
             .saturating_add(init as u64)
             .saturating_add(rendered as u64)
             .saturating_add(

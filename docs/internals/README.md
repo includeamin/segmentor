@@ -93,7 +93,8 @@ Everything downstream of parsing works on three immutable values, built once per
 | Type | Defined in | Meaning |
 | --- | --- | --- |
 | `MediaIndex` | `media/index.rs` | Source identity, movie timescale and duration, and a `Track` per audio or video track |
-| `Track` | `media/index.rs` | Track ID, kind, timescale, codec configuration, and a `Vec<Sample>` |
+| `Track` | `media/index.rs` | Track ID, kind, timescale, codec configuration, and a `SampleIndex` |
+| `SampleIndex` | `media/samples.rs` | A track's samples as compact tables, a window over them, and a decode-time shift ([TDD 0010](../technical-design/0010-compact-sample-index.md)) |
 | `Sample` | `media/index.rs` | One encoded frame or audio packet: byte `offset` and `size` in the source, `decode_time`, `duration`, `composition_offset`, and `is_sync` |
 | `SegmentPlan` | `segment/planner.rs` | A list of `Segment`s, each holding one `TrackSegment` per track: a half-open sample range plus decode time and duration |
 | `PackagedAsset` | `asset.rs` | Source, index, plan, cached init segments, version, and pre-rendered playlists |
