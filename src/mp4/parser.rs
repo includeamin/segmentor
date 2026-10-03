@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-use sha2::{Digest, Sha256};
-
 use super::boxes::{
     RawBox, Reader, child_boxes, fourcc, invalid_media, optional_child, required_child,
 };
@@ -41,14 +39,12 @@ pub(crate) async fn parse(source: &MediaSourceKind, limits: &LimitsConfig) -> Re
     .await
     .map_err(|error| Error::Io(std::io::Error::other(error)))??;
 
-    // Mutation check: the object must be unchanged, and `moov` must hash the same when re-read.
+    // Mutation check: the object must be unchanged, and `moov` must read back the same. The bytes
+    // parsed are still in memory, so they are compared directly rather than hashed again: the
+    // same answer in a fraction of a millisecond instead of a second full SHA-256 pass.
     source.verify_unchanged().await?;
     let current = source.read_range(metadata.moov_range()).await?;
-    let expected = index
-        .source
-        .moov_sha256
-        .expect("parse_metadata always records the moov hash");
-    if Sha256::digest(&current)[..] != expected[..] {
+    if current[..] != metadata.moov_bytes()[..] {
         return Err(invalid_media("moov changed while it was being parsed"));
     }
     Ok(ParsedMedia { index, metadata })
@@ -62,15 +58,22 @@ fn parse_metadata(
 ) -> Result<MediaIndex> {
     let moov_bytes = metadata.moov_bytes();
     let moov = validate_raw_moov(moov_bytes)?;
-    let moov_sha256: [u8; 32] = Sha256::digest(moov_bytes).into();
     // Everything the index is built from. With no fragments this is the hash of `moov` alone.
-    let mut metadata_hash = Sha256::new();
-    metadata_hash.update(moov_bytes);
-    for fragment in metadata.fragments() {
-        metadata_hash.update(fragment.offset.to_be_bytes());
-        metadata_hash.update(&fragment.bytes);
-    }
-    let metadata_sha256: [u8; 32] = metadata_hash.finalize().into();
+    // `moov` is hashed once, BLAKE3: the `moov` hash is a copy of the hasher's state before any
+    // fragment is added. A long file's `moov` is megabytes, so this is on the first viewer's
+    // critical path; BLAKE3 hashes it in about a millisecond where SHA-256 took 15 to 18 ms on
+    // a CPU without SHA instructions (docs/benchmarks.md, "Cold start").
+    let hash = || {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(moov_bytes);
+        let moov_hash: [u8; 32] = *hasher.clone().finalize().as_bytes();
+        for fragment in metadata.fragments() {
+            hasher.update(&fragment.offset.to_be_bytes());
+            hasher.update(&fragment.bytes);
+        }
+        let metadata_hash: [u8; 32] = *hasher.finalize().as_bytes();
+        (moov_hash, metadata_hash)
+    };
     if moov.tracks.len() > limits.max_tracks {
         return Err(Error::Unsupported(format!(
             "track count {} exceeds configured limit {}",
@@ -93,9 +96,8 @@ fn parse_metadata(
         return Err(invalid_media("moof boxes without an mvex box in moov"));
     };
 
-    let mut tracks = Vec::new();
-    let mut edits = Vec::new();
     let mut skipped_tracks = Vec::new();
+    let mut kept = Vec::new();
     for raw in &moov.tracks {
         if let Disposition::Skip(reason) = raw.disposition {
             skipped_tracks.push(SkippedTrack {
@@ -104,11 +106,23 @@ fn parse_metadata(
                 reason,
             });
         } else {
-            let (track, edit) =
-                parse_track(raw, moov.movie_timescale, metadata.len(), limits, &source)?;
-            tracks.push(track);
-            edits.push(edit);
+            kept.push(raw);
         }
+    }
+    let (parsed, (moov_hash, metadata_hash)) = parse_tracks(
+        &kept,
+        moov.movie_timescale,
+        metadata.len(),
+        limits,
+        &source,
+        hash,
+    );
+    let mut tracks = Vec::with_capacity(parsed.len());
+    let mut edits = Vec::with_capacity(parsed.len());
+    for result in parsed {
+        let (track, edit) = result?;
+        tracks.push(track);
+        edits.push(edit);
     }
 
     let timescales = edits
@@ -125,8 +139,8 @@ fn parse_metadata(
         normalise_fragmented_timeline(&mut tracks)?;
     }
     assign_keys(&mut tracks);
-    identity.moov_sha256 = Some(moov_sha256);
-    identity.metadata_sha256 = Some(metadata_sha256);
+    identity.moov_hash = Some(moov_hash);
+    identity.metadata_hash = Some(metadata_hash);
 
     let duration = if moov.movie_duration == 0 {
         movie_duration(&tracks, moov.movie_timescale)
@@ -145,6 +159,43 @@ fn parse_metadata(
             discovery: metadata.discovery(),
             dropped_tail: metadata.dropped_tail(),
         }),
+    })
+}
+
+/// Expands every kept track, in parallel, while `hash` runs on this thread.
+///
+/// A long file's tracks each have tens or hundreds of thousands of samples, and this is the
+/// first viewer's wait. The first track and the hash stay on this thread; each further track
+/// gets a scoped thread, so there is at most one thread per track and none for a single-track
+/// file. Results are returned in file order, so the first error is the one a sequential parse
+/// would report.
+fn parse_tracks<H: Send>(
+    kept: &[&RawTrack<'_>],
+    movie_timescale: u32,
+    source_len: u64,
+    limits: &LimitsConfig,
+    source: &TrackSource<'_>,
+    hash: impl FnOnce() -> H,
+) -> (Vec<Result<(Track, TrackEdit)>>, H) {
+    let parse_one =
+        |raw: &&RawTrack<'_>| parse_track(raw, movie_timescale, source_len, limits, source);
+    std::thread::scope(|scope| {
+        let rest = kept
+            .iter()
+            .skip(1)
+            .map(|raw| scope.spawn(move || parse_one(raw)))
+            .collect::<Vec<_>>();
+        let first = kept.first().map(parse_one);
+        let hashes = hash();
+        let parsed = first
+            .into_iter()
+            .chain(rest.into_iter().map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            }))
+            .collect::<Vec<_>>();
+        (parsed, hashes)
     })
 }
 

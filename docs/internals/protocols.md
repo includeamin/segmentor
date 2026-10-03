@@ -13,7 +13,7 @@ A `PackagedAsset` is everything the server knows about one media file, built onc
 | `plan` | The `SegmentPlan` from `segment::plan` |
 | `init_segments` | One cached init segment (`Bytes`) per `TrackKind` |
 | `limits` | A copy of the limits, needed when preparing segments |
-| `version` | First 8 bytes of the `moov` SHA-256, as 16 hex characters |
+| `version` | First 8 bytes of a SHA-256 over the BLAKE3 metadata hash, the format revision, subtitles, and encryption, as 16 hex characters |
 | `rendered` | Pre-rendered HLS master, HLS media playlists per track, and the DASH manifest |
 
 `load` first awaits `mp4::parse` (async metadata fetch), then runs the CPU-bound rest, `assemble`, on the blocking pool: plan, build init segments from the parse's metadata, compute `version`, then render. Rendering takes a `Presentation` built from the index, plan, and version, not the asset, so the asset is constructed once with its rendered text already in place.

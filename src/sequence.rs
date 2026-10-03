@@ -18,7 +18,7 @@ use crate::error::{Error, Result};
 use crate::fmp4::PreparedSegment;
 use crate::media::{CodecConfig, MediaIndex, TrackKey};
 use crate::mp4::ParsedMedia;
-use crate::protocol::{SequenceClip, dash, hls};
+use crate::protocol::{Manifest, SequenceClip, dash, hls};
 use crate::source::MediaSourceKind;
 
 /// One file the clips cut from, opened and parsed once however many clips use it.
@@ -39,9 +39,9 @@ pub(crate) struct SequenceAsset {
 
 #[derive(Debug)]
 struct SequenceManifests {
-    hls_master: Bytes,
-    hls_media: HashMap<TrackKey, Bytes>,
-    dash: Bytes,
+    hls_master: Manifest,
+    hls_media: HashMap<TrackKey, Manifest>,
+    dash: Manifest,
 }
 
 /// Trims every clip from its already parsed file, in order, each starting where the one before
@@ -233,13 +233,13 @@ fn render(
         .iter()
         .map(|track| {
             hls::sequence_media_playlist(&views, track.key, version)
-                .map(|playlist| (track.key, Bytes::from(playlist)))
+                .map(|playlist| (track.key, Manifest::from(playlist)))
         })
         .collect::<Result<HashMap<_, _>>>()?;
     Ok(SequenceManifests {
-        hls_master: Bytes::from(hls::sequence_master_playlist(&views, version)?),
+        hls_master: Manifest::from(hls::sequence_master_playlist(&views, version)?),
         hls_media,
-        dash: Bytes::from(dash::sequence_manifest(&views, total.nanos(), version)?),
+        dash: Manifest::from(dash::sequence_manifest(&views, total.nanos(), version)?),
     })
 }
 
@@ -264,15 +264,15 @@ impl SequenceAsset {
         &self.version
     }
 
-    pub(crate) fn hls_master(&self) -> Bytes {
+    pub(crate) fn hls_master(&self) -> Manifest {
         self.rendered.hls_master.clone()
     }
 
-    pub(crate) fn dash(&self) -> Bytes {
+    pub(crate) fn dash(&self) -> Manifest {
         self.rendered.dash.clone()
     }
 
-    pub(crate) fn media_playlist(&self, key: TrackKey) -> Result<Bytes> {
+    pub(crate) fn media_playlist(&self, key: TrackKey) -> Result<Manifest> {
         self.rendered
             .hls_media
             .get(&key)
@@ -326,7 +326,7 @@ impl SequenceAsset {
                 .rendered
                 .hls_media
                 .values()
-                .map(Bytes::len)
+                .map(Manifest::len)
                 .sum::<usize>();
         clips.saturating_add(rendered as u64)
     }
@@ -534,7 +534,7 @@ mod tests {
             media.contains(&format!("clips/1/init.mp4?v={}", asset.version())),
             "{media}"
         );
-        let manifest = String::from_utf8(asset.dash_manifest().to_vec()).unwrap();
+        let manifest = String::from_utf8(asset.dash_manifest().unwrap().to_vec()).unwrap();
         assert_eq!(manifest.matches("<Period ").count(), 2, "{manifest}");
     }
 }

@@ -40,6 +40,9 @@ tower-http = { version = "0.7", features = ["cors", "timeout", "trace"] }
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+blake3 = "1.8.7"
+flate2 = "1.1.10"
+brotli = "9.0.0"
 
 [dev-dependencies]
 # Cross-checks the in-tree parser against an independent implementation in tests.

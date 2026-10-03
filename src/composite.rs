@@ -16,7 +16,7 @@ use crate::asset::PackagedAsset;
 use crate::error::{Error, Result};
 use crate::fmp4;
 use crate::media::{Track, TrackKey, TrackKind};
-use crate::protocol::{AdaptiveAudio, AdaptiveVideo, Bandwidth, Presentation, dash, hls};
+use crate::protocol::{AdaptiveAudio, AdaptiveVideo, Bandwidth, Manifest, Presentation, dash, hls};
 use crate::resolver::LocationKey;
 use crate::sequence::SequenceAsset;
 use crate::subtitle::Subtitle;
@@ -51,7 +51,7 @@ impl ServedAsset {
         }
     }
 
-    pub(crate) fn hls_master_playlist(&self) -> Bytes {
+    pub(crate) fn hls_master_playlist(&self) -> Manifest {
         match self {
             Self::Single(asset) => asset.hls_master_playlist(),
             Self::Composite(asset) => asset.rendered.hls_master.clone(),
@@ -59,15 +59,15 @@ impl ServedAsset {
         }
     }
 
-    pub(crate) fn dash_manifest(&self) -> Bytes {
+    pub(crate) fn dash_manifest(&self) -> Result<Manifest> {
         match self {
             Self::Single(asset) => asset.dash_manifest(),
-            Self::Composite(asset) => asset.rendered.dash.clone(),
-            Self::Sequence(asset) => asset.dash(),
+            Self::Composite(asset) => Ok(asset.rendered.dash.clone()),
+            Self::Sequence(asset) => Ok(asset.dash()),
         }
     }
 
-    pub(crate) fn hls_iframe_playlist(&self) -> Result<Bytes> {
+    pub(crate) fn hls_iframe_playlist(&self) -> Result<Manifest> {
         match self {
             Self::Single(asset) => asset.hls_iframe_playlist(),
             Self::Composite(asset) => asset
@@ -96,7 +96,7 @@ impl ServedAsset {
         }
     }
 
-    pub(crate) fn hls_subtitle_playlist(&self, language: &str) -> Result<Bytes> {
+    pub(crate) fn hls_subtitle_playlist(&self, language: &str) -> Result<Manifest> {
         match self {
             Self::Single(asset) => asset.hls_subtitle_playlist(language),
             Self::Composite(asset) => {
@@ -148,7 +148,7 @@ impl ServedAsset {
         &self,
         rendition: Option<&str>,
         key: TrackKey,
-    ) -> Result<Bytes> {
+    ) -> Result<Manifest> {
         match self {
             Self::Single(asset) => {
                 if rendition.is_some() {
@@ -256,7 +256,7 @@ impl ServedAsset {
                 let rendered = asset.rendered.hls_master.len()
                     + asset.rendered.dash.len()
                     + asset.rendered.hls_subtitle.len()
-                    + asset.rendered.hls_iframes.as_ref().map_or(0, Bytes::len);
+                    + asset.rendered.hls_iframes.as_ref().map_or(0, Manifest::len);
                 renditions
                     .saturating_add(rendered as u64)
                     .saturating_add(asset.subtitles.iter().map(|s| s.data.len() as u64).sum())
@@ -358,15 +358,15 @@ struct AudioEntry {
 
 #[derive(Debug, Default)]
 struct CompositeManifests {
-    hls_master: Bytes,
+    hls_master: Manifest,
     /// Rendition id -> that video's own HLS media playlist, re-rendered under the composite's
     /// version (see `assemble`: the underlying init and media segments need no such rewrite).
-    hls_video: HashMap<String, Bytes>,
+    hls_video: HashMap<String, Manifest>,
     /// External `audio-{n}` (index `n - 1`) -> its playlist, likewise re-rendered.
-    hls_audio: Vec<Bytes>,
-    hls_iframes: Option<Bytes>,
-    hls_subtitle: Bytes,
-    dash: Bytes,
+    hls_audio: Vec<Manifest>,
+    hls_iframes: Option<Manifest>,
+    hls_subtitle: Manifest,
+    dash: Manifest,
 }
 
 #[derive(Debug)]
@@ -424,7 +424,7 @@ impl CompositeAsset {
         }
     }
 
-    fn media_playlist(&self, rendition: Option<&str>, key: TrackKey) -> Result<Bytes> {
+    fn media_playlist(&self, rendition: Option<&str>, key: TrackKey) -> Result<Manifest> {
         match key.kind {
             TrackKind::Video => {
                 let id = rendition.ok_or(Error::NotFound("track does not exist"))?;
@@ -846,9 +846,9 @@ fn render(
         .video()
         .and_then(|track| hls::iframe_stream(iframe_presentation, Some(track)).transpose())
         .transpose()?;
-    let hls_iframes = hls::iframe_playlist(iframe_presentation)?.map(Bytes::from);
+    let hls_iframes = hls::iframe_playlist(iframe_presentation)?.map(Manifest::from);
 
-    let hls_master = Bytes::from(hls::adaptive_master_playlist(
+    let hls_master = Manifest::from(hls::adaptive_master_playlist(
         version,
         &adaptive_video,
         &adaptive_audio,
@@ -862,7 +862,7 @@ fn render(
         .map(|entry| {
             let playlist =
                 hls::media_playlist(presentation_for(&entry.asset, version), TrackKey::VIDEO)?;
-            Ok((entry.id.clone(), Bytes::from(playlist)))
+            Ok((entry.id.clone(), Manifest::from(playlist)))
         })
         .collect::<Result<HashMap<_, _>>>()?;
     let hls_audio = audio
@@ -872,11 +872,11 @@ fn render(
                 presentation_for(asset_for(video, audio_only, entry.owner), version),
                 entry.internal_key,
             )?;
-            Ok(Bytes::from(playlist))
+            Ok(Manifest::from(playlist))
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let hls_subtitle = Bytes::from(hls::subtitle_playlist(iframe_presentation));
+    let hls_subtitle = Manifest::from(hls::subtitle_playlist(iframe_presentation));
 
     let dash_body = render_dash_body(
         &video_views,
@@ -888,7 +888,7 @@ fn render(
         version,
     )?;
     let duration = dash::track_duration(video_views[0].2)?;
-    let dash = Bytes::from(dash::wrap_manifest(
+    let dash = Manifest::from(dash::wrap_manifest(
         &duration,
         &dash_body,
         encryption.is_some(),
