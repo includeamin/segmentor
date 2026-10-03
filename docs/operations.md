@@ -121,7 +121,8 @@ bearer_token_env = "VOD_MAPPER_TOKEN"
 
 Behavior worth knowing before you run it:
 
-- **Assets load on first request.** The first viewer of an asset pays the resolve, open, and parse cost (about 100 ms for a one-hour file; more for a remote object). Later requests are served from memory. Warm popular assets with a request after deployment if that matters.
+- **Assets load on first request.** The first viewer of an asset pays the resolve, open, and parse cost (about 15 ms for a one-hour local file; more for a remote object). Later requests are served from memory. Warm popular assets with a request after deployment if that matters.
+- **Playlists are compressed.** HLS playlists and the DASH manifest are sent with brotli or gzip when the client's `Accept-Encoding` allows it, with `Vary: Accept-Encoding` and a separate ETag per encoding. Each compressed form is made once, on its first request, and kept with the asset. A one-hour media playlist goes from 34 KB to under 1 KB. A CDN in front must keep `Accept-Encoding` in its cache key (most do by default for `Vary`) or normalize it.
 - **Memory is bounded by bytes.** Loaded assets are kept in a least-recently-used cache limited by `limits.max_index_bytes` (about 40 bytes per sample). An evicted asset reloads transparently.
 - **Mapper answers are cached** for their TTL (clamped by `min_ttl_ms` and `max_ttl_ms`), revalidated with `If-None-Match`, and a missing asset is remembered for `negative_ttl_ms`.
 - **A mapper outage does not stop playback of known assets.** An expired answer is served for up to `stale_if_error_ms` while the mapper is down. A location with an `expires_at` (a signed URL) is never served past that time. Unknown assets return `503` until the mapper recovers.

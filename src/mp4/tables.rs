@@ -4,8 +4,6 @@
 //! is checked against the box that holds it before anything is allocated, and expansion is
 //! checked against the configured sample limit before it begins.
 
-use std::collections::HashSet;
-
 use super::boxes::{Reader, invalid_media, optional_child, required_child};
 use crate::config::LimitsConfig;
 use crate::error::Result;
@@ -215,57 +213,54 @@ pub(super) fn expand_samples(
     if sample_count > limits.max_samples_per_track {
         return Err(invalid_media("sample count exceeds configured limit"));
     }
-    let sizes = sample_sizes(&tables.sizes, sample_count);
-    let byte_offsets = sample_offsets(tables, &sizes, sample_count)?;
-    let times = sample_times(&tables.time_to_sample, sample_count)?;
-    let composition_offsets = composition_offsets(tables.composition.as_deref(), sample_count)?;
-    let sync_samples = tables
-        .sync
-        .as_ref()
-        .map(|entries| entries.iter().copied().collect::<HashSet<_>>());
-
-    let mut samples = Vec::with_capacity(sample_count);
-    for index in 0..sample_count {
-        let sample_number = u32::try_from(index)
-            .ok()
-            .and_then(|number| number.checked_add(1))
-            .ok_or_else(|| invalid_media("sample number overflow"))?;
-        let offset = byte_offsets[index];
-        let size = sizes[index];
-        let end = offset
-            .checked_add(u64::from(size))
+    // Each table is applied in its own pass over the one output vector, rather than expanded
+    // into an array of its own and zipped at the end. A long file has hundreds of thousands of
+    // samples, so the intermediate arrays were megabytes of memory touched and copied on the
+    // first viewer's critical path. The checks, and the order they fail in, are unchanged.
+    let mut samples = sample_positions(tables, sample_count)?;
+    apply_times(&mut samples, &tables.time_to_sample)?;
+    if let Some(runs) = tables.composition.as_deref() {
+        apply_composition(&mut samples, runs)?;
+    }
+    if let Some(entries) = tables.sync.as_deref() {
+        for sample in &mut samples {
+            sample.is_sync = false;
+        }
+        // Sample numbers outside the track are ignored, as before.
+        for &number in entries {
+            if let Some(sample) = usize::try_from(number)
+                .ok()
+                .and_then(|number| number.checked_sub(1))
+                .and_then(|index| samples.get_mut(index))
+            {
+                sample.is_sync = true;
+            }
+        }
+    }
+    for sample in &samples {
+        let end = sample
+            .offset
+            .checked_add(u64::from(sample.size))
             .ok_or_else(|| invalid_media("sample byte range overflow"))?;
         if end > source_len {
             return Err(invalid_media("sample byte range exceeds source length"));
         }
-        samples.push(Sample {
-            offset,
-            size,
-            decode_time: times[index].0,
-            duration: times[index].1,
-            composition_offset: composition_offsets[index],
-            is_sync: sync_samples
-                .as_ref()
-                .is_none_or(|numbers| numbers.contains(&sample_number)),
-        });
     }
     Ok(samples)
 }
 
-fn sample_sizes(sizes: &SampleSizes, sample_count: usize) -> Vec<u32> {
-    match sizes {
-        SampleSizes::Constant { size, .. } => vec![*size; sample_count],
-        SampleSizes::Table(sizes) => sizes.clone(),
-    }
-}
-
-fn sample_offsets(tables: &SampleTables, sizes: &[u32], sample_count: usize) -> Result<Vec<u64>> {
+/// Every sample's size and byte offset, from `stsz` and the chunk tables. Timing fields are
+/// zero and every sample is a sync sample until the later passes fill them in.
+fn sample_positions(tables: &SampleTables, sample_count: usize) -> Result<Vec<Sample>> {
     let chunks = &tables.chunk_offsets;
     if tables.sample_to_chunk.is_empty() {
         return Err(invalid_media("missing stsc entries"));
     }
-    let mut offsets = Vec::with_capacity(sample_count);
-    let mut sample_index = 0usize;
+    let size_of = |index: usize| match &tables.sizes {
+        SampleSizes::Constant { size, .. } => *size,
+        SampleSizes::Table(sizes) => sizes[index],
+    };
+    let mut samples = Vec::with_capacity(sample_count);
     for (entry_index, (first_chunk, samples_per_chunk)) in tables.sample_to_chunk.iter().enumerate()
     {
         if *first_chunk == 0 || *samples_per_chunk == 0 {
@@ -275,7 +270,6 @@ fn sample_offsets(tables: &SampleTables, sizes: &[u32], sample_count: usize) -> 
             .sample_to_chunk
             .get(entry_index + 1)
             .map_or(chunks.len() as u64 + 1, |next| u64::from(next.0));
-
         for chunk_number in u64::from(*first_chunk)..next_first_chunk {
             let chunk_index = usize::try_from(chunk_number - 1)
                 .map_err(|_| invalid_media("chunk index does not fit in memory"))?;
@@ -283,66 +277,75 @@ fn sample_offsets(tables: &SampleTables, sizes: &[u32], sample_count: usize) -> 
                 .get(chunk_index)
                 .ok_or_else(|| invalid_media("stsc references a missing chunk"))?;
             for _ in 0..*samples_per_chunk {
-                if sample_index == sample_count {
+                if samples.len() == sample_count {
                     return Err(invalid_media("stsc maps more samples than stsz"));
                 }
-                offsets.push(offset);
+                let size = size_of(samples.len());
+                samples.push(Sample {
+                    offset,
+                    size,
+                    decode_time: 0,
+                    duration: 0,
+                    composition_offset: 0,
+                    is_sync: true,
+                });
                 offset = offset
-                    .checked_add(u64::from(sizes[sample_index]))
+                    .checked_add(u64::from(size))
                     .ok_or_else(|| invalid_media("sample offset overflow"))?;
-                sample_index += 1;
             }
         }
     }
-    if sample_index != sample_count {
+    if samples.len() != sample_count {
         return Err(invalid_media("stsc maps fewer samples than stsz"));
     }
-    Ok(offsets)
+    Ok(samples)
 }
 
-fn sample_times(runs: &[(u32, u32)], sample_count: usize) -> Result<Vec<(u64, u32)>> {
-    let mut times = Vec::with_capacity(sample_count);
+/// Decode times and durations from `stts` runs.
+fn apply_times(samples: &mut [Sample], runs: &[(u32, u32)]) -> Result<()> {
+    let mismatch = || invalid_media("stts entry count does not match sample count");
     let mut decode_time = 0u64;
+    let mut at = 0usize;
     for (run_length, delta) in runs {
         // Bound the running total before expanding: a single run-length entry can claim
         // billions of samples, and expansion must never outgrow the already-limited count.
         let run = usize::try_from(*run_length)
             .ok()
-            .filter(|run| times.len().saturating_add(*run) <= sample_count)
-            .ok_or_else(|| invalid_media("stts entry count does not match sample count"))?;
-        for _ in 0..run {
-            times.push((decode_time, *delta));
+            .filter(|run| at.saturating_add(*run) <= samples.len())
+            .ok_or_else(mismatch)?;
+        for sample in &mut samples[at..at + run] {
+            sample.decode_time = decode_time;
+            sample.duration = *delta;
             decode_time = decode_time
                 .checked_add(u64::from(*delta))
                 .ok_or_else(|| invalid_media("decode timestamp overflow"))?;
         }
+        at += run;
     }
-    if times.len() != sample_count {
-        return Err(invalid_media(
-            "stts entry count does not match sample count",
-        ));
+    if at != samples.len() {
+        return Err(mismatch());
     }
-    Ok(times)
+    Ok(())
 }
 
-fn composition_offsets(runs: Option<&[(u32, i32)]>, sample_count: usize) -> Result<Vec<i32>> {
-    let Some(runs) = runs else {
-        return Ok(vec![0; sample_count]);
-    };
-    let mut offsets = Vec::with_capacity(sample_count);
+/// Composition offsets from `ctts` runs.
+fn apply_composition(samples: &mut [Sample], runs: &[(u32, i32)]) -> Result<()> {
+    let mismatch = || invalid_media("ctts entry count does not match sample count");
+    let mut at = 0usize;
     for (run_length, offset) in runs {
         let run = usize::try_from(*run_length)
             .ok()
-            .filter(|run| offsets.len().saturating_add(*run) <= sample_count)
-            .ok_or_else(|| invalid_media("ctts entry count does not match sample count"))?;
-        offsets.extend(std::iter::repeat_n(*offset, run));
+            .filter(|run| at.saturating_add(*run) <= samples.len())
+            .ok_or_else(mismatch)?;
+        for sample in &mut samples[at..at + run] {
+            sample.composition_offset = *offset;
+        }
+        at += run;
     }
-    if offsets.len() != sample_count {
-        return Err(invalid_media(
-            "ctts entry count does not match sample count",
-        ));
+    if at != samples.len() {
+        return Err(mismatch());
     }
-    Ok(offsets)
+    Ok(())
 }
 
 #[cfg(test)]

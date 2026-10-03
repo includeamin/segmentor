@@ -328,7 +328,7 @@ pub(crate) fn version_of<'a>(
     for (source, window, encryption) in clips {
         hasher.update(
             source
-                .metadata_sha256
+                .metadata_hash
                 .expect("parsed assets always have a metadata hash"),
         );
         hasher.update(window.from_ms.to_be_bytes());

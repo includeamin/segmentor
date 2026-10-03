@@ -5,10 +5,12 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use axum::body::to_bytes;
-use axum::http::Request;
+use std::io::Read;
+
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS, ORIGIN, VARY,
 };
+use axum::http::{HeaderName, Request};
 use tower::ServiceExt;
 
 use std::sync::Arc;
@@ -18,7 +20,8 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::http::header::{
-    CACHE_CONTROL, CONTENT_RANGE, CONTENT_TYPE, ETAG, IF_NONE_MATCH, IF_RANGE, RANGE, RETRY_AFTER,
+    ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_RANGE, CONTENT_TYPE, ETAG,
+    IF_NONE_MATCH, IF_RANGE, RANGE, RETRY_AFTER,
 };
 use axum::response::Response;
 use bytes::Bytes;
@@ -192,6 +195,119 @@ async fn serves_dash_manifest() {
     assert_eq!(response.headers()[CONTENT_TYPE], "application/dash+xml");
     let body = body(response).await;
     assert!(body.windows(11).any(|window| window == b"<Adaptation"));
+}
+
+/// A GET with the given request headers.
+async fn get_with(app: &Router, uri: &str, headers: &[(HeaderName, &str)]) -> Response {
+    let mut request = Request::get(uri);
+    for (name, value) in headers {
+        request = request.header(name, *value);
+    }
+    app.clone()
+        .oneshot(request.body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+fn header_values(response: &Response, name: &HeaderName) -> Vec<String> {
+    response
+        .headers()
+        .get_all(name)
+        .iter()
+        .flat_map(|value| value.to_str().unwrap().split(','))
+        .map(|value| value.trim().to_ascii_lowercase())
+        .collect()
+}
+
+#[tokio::test]
+async fn playlists_are_compressed_when_the_client_accepts_it() {
+    let app = app();
+    for uri in [
+        "/hls/sample/master.m3u8",
+        "/hls/sample/video/index.m3u8",
+        "/hls/sample/audio-1/index.m3u8",
+        "/hls/sample/video/iframes.m3u8",
+        "/dash/sample/manifest.mpd",
+    ] {
+        let identity = get(&app, uri).await;
+        assert_eq!(identity.status(), StatusCode::OK, "{uri}");
+        assert!(identity.headers().get(CONTENT_ENCODING).is_none(), "{uri}");
+        assert!(header_values(&identity, &VARY).contains(&"accept-encoding".to_owned()));
+        let identity_tag = identity.headers()[ETAG].clone();
+        let text = body(identity).await;
+
+        let mut tags = vec![identity_tag];
+        for (accept, coding) in [("gzip, deflate", "gzip"), ("gzip, deflate, br", "br")] {
+            let response = get_with(&app, uri, &[(ACCEPT_ENCODING, accept)]).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri} {accept}");
+            assert_eq!(response.headers()[CONTENT_ENCODING], coding, "{uri}");
+            assert!(header_values(&response, &VARY).contains(&"accept-encoding".to_owned()));
+            tags.push(response.headers()[ETAG].clone());
+            let compressed = body(response).await;
+            let mut decoded = Vec::new();
+            if coding == "gzip" {
+                flate2::read::GzDecoder::new(&compressed[..])
+                    .read_to_end(&mut decoded)
+                    .unwrap();
+            } else {
+                brotli::Decompressor::new(&compressed[..], 4096)
+                    .read_to_end(&mut decoded)
+                    .unwrap();
+            }
+            assert_eq!(decoded, text, "{uri} {coding}");
+        }
+        // Each encoding is a different representation, so each has its own strong tag.
+        tags.dedup();
+        assert_eq!(tags.len(), 3, "{uri}: {tags:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_playlist_is_not_modified_only_for_the_tag_of_its_own_encoding() {
+    let app = app();
+    let uri = "/hls/sample/video/index.m3u8";
+    let gzip_tag = get_with(&app, uri, &[(ACCEPT_ENCODING, "gzip")])
+        .await
+        .headers()[ETAG]
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    let same = get_with(
+        &app,
+        uri,
+        &[(ACCEPT_ENCODING, "gzip"), (IF_NONE_MATCH, &gzip_tag)],
+    )
+    .await;
+    assert_eq!(same.status(), StatusCode::NOT_MODIFIED);
+    assert!(header_values(&same, &VARY).contains(&"accept-encoding".to_owned()));
+
+    // The same tag does not validate the identity representation.
+    let other = get_with(&app, uri, &[(IF_NONE_MATCH, &gzip_tag)]).await;
+    assert_eq!(other.status(), StatusCode::OK);
+    assert!(other.headers().get(CONTENT_ENCODING).is_none());
+}
+
+#[tokio::test]
+async fn vary_keeps_the_cors_values_alongside_accept_encoding() {
+    // With specific origins (not `*`), CORS adds its own `Vary` values.
+    let cors = CorsConfig {
+        allowed_origins: vec!["https://player.example.com".to_owned()],
+        ..CorsConfig::default()
+    };
+    let app = router(AppState::new(&test_config(LimitsConfig::default(), cors)).unwrap());
+    let response = get_with(
+        &app,
+        "/hls/sample/master.m3u8",
+        &[
+            (ORIGIN, "https://player.example.com"),
+            (ACCEPT_ENCODING, "gzip"),
+        ],
+    )
+    .await;
+    let vary = header_values(&response, &VARY);
+    assert!(vary.contains(&"accept-encoding".to_owned()), "{vary:?}");
+    assert!(vary.contains(&"origin".to_owned()), "{vary:?}");
 }
 
 #[tokio::test]

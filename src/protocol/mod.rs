@@ -5,9 +5,11 @@
 
 pub(crate) mod dash;
 pub(crate) mod hls;
+mod manifest;
 mod presentation;
 
 pub(crate) use hls::{AdaptiveAudio, AdaptiveVideo};
+pub(crate) use manifest::{Encoding, Manifest};
 #[cfg(test)]
 pub(crate) use presentation::fixtures;
 pub(crate) use presentation::{Bandwidth, Presentation, SequenceClip};

@@ -81,7 +81,7 @@ HLS and DASH share the `init_segment` and `media_segment` handlers.
 
 ### Playlists and manifests
 
-`master_playlist`, `media_playlist`, and `dash_manifest` look up the asset, build the ETag, return `304` if `If-None-Match` matches, and otherwise return the pre-rendered `Bytes` with `max-age=60`. They do no per-request computation.
+The playlist and manifest handlers share `serve`: it picks brotli, gzip, or identity from `Accept-Encoding` (`protocol::Encoding::negotiate`), builds that encoding's ETag (`"<version>-<resource>"`, plus `-br` or `-gzip`), and returns `304` if `If-None-Match` matches before anything is rendered. Otherwise it returns the stored `protocol::Manifest` in that encoding with `max-age=60` and `Vary: Accept-Encoding`. A `Manifest` holds the rendered text and makes each compressed form once, on first request (brotli quality 4, gzip level 6), so later requests do no per-request computation.
 
 ### `init_segment`
 

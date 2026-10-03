@@ -24,7 +24,7 @@ This design is accepted, but not every capability is implemented. Status terms i
 | Structured non-blocking logs | Implemented | Configurable level/format; bounded lossy queue |
 | Direct bounded HTTP range streaming | Implemented | Header plus coalesced source ranges; 256 KiB default chunks |
 | Enforceable parser/resource limits | Implemented | Validated TOML limits cover source, metadata, tracks, samples, segments, queues, and headers |
-| Source mutation detection | Implemented | Filesystem identity plus pre/post parse `moov` SHA-256 |
+| Source mutation detection | Implemented | Filesystem identity plus a BLAKE3 `moov` hash, and a byte comparison of `moov` after parsing |
 | Explicit encryption rejection | Implemented | Raw preflight also rejects external references and multiple descriptions. Edit lists are applied since [TDD 0004](0004-broader-mp4-input-support.md) |
 | Runtime cache invalidation/reload | Implemented for mapper-resolved assets | See [TDD 0002](0002-asset-map-interface.md). Static catalog assets are still immutable for the process lifetime |
 | Remote HTTP sources and asset mapping service | Implemented | See [TDD 0002](0002-asset-map-interface.md) and the [mapper API](../mapper-api.md) |
@@ -470,7 +470,7 @@ The route contains `big-buck-bunny`, never a filesystem path. On startup, valida
 
 The current process treats source media as immutable after startup. Publishers must not replace or modify configured media while the process is running. Runtime replacement is unsupported until cache invalidation and URL versioning are implemented.
 
-The implemented identity contains canonical path, device, inode, byte length, nanosecond modification time, and the raw `moov` SHA-256. The parser compares filesystem metadata and the `moov` hash before and after parsing and discards a result if the source changed. A restart after atomic replacement produces a new identity and versioned public URL. In-place changes that deliberately preserve every identity field remain unsupported operator error.
+The implemented identity contains canonical path, device, inode, byte length, nanosecond modification time, and the raw `moov` BLAKE3 hash. The parser compares filesystem metadata and the `moov` bytes before and after parsing and discards a result if the source changed. A restart after atomic replacement produces a new identity and versioned public URL. In-place changes that deliberately preserve every identity field remain unsupported operator error.
 
 ### Validation tools and fixtures
 
