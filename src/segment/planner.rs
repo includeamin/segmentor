@@ -91,13 +91,20 @@ pub(crate) fn plan(
         }];
 
         for audio in &followers {
-            tracks.push(audio_segment(
+            let part = audio_segment(
                 audio,
                 reference,
                 decode_time,
                 end_time,
                 end_sample == reference.samples.len(),
-            )?);
+            )?;
+            // A track that has already ended (audio shorter than the video) has nothing in the
+            // remaining segments, so it is left out of them rather than given an empty one: its
+            // playlist ends where its samples do, and no request can ask for an empty fragment.
+            if part.first_sample == audio.samples.len() {
+                continue;
+            }
+            tracks.push(part);
         }
         if tracks
             .iter()

@@ -267,19 +267,29 @@ impl PackagedAsset {
                 Error::InvalidMedia("segment index does not fit in memory".to_owned())
             })?)
             .ok_or(Error::NotFound("segment does not exist"))?;
+        // Audio that ended before this segment has no part in it; the fragment is video alone.
         let parts = [muxed.video, muxed.audio]
             .into_iter()
             .map(|key| {
                 let track = self.track(key)?;
-                let part = segment
+                Ok(segment
                     .tracks
                     .iter()
                     .find(|candidate| candidate.track_id == track.id)
-                    .copied()
-                    .ok_or_else(|| Error::InvalidMedia("segment is missing a track".to_owned()))?;
-                Ok((track, part))
+                    .map(|part| (track, *part)))
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        if parts
+            .first()
+            .is_none_or(|(track, _)| track.key != muxed.video)
+        {
+            return Err(Error::InvalidMedia(
+                "segment is missing its video".to_owned(),
+            ));
+        }
         fmp4::prepare_muxed_segment(&parts, segment_index.saturating_add(1), &self.limits)
     }
 
@@ -424,12 +434,13 @@ impl PackagedAsset {
                 Error::InvalidMedia("segment index does not fit in memory".to_owned())
             })?)
             .ok_or(Error::NotFound("segment does not exist"))?;
+        // A track that ended before this segment has no part in it (see `segment::plan`).
         let track_segment = segment
             .tracks
             .iter()
             .find(|candidate| candidate.track_id == track.id)
             .copied()
-            .ok_or_else(|| Error::InvalidMedia("segment is missing a track".to_owned()))?;
+            .ok_or(Error::NotFound("segment does not exist"))?;
 
         let prepared =
             fmp4::prepare_media_segment(track, track_segment, sequence_number, &self.limits)?;
