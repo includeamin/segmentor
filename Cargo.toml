@@ -43,6 +43,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 blake3 = "1.8.7"
 flate2 = "1.1.10"
 brotli = "9.0.0"
+mimalloc = "0.1.52"
 
 [dev-dependencies]
 # Cross-checks the in-tree parser against an independent implementation in tests.
