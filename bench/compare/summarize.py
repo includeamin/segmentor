@@ -7,9 +7,9 @@ import statistics
 import sys
 
 out = sys.argv[1]
-servers = [s for s in ("segmentor", "segmentor-muxed", "nginx", "nginx-cached")
+servers = [s for s in ("segmentor", "segmentor-separate", "nginx", "nginx-cached")
            if os.path.exists(f"{out}/{s}-cold.csv")]
-label = {"segmentor": "segmentor", "segmentor-muxed": "segmentor, muxed audio",
+label = {"segmentor": "segmentor", "segmentor-separate": "segmentor, separate audio",
          "nginx": "nginx-vod-module", "nginx-cached": "nginx-vod-module, response cache"}
 
 
@@ -39,8 +39,8 @@ def stats(server, scenario):
     return {"cpu": statistics.mean(cpu), "mem_mib": max(mem) / 1024 / 1024}
 
 
-def cold(server):
-    rows = list(csv.DictReader(open(f"{out}/{server}-cold.csv")))
+def cold(server, scenario="cold"):
+    rows = list(csv.DictReader(open(f"{out}/{server}-{scenario}.csv")))
     pick = lambda key: statistics.median(float(row[key]) for row in rows) * 1000
     return {key: pick(f"{key}_s") for key in ("master", "playlist", "segment")}, len(rows)
 
@@ -72,6 +72,17 @@ print("| --- | ---: | ---: | ---: |")
 for server in servers:
     values, reps = cold(server)
     print(f"| {label[server]} ({reps} runs) | {values['master']:.1f} | {values['playlist']:.1f} "
+          f"| {values['segment']:.1f} |")
+
+print("\n## Cold asset in a running process (median, ms)\n")
+print("The server has already served another asset; this one it has never loaded.\n")
+print("| Server | First master playlist | Then media playlist | Then first segment |")
+print("| --- | ---: | ---: | ---: |")
+for server in servers:
+    if not os.path.exists(f"{out}/{server}-cold-asset.csv"):
+        continue
+    values, reps = cold(server, "cold-asset")
+    print(f"| {label[server]} ({reps} assets) | {values['master']:.1f} | {values['playlist']:.1f} "
           f"| {values['segment']:.1f} |")
 
 for scenario in ("manifests", "segments"):

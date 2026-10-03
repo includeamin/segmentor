@@ -26,3 +26,18 @@ enabled = false
 
 [assets.long]
 path = "long.mp4"
+
+[assets.long-1]
+path = "long-1.mp4"
+
+[assets.long-2]
+path = "long-2.mp4"
+
+[assets.long-3]
+path = "long-3.mp4"
+
+[assets.long-4]
+path = "long-4.mp4"
+
+[assets.long-5]
+path = "long-5.mp4"
