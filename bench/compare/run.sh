@@ -29,6 +29,7 @@ chmod 777 "$out" # k6 runs as an unprivileged user in its container
 
 # The same 60-minute asset the budget benchmark uses: the committed fixture stream-copied 1,200
 # times, no re-encode.
+mkdir -p media # git-ignored, so absent from a fresh checkout
 if [[ ! -f media/long.mp4 ]]; then
   echo "generating media/long.mp4 (60 minutes, stream copy)..."
   ffmpeg -hide_banner -loglevel error -y -stream_loop 1199 \
