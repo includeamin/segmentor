@@ -62,6 +62,9 @@ struct Wire {
     /// Content keys and DRM systems (TDD 0009). Validated before the answer is used.
     #[serde(default)]
     encryption: Option<crate::cenc::WireEncryption>,
+    /// Whole-segment HLS `AES-128` for a single file (TDD 0012).
+    #[serde(default)]
+    hls_aes128: Option<crate::cenc::WireAes128>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -514,6 +517,26 @@ impl HttpResolver {
         }
         let encryption =
             Self::interpret_encryption(wire.encryption.as_ref()).map_err(ResolveError::Rejected)?;
+        let hls_aes128 = wire
+            .hls_aes128
+            .as_ref()
+            .map(|aes128| aes128.validate().map(Arc::new))
+            .transpose()
+            .map_err(ResolveError::Rejected)?;
+        if hls_aes128.is_some() {
+            // One key per asset, one clear init segment, and playlists that name the key: only a
+            // plain file has all three today.
+            if encryption.is_some() {
+                return Err(ResolveError::Rejected(
+                    "hls_aes128 and encryption cannot both be set".to_owned(),
+                ));
+            }
+            if location.is_none() {
+                return Err(ResolveError::Rejected(
+                    "hls_aes128 is supported for a single file only".to_owned(),
+                ));
+            }
+        }
         Ok(ResolvedAsset {
             location,
             renditions,
@@ -523,6 +546,7 @@ impl HttpResolver {
             valid_until,
             hard_expiry,
             encryption,
+            hls_aes128,
         })
     }
 }

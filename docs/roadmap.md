@@ -32,7 +32,7 @@ DRM is the most common reason a studio-licensed catalog cannot move. These steps
 | --- | --- | --- |
 | Different keys per clip | Done | Clear pre-roll before encrypted content; `METHOD=NONE` transitions |
 | HEVC encryption | Done | Slice-segment-header parser for HEVC (the `hvcC` path), checked against `FFmpeg`'s own parser on x265 and hand-built streams; same `cbcs` pattern as H.264. See [TDD 0009](technical-design/0009-common-encryption-and-drm.md#implementation-status) |
-| Whole-segment HLS AES-128 | To do | nginx-vod-module's "HLS AES-128": simple protection without a DRM vendor. Whole-fragment AES-128-CBC with a key URI, independent of `cbcs` |
+| Whole-segment HLS AES-128 | Done for single-file assets | [TDD 0012](technical-design/0012-hls-aes-128.md). The mapper's `hls_aes128` gives a key and the URI players fetch it from; each segment is one AES-128-CBC message, the init segment stays clear, HLS only. Adaptive assets, sequences, and I-frame playlists are not covered yet |
 | Key rotation within an asset | To do | Key periods over the timeline. HLS: new `EXT-X-KEY` at period boundaries. DASH: per-Period or `pssh` in fragments |
 | Decrypting CENC-encrypted source files | To do | nginx-vod-module repackages already-encrypted MP4s. Needs `encv`/`enca` parsing and a source-key field in the mapper answer |
 | AV1 and VP9 encryption | To do | OBU-aware and superframe-aware subsample rules |

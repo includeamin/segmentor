@@ -23,6 +23,8 @@ pub(crate) struct Extras {
     pub(crate) encryption: Option<Arc<crate::cenc::Encryption>>,
     /// Asks for a muxed HLS stream (TDD 0011); honoured only when the asset can have one.
     pub(crate) hls_mux_audio: bool,
+    /// Whole-segment HLS `AES-128` (TDD 0012). Mutually exclusive with `encryption`.
+    pub(crate) hls_aes128: Option<Arc<crate::cenc::Aes128>>,
 }
 
 #[derive(Debug)]
@@ -36,6 +38,9 @@ pub(crate) struct PackagedAsset {
     rendered: RenderedManifests,
     subtitles: Vec<Subtitle>,
     protection: Option<crate::cenc::AssetProtection>,
+    /// HLS `AES-128`: every media segment is encrypted whole, and the playlists name the key
+    /// (TDD 0012). DASH has no such mode, so the asset is HLS only.
+    aes128: Option<Arc<crate::cenc::Aes128>>,
     /// The HLS stream that carries the default audio inside the video segments, when the load
     /// asked for one and the asset can have it (TDD 0011).
     muxed: Option<Muxed>,
@@ -141,6 +146,7 @@ impl PackagedAsset {
             version,
             encryption,
             hls_mux_audio,
+            hls_aes128,
         } = extras;
         let plan = segment::plan(&index, segment_duration_ms, limits)?;
         let subtitles = prepare_subtitles(&index, subtitles)?;
@@ -195,11 +201,14 @@ impl PackagedAsset {
             None
         };
         let encryption_ref = protection.as_ref().map(|p| p.encryption.as_ref());
-        let version = version.unwrap_or_else(|| version_of(&index, &subtitles, encryption_ref));
+        let version = version.unwrap_or_else(|| {
+            version_of(&index, &subtitles, encryption_ref, hls_aes128.as_deref())
+        });
         let rendered = RenderedManifests::render(
             Presentation::new(&index.tracks, &plan, &version)
                 .with_subtitles(&subtitles)
                 .with_encryption(encryption_ref)
+                .with_aes128(hls_aes128.as_deref())
                 .with_muxed_audio(muxed.is_some()),
         )?;
         Ok(Self {
@@ -212,6 +221,7 @@ impl PackagedAsset {
             rendered,
             subtitles,
             protection,
+            aes128: hls_aes128,
             muxed,
         })
     }
@@ -225,7 +235,14 @@ impl PackagedAsset {
         Presentation::new(&self.index.tracks, &self.plan, &self.version)
             .with_subtitles(&self.subtitles)
             .with_encryption(self.encryption())
+            .with_aes128(self.aes128.as_deref())
             .with_muxed_audio(self.muxed.is_some())
+    }
+
+    /// Whether every HLS media segment is encrypted whole, which leaves the asset HLS only
+    /// (TDD 0012).
+    pub(crate) const fn is_aes128(&self) -> bool {
+        self.aes128.is_some()
     }
 
     /// Whether HLS serves the muxed stream (TDD 0011).
@@ -290,7 +307,16 @@ impl PackagedAsset {
                 "segment is missing its video".to_owned(),
             ));
         }
-        fmp4::prepare_muxed_segment(&parts, segment_index.saturating_add(1), &self.limits)
+        let mut prepared =
+            fmp4::prepare_muxed_segment(&parts, segment_index.saturating_add(1), &self.limits)?;
+        if let Some(key) = &self.aes128 {
+            prepared.encryption = Some(Box::new(Self::whole_segment(
+                key,
+                &prepared.header,
+                segment_index,
+            )));
+        }
+        Ok(prepared)
     }
 
     /// The content keys and DRM systems this asset is encrypted with, if any.
@@ -309,18 +335,40 @@ impl PackagedAsset {
         mut prepared: fmp4::PreparedSegment,
     ) -> fmp4::PreparedSegment {
         if let Some(protection) = self.protection.as_ref().and_then(|p| p.track(track.id)) {
-            prepared.encryption = Some(Box::new(crate::cenc::PendingEncryption {
-                track_id: track.id,
-                kind: track.kind,
-                samples: track
-                    .samples
-                    .to_vec(segment.first_sample..segment.end_sample),
-                decode_time: segment.decode_time,
-                sequence_number,
-                protection: Arc::clone(protection),
-            }));
+            prepared.encryption = Some(Box::new(crate::cenc::PendingEncryption::Cbcs(
+                crate::cenc::PendingCbcs {
+                    track_id: track.id,
+                    kind: track.kind,
+                    samples: track
+                        .samples
+                        .to_vec(segment.first_sample..segment.end_sample),
+                    decode_time: segment.decode_time,
+                    sequence_number,
+                    protection: Arc::clone(protection),
+                },
+            )));
+        } else if let Some(key) = &self.aes128 {
+            prepared.encryption = Some(Box::new(Self::whole_segment(
+                key,
+                &prepared.header,
+                sequence_number.saturating_sub(1),
+            )));
         }
         prepared
+    }
+
+    /// A segment encrypted whole, with the HLS default IV: its media sequence number, which is
+    /// its position in the playlists (TDD 0012).
+    fn whole_segment(
+        key: &Arc<crate::cenc::Aes128>,
+        header: &Bytes,
+        segment_index: u32,
+    ) -> crate::cenc::PendingEncryption {
+        crate::cenc::PendingEncryption::WholeSegment {
+            header: header.clone(),
+            segment_index,
+            key: Arc::clone(key),
+        }
     }
 
     pub(crate) fn init_segment(&self, key: TrackKey) -> Result<Bytes> {
@@ -347,6 +395,9 @@ impl PackagedAsset {
 
     /// The video track's I-frame playlist, absent for an audio-only asset.
     pub(crate) fn hls_iframe_playlist(&self) -> Result<Manifest> {
+        if self.aes128.is_some() {
+            return Err(Error::NotFound("an AES-128 asset has no I-frame playlist"));
+        }
         cached(&self.rendered.hls_iframes, || {
             Ok(hls::iframe_playlist(self.presentation())?.map(Manifest::from))
         })?
@@ -355,6 +406,9 @@ impl PackagedAsset {
 
     /// The fragment holding only the `frame_index`th keyframe of the video track.
     pub(crate) fn prepare_iframe(&self, frame_index: u32) -> Result<fmp4::PreparedSegment> {
+        if self.aes128.is_some() {
+            return Err(Error::NotFound("an AES-128 asset has no I-frame playlist"));
+        }
         let presentation = self.presentation();
         let track = presentation
             .video()
@@ -403,6 +457,11 @@ impl PackagedAsset {
     }
 
     pub(crate) fn dash_manifest(&self) -> Result<Manifest> {
+        if self.aes128.is_some() {
+            return Err(Error::NotFound(
+                "DASH is not available for an AES-128 asset",
+            ));
+        }
         cached(&self.rendered.dash, || {
             dash::manifest(self.presentation()).map(Manifest::from)
         })
@@ -589,6 +648,7 @@ fn version_of(
     index: &MediaIndex,
     subtitles: &[Subtitle],
     encryption: Option<&crate::cenc::Encryption>,
+    aes128: Option<&crate::cenc::Aes128>,
 ) -> String {
     use std::fmt::Write;
 
@@ -618,6 +678,9 @@ fn version_of(
     if let Some(encryption) = encryption {
         hasher.update(b"cbcs");
         hasher.update(encryption.fingerprint());
+    }
+    if let Some(aes128) = aes128 {
+        hasher.update(aes128.fingerprint());
     }
     hasher
         .finalize()
@@ -656,7 +719,7 @@ mod tests {
         assert!(asset.version().bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_ne!(asset.version(), moov_only);
         assert_eq!(
-            version_of(&asset.index, &[], None),
+            version_of(&asset.index, &[], None, None),
             asset.version(),
             "and it is stable"
         );

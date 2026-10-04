@@ -325,6 +325,40 @@ In a [clips](#clips) answer, each clip may carry its own `encryption` object. A 
 - **Limitation.** A clip cannot opt out of the answer's own `encryption`: absent and `null` both mean "use the answer's". To mix clear and encrypted clips, leave the answer's `encryption` out and set it on the encrypted clips.
 - `/admin/status` lists the key IDs of every clip.
 
+## HLS AES-128
+
+For protection without a DRM vendor, an answer may carry `hls_aes128` instead of `encryption`. segmentor then encrypts every HLS media segment whole with AES-128-CBC (RFC 8216, `METHOD=AES-128`), and the media playlists name the key. Design: [TDD 0012](technical-design/0012-hls-aes-128.md).
+
+```json
+{
+  "asset_id": "movie",
+  "version": "2026-10-04-a",
+  "location": { "type": "file", "path": "movies/movie.mp4" },
+  "hls_aes128": {
+    "key": "2b7e151628aed2a6abf7158809cf4f3c",
+    "key_uri": "https://keys.example.com/movie/1"
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `key` | The content key: 32 hex digits. |
+| `key_uri` | Where players fetch the key. It is written into the playlist as the `URI` attribute, so it is 1 to 2048 characters without quotes or control characters; absolute or relative to the playlist. |
+
+What a player sees:
+
+```text
+#EXT-X-MAP:URI="init.mp4?v=..."
+#EXT-X-KEY:METHOD=AES-128,URI="https://keys.example.com/movie/1"
+```
+
+- **segmentor does not serve the key.** `key_uri` is your own endpoint, and it is where authorization belongs: anyone who can fetch the key can decrypt the stream. This is not DRM; for licensed content use `encryption`.
+- **The init segment is sent clear** (the key line follows the map line), and each segment's IV is its media sequence number, with no `IV` attribute.
+- **HLS only.** An `hls_aes128` asset answers `404` on `/dash/`, and offers no I-frame playlist.
+- **A single file only,** and not together with `encryption`: an answer that sets both, or sets `hls_aes128` on `renditions` or `clips`, is rejected.
+- **The answer carries a secret.** The same rules as for `encryption` apply: use `https` and the bearer token. Errors name the field and never the key. The key and its URI are part of the URL version, so changing either gives new URLs.
+
 ## What a `version` means to the server
 
 The server keeps one loaded copy per asset, keyed by `(asset_id, version)`. A different `version`, or the same version at a different location (a rotated signed URL), makes it reload from the new location. There is **no grace period**: players holding URLs from the old version get `404` and recover by fetching the playlist again. Change `version` only when the media actually changes.

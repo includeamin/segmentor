@@ -7,6 +7,7 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::http::{HeaderMap, Request, StatusCode};
+use base64::Engine;
 use bytes::Bytes;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -3180,4 +3181,304 @@ async fn ffmpeg_decrypts_encrypted_hevc() {
             String::from_utf8_lossy(name)
         );
     }
+}
+
+// ---- Whole-segment HLS AES-128 (TDD 0012) ----
+
+const AES_KEY: &str = "2b7e151628aed2a6abf7158809cf4f3c";
+const AES_KEY_URI: &str = "https://keys.example.com/k1";
+
+/// Decrypts one AES-128 segment with `openssl`, the way a player does: the media sequence number
+/// is the IV. `None` when `openssl` is not installed.
+fn openssl_decrypt(key: &str, segment_index: u32, encrypted: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let iv = format!("{segment_index:032x}");
+    let mut child = Command::new("openssl")
+        .args(["enc", "-d", "-aes-128-cbc", "-K", key, "-iv", &iv])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(encrypted).ok()?;
+    let output = child.wait_with_output().ok()?;
+    output.status.success().then_some(output.stdout)
+}
+
+async fn aes128_harness() -> Harness {
+    let h = harness().await;
+    h.mapper.state.set(
+        "aes",
+        Answer::file("v1", "h264-aac.mp4").with_hls_aes128(AES_KEY, AES_KEY_URI),
+    );
+    h.mapper
+        .state
+        .set("clear", Answer::file("v1", "h264-aac.mp4"));
+    h
+}
+
+#[tokio::test]
+async fn aes128_playlists_name_the_key_after_the_init_segment_which_stays_clear() {
+    let h = aes128_harness().await;
+
+    let master = fetch(&h.app, "/hls/aes/master.m3u8").await;
+    assert_eq!(master.0, StatusCode::OK);
+    assert!(
+        !text(&master.2).contains("I-FRAME"),
+        "I-frame fragments are not encrypted whole, so none are offered"
+    );
+    let version = version_in(&master.2);
+    for track in ["muxed", "video", "audio-1"] {
+        let playlist = text(
+            &fetch(&h.app, &format!("/hls/aes/{track}/index.m3u8"))
+                .await
+                .2,
+        );
+        let lines = playlist.lines().collect::<Vec<_>>();
+        let map = lines
+            .iter()
+            .position(|l| l.starts_with("#EXT-X-MAP"))
+            .unwrap();
+        let key = lines
+            .iter()
+            .position(|l| l.starts_with("#EXT-X-KEY"))
+            .unwrap();
+        assert!(map < key, "the init segment is sent clear: {playlist}");
+        assert_eq!(
+            lines[key],
+            format!("#EXT-X-KEY:METHOD=AES-128,URI=\"{AES_KEY_URI}\""),
+            "no IV: each segment's sequence number is its IV"
+        );
+        assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:0"));
+    }
+    let init = fetch(&h.app, &format!("/hls/aes/video/init.mp4?v={version}")).await;
+    assert_eq!(&init.2[4..8], b"ftyp");
+    // The key is part of the URL version: the same media under another key has other URLs.
+    let clear = version_in(&fetch(&h.app, "/hls/clear/master.m3u8").await.2);
+    assert_ne!(version, clear);
+    h.mapper.state.set(
+        "other",
+        Answer::file("v1", "h264-aac.mp4").with_hls_aes128(AES_KEY, "https://keys.example.com/k2"),
+    );
+    assert_ne!(
+        version,
+        version_in(&fetch(&h.app, "/hls/other/master.m3u8").await.2)
+    );
+}
+
+#[tokio::test]
+async fn aes128_segments_decrypt_to_exactly_the_clear_segments() {
+    if std::process::Command::new("openssl")
+        .arg("version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: openssl is not installed");
+        return;
+    }
+    let h = aes128_harness().await;
+    let version = version_in(&fetch(&h.app, "/hls/aes/master.m3u8").await.2);
+    let clear_version = version_in(&fetch(&h.app, "/hls/clear/master.m3u8").await.2);
+    for track in ["muxed", "video", "audio-1"] {
+        let playlist = text(
+            &fetch(&h.app, &format!("/hls/aes/{track}/index.m3u8"))
+                .await
+                .2,
+        );
+        let segments = playlist.matches("#EXTINF").count();
+        assert!(segments >= 2, "{track}");
+        for index in 0..segments {
+            let encrypted = fetch(
+                &h.app,
+                &format!("/hls/aes/{track}/segments/{index}/media.m4s?v={version}"),
+            )
+            .await;
+            assert_eq!(encrypted.0, StatusCode::OK, "{track} {index}");
+            assert_eq!(encrypted.2.len() % 16, 0, "{track} {index}");
+            // Not a fragment any more: the `moof` is inside the encryption.
+            assert_ne!(&encrypted.2[4..8], b"moof", "{track} {index}");
+
+            let clear = fetch(
+                &h.app,
+                &format!("/hls/clear/{track}/segments/{index}/media.m4s?v={clear_version}"),
+            )
+            .await;
+            let decrypted = openssl_decrypt(AES_KEY, u32::try_from(index).unwrap(), &encrypted.2)
+                .unwrap_or_else(|| panic!("{track} {index} decrypts and unpads"));
+            assert_eq!(decrypted, clear.2.to_vec(), "{track} {index}");
+            assert_eq!(&decrypted[4..8], b"moof");
+        }
+    }
+}
+
+#[tokio::test]
+async fn aes128_segments_support_head_and_ranges() {
+    let h = aes128_harness().await;
+    let version = version_in(&fetch(&h.app, "/hls/aes/master.m3u8").await.2);
+    let uri = format!("/hls/aes/video/segments/0/media.m4s?v={version}");
+    let full = fetch(&h.app, &uri).await;
+
+    let head = h
+        .app
+        .clone()
+        .oneshot(Request::head(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        head.headers()[axum::http::header::CONTENT_LENGTH],
+        full.2.len().to_string()
+    );
+
+    let ranged = h
+        .app
+        .clone()
+        .oneshot(
+            Request::get(&uri)
+                .header(axum::http::header::RANGE, "bytes=16-47")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+    let body = to_bytes(ranged.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(body, full.2.slice(16..48));
+}
+
+#[tokio::test]
+async fn aes128_assets_are_hls_only() {
+    let h = aes128_harness().await;
+    let version = version_in(&fetch(&h.app, "/hls/aes/master.m3u8").await.2);
+    for uri in [
+        "/dash/aes/manifest.mpd".to_owned(),
+        format!("/dash/aes/video/init.mp4?v={version}"),
+        format!("/dash/aes/video/segments/0/media.m4s?v={version}"),
+        "/hls/aes/video/iframes.m3u8".to_owned(),
+        format!("/hls/aes/video/iframes/0/media.m4s?v={version}"),
+    ] {
+        assert_eq!(status(&h.app, &uri).await, StatusCode::NOT_FOUND, "{uri}");
+    }
+    // The clear asset next to it still has all of them.
+    assert_eq!(
+        status(&h.app, "/dash/clear/manifest.mpd").await,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn aes128_answers_the_mapper_may_not_give() {
+    let h = harness().await;
+    let encryption = clear_key_encryption(KEY);
+    let cases = [
+        (
+            "both",
+            Answer::file("v1", "h264-aac.mp4")
+                .with_hls_aes128(AES_KEY, AES_KEY_URI)
+                .with_encryption(encryption.clone()),
+        ),
+        (
+            "renditions",
+            Answer::renditions(
+                "v1",
+                &[("a", "rendition-480p.mp4"), ("b", "rendition-720p.mp4")],
+            )
+            .with_hls_aes128(AES_KEY, AES_KEY_URI),
+        ),
+        (
+            "clips",
+            Answer::clips("v1", &[clip("h264-aac.mp4", None, None)])
+                .with_hls_aes128(AES_KEY, AES_KEY_URI),
+        ),
+        (
+            "short-key",
+            Answer::file("v1", "h264-aac.mp4").with_hls_aes128("abcd", AES_KEY_URI),
+        ),
+        (
+            "quote-in-uri",
+            Answer::file("v1", "h264-aac.mp4").with_hls_aes128(AES_KEY, "https://k/\"x"),
+        ),
+    ];
+    for (name, answer) in cases {
+        h.mapper.state.set(name, answer);
+        let response = fetch(&h.app, &format!("/hls/{name}/master.m3u8")).await;
+        assert!(
+            response.0.is_server_error() || response.0.is_client_error(),
+            "{name}: {}",
+            response.0
+        );
+        assert!(
+            !text(&response.2).contains(AES_KEY),
+            "{name}: the key is never echoed"
+        );
+    }
+}
+
+/// An independent HLS client, `FFmpeg`, fetches the key from its URI, decrypts every segment, and
+/// decodes the stream: the video and the audio of the muxed stream, and the separate renditions.
+#[tokio::test]
+async fn ffmpeg_plays_an_aes128_stream_and_cannot_with_another_key() {
+    if std::process::Command::new("ffprobe")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: ffprobe is not installed");
+        return;
+    }
+    let data_uri = |key: &str| {
+        let bytes = (0..16)
+            .map(|at| u8::from_str_radix(&key[at * 2..at * 2 + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        format!(
+            "data:text/plain;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    };
+    let h = harness().await;
+    h.mapper.state.set(
+        "aes",
+        Answer::file("v1", "h264-aac.mp4").with_hls_aes128(AES_KEY, &data_uri(AES_KEY)),
+    );
+    // The same stream, whose playlists point at a different key than the one that encrypted it.
+    h.mapper.state.set(
+        "wrong",
+        Answer::file("v1", "h264-aac.mp4")
+            .with_hls_aes128(AES_KEY, &data_uri("00112233445566778899aabbccddeeff")),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = h.app.clone();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let frames = |path: String| {
+        tokio::task::spawn_blocking(move || {
+            std::process::Command::new("ffprobe")
+                .args(["-v", "error", "-count_frames", "-select_streams", "v:0"])
+                .args(["-show_entries", "stream=nb_read_frames", "-of", "csv=p=0"])
+                // The test's keys are `data:` URIs, which FFmpeg opens only when told to.
+                .args(["-allowed_extensions", "ALL"])
+                .arg(format!("http://{address}{path}"))
+                .output()
+                .unwrap()
+        })
+    };
+    for path in ["/hls/aes/master.m3u8", "/hls/aes/video/index.m3u8"] {
+        let output = frames(path.to_owned()).await.unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stderr).trim(), "", "{path}");
+        // ffprobe lists an HLS program's stream once more under the program.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout.lines().next(), Some("90"), "{path}");
+    }
+    let wrong = frames("/hls/wrong/video/index.m3u8".to_owned())
+        .await
+        .unwrap();
+    // Garbage in, so no 90 decoded frames out, whatever FFmpeg says about it.
+    assert_ne!(
+        String::from_utf8_lossy(&wrong.stdout).lines().next(),
+        Some("90"),
+        "a wrong key does not decrypt"
+    );
+    server.abort();
 }
