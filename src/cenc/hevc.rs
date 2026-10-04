@@ -961,12 +961,14 @@ pub(crate) mod tests {
                 "hvc1",
                 "keyint=15:bframes=4:b-pyramid=1",
             ),
+            // Six references: x265 3.5, which distribution packages ship, refuses more at this
+            // size, though newer versions take 16.
             (
                 "refs",
                 plain,
                 "yuv420p",
                 "hvc1",
-                "keyint=30:ref=8:bframes=8:rc-lookahead=30",
+                "keyint=30:ref=6:bframes=8:rc-lookahead=40",
             ),
             (
                 "slices",
