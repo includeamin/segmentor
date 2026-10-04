@@ -45,6 +45,14 @@ impl VersionQuery {
 
 /// Whether `track` names the muxed HLS stream (TDD 0011). It exists only under `/hls/`: the
 /// DASH routes share these handlers, and DASH never offers it.
+/// An `AES-128` asset's segments are HLS only: under `/dash/` they would be unplayable.
+fn require_protocol(asset: &ServedAsset, uri: &Uri) -> HttpResult<()> {
+    if asset.is_hls_only() && uri.path().starts_with("/dash/") {
+        return Err(HttpError::not_found("DASH is not available for this asset"));
+    }
+    Ok(())
+}
+
 fn is_muxed(track: &str, uri: &Uri) -> HttpResult<bool> {
     if track != MUXED {
         return Ok(false);
@@ -65,6 +73,7 @@ pub(crate) async fn init_segment(
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
     version.require(asset.version())?;
+    require_protocol(&asset, &uri)?;
     if is_muxed(&track, &uri)? {
         let etag = entity_tag(asset.version(), "muxed-init");
         if not_modified(&headers, &etag) {
@@ -98,6 +107,7 @@ pub(crate) async fn media_segment(
 ) -> HttpResult<Response> {
     let asset = state.asset(&asset_id).await?;
     version.require(asset.version())?;
+    require_protocol(&asset, &uri)?;
     let etag = entity_tag(asset.version(), &format!("{track}-segment-{segment_index}"));
     if is_muxed(&track, &uri)? {
         let what = format!("{asset_id}/{track}/segments/{segment_index}");

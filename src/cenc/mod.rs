@@ -1,6 +1,7 @@
 //! Common Encryption (ISO/IEC 23001-7) in the `cbcs` scheme, and the DRM signalling that goes with
 //! it. See `docs/technical-design/0009-common-encryption-and-drm.md`.
 
+mod aes128;
 mod avc;
 mod bits;
 mod cipher;
@@ -9,8 +10,9 @@ mod keys;
 mod segment;
 mod signal;
 
+pub(crate) use aes128::{Aes128, WireAes128};
 pub(crate) use keys::{Encryption, WireEncryption};
-pub(crate) use segment::{AssetProtection, PendingEncryption};
+pub(crate) use segment::{AssetProtection, PendingCbcs, PendingEncryption};
 pub(crate) use signal::{
     dash_content_protection, hls_key_lines, hls_key_none, hls_session_keys,
     hls_session_keys_for_sequence,

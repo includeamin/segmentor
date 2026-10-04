@@ -64,12 +64,20 @@ pub(crate) struct Answer {
     pub(crate) subtitles: Vec<Value>,
     /// Content keys and DRM systems (TDD 0009).
     pub(crate) encryption: Option<Value>,
+    /// Whole-segment HLS `AES-128` (TDD 0012).
+    pub(crate) hls_aes128: Option<Value>,
 }
 
 impl Answer {
     /// Adds an `encryption` object to the answer.
     pub(crate) fn with_encryption(mut self, encryption: Value) -> Self {
         self.encryption = Some(encryption);
+        self
+    }
+
+    /// Adds an `hls_aes128` object to the answer.
+    pub(crate) fn with_hls_aes128(mut self, key: &str, key_uri: &str) -> Self {
+        self.hls_aes128 = Some(json!({ "key": key, "key_uri": key_uri }));
         self
     }
 
@@ -93,6 +101,7 @@ impl Answer {
             expires_at: None,
             subtitles: Vec::new(),
             encryption: None,
+            hls_aes128: None,
         }
     }
 
@@ -106,6 +115,7 @@ impl Answer {
             expires_at: None,
             subtitles: Vec::new(),
             encryption: None,
+            hls_aes128: None,
         }
     }
 
@@ -123,6 +133,7 @@ impl Answer {
             expires_at: None,
             subtitles: Vec::new(),
             encryption: None,
+            hls_aes128: None,
         }
     }
 
@@ -165,6 +176,7 @@ impl Answer {
             expires_at: None,
             subtitles: Vec::new(),
             encryption: None,
+            hls_aes128: None,
         }
     }
 }
@@ -311,6 +323,9 @@ async fn mapper_asset(
     }
     if !answer.subtitles.is_empty() {
         body["subtitles"] = json!(answer.subtitles);
+    }
+    if let Some(aes128) = answer.hls_aes128 {
+        body["hls_aes128"] = aes128;
     }
     if let Some(encryption) = answer.encryption {
         body["encryption"] = encryption;

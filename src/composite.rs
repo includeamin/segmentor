@@ -194,6 +194,11 @@ impl ServedAsset {
         }
     }
 
+    /// Whether the asset exists for HLS only: DASH has no whole-segment `AES-128` (TDD 0012).
+    pub(crate) fn is_hls_only(&self) -> bool {
+        matches!(self, Self::Single(asset) if asset.is_aes128())
+    }
+
     /// Whether HLS serves the muxed stream, for status reporting.
     pub(crate) fn is_muxed(&self) -> bool {
         matches!(self, Self::Single(asset) if asset.is_muxed())

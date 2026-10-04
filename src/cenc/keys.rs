@@ -32,6 +32,10 @@ const MAX_URI_BYTES: usize = 2048;
 pub(crate) struct KeyBytes([u8; 16]);
 
 impl KeyBytes {
+    pub(crate) const fn new(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
     pub(crate) const fn bytes(&self) -> &[u8; 16] {
         &self.0
     }
@@ -250,7 +254,7 @@ impl WireEncryption {
 const SHAPE: &str =
     "encryption keys must be one for all tracks, or one for video and one for audio";
 
-fn hex16(text: &str, field: &str) -> Result<[u8; 16], String> {
+pub(super) fn hex16(text: &str, field: &str) -> Result<[u8; 16], String> {
     let bytes = text.as_bytes();
     if bytes.len() != 32 {
         return Err(format!("encryption {field} must be 32 hex digits"));
@@ -335,7 +339,7 @@ fn license_url(text: &str) -> Result<String, String> {
 
 /// Written between double quotes in an HLS attribute, so quotes and control characters would
 /// end it early or corrupt the playlist.
-fn hls_uri(text: &str) -> Result<String, String> {
+pub(super) fn hls_uri(text: &str) -> Result<String, String> {
     if text.is_empty()
         || text.len() > MAX_URI_BYTES
         || text
