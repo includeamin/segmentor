@@ -1,10 +1,24 @@
 # TDD 0009: Common encryption and DRM
 
-- Status: Accepted; H.264 and audio implemented, different keys per clip implemented, HEVC pending
+- Status: Accepted; H.264, HEVC, and audio implemented, different keys per clip implemented
 - Created: 2026-10-01
-- Updated: 2026-10-02
+- Updated: 2026-10-04
 - Related ADRs: [ADR 0001](../adr/0001-use-fragmented-mp4-for-media-segments.md) (fragmented MP4 segments)
 - Related designs: [TDD 0002](0002-asset-map-interface.md) (the mapper interface this extends), [TDD 0006](0006-trick-play-subtitles-and-renditions.md) (its "DRM (later)" section recorded what this must not break), [TDD 0008](0008-clipping-and-concatenation.md) (sequences, which this covers)
+
+## Implementation status
+
+H.264, HEVC, AAC, AC-3, and E-AC-3 are encrypted; different keys per clip is implemented. HEVC (added 2026-10-04) follows the H.264 design: `cenc::hevc` reads `hvcC`, parses the SPS and PPS far enough to answer the questions a slice segment header asks of them, and ends each slice's clear part at the end of its header.
+
+### What implementation found: HEVC
+
+- **A decrypt round trip proves nothing about the header length.** `FFmpeg`'s decryptor decrypts whatever bytes the subsample map names, so a map that encrypted part of a slice header would still round-trip. The check that matters is the header's length itself, so the tests compare it with `FFmpeg`'s own parser: `trace_headers` prints the bit position of `alignment_bit_equal_to_one` for every slice segment header, and the parser must end each header at the same place.
+- **x265 does not exercise most of the syntax.** Nine x265 streams (B-pyramids, eight reference frames, four slices, wavefronts, weighted prediction, 10-bit, 4:2:2, 4:4:4, and in-band parameter sets: 540 slice headers) agree, but they never use an inter-predicted reference set, `short_term_ref_pic_set_idx`, long-term pictures, list modification, tiles, dependent slice segments, header extensions, scaling lists, or the chroma QP offset list. A small bitstream writer in the tests builds those (33 more headers in six streams), and `FFmpeg` reads the same bytes: reference sets predicted from other sets (in the SPS and in a slice, with `delta_idx_minus1`), long-term pictures from the SPS and explicit, list modification, collocated references, non-uniform tiles, dependent slice segments, extra header bits, scaling lists in the SPS and PPS, PCM, deblocking overrides, the range extension, and separate colour planes.
+- **Hand-derived expectations caught the first mistakes.** The writer needs the number of pictures a slice uses for prediction (`NumPicTotalCurr`) to size the list-modification fields. Computed by hand from H.265 equations 7-61 and 7-62 rather than by the code under test, they showed that the first version of the test streams, not the parser, was wrong. Four mutations of the parser (a zero delta kept in a derived set, a list-modification width off by one, an extra bit in the weight table, a dropped long-term flag) are each caught.
+- **`FFmpeg` drops packets before the first keyframe in copy mode,** so a trace of a stream that starts on a non-IDR slice shows nothing. Every hand-built stream starts with an IDR slice.
+- **Refused, not guessed at:** reserved VCL NAL types, layers above the base layer, the multiview, scalable, 3D, and screen-content profiles (6 to 11), and the multilayer, 3D, and screen-content PPS extensions. Each adds slice header fields this does not read, so encrypting them could cut a header in half. They fail the asset with a message naming the cause.
+- **A slice header of up to 1 KiB is read first,** and one with more (many entry points, in tiled or wavefront streams) is read again with up to 64 KiB, so the common case allocates little.
+- **End to end:** `FFmpeg` decrypts and decodes every frame of the served HEVC fixture with the right key, and cannot with the wrong key or none. A fuzz target (`hevc-slice-header`) ran 2.2 million inputs without a panic.
 
 ## Summary
 

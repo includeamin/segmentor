@@ -21,7 +21,7 @@ The baseline is nginx-vod-module's [published feature list](https://github.com/k
 | Fragmented MP4 input | Done | [TDD 0005](technical-design/0005-fragmented-mp4-input.md) |
 | Source clipping; playing several files back to back | Done | [TDD 0008](technical-design/0008-clipping-and-concatenation.md) |
 | Variable segment lengths | Done, inherent to keyframe-aligned planning | [TDD 0001](technical-design/0001-on-demand-mp4-packaging-core.md) |
-| DRM: CENC `cbcs` for DASH, `SAMPLE-AES` for HLS (Widevine, FairPlay, PlayReady, Clear Key) | Done for H.264 and audio, including different keys per clip | [TDD 0009](technical-design/0009-common-encryption-and-drm.md) |
+| DRM: CENC `cbcs` for DASH, `SAMPLE-AES` for HLS (Widevine, FairPlay, PlayReady, Clear Key) | Done for H.264, HEVC, and audio, including different keys per clip | [TDD 0009](technical-design/0009-common-encryption-and-drm.md) |
 | Metadata caching, asynchronous I/O, CDN-friendly output | Done | [TDD 0001](technical-design/0001-on-demand-mp4-packaging-core.md), [TDD 0003](technical-design/0003-production-grade-http-api.md) |
 
 ## Phase 1: Finish DRM
@@ -31,7 +31,7 @@ DRM is the most common reason a studio-licensed catalog cannot move. These steps
 | Step | Status | Notes |
 | --- | --- | --- |
 | Different keys per clip | Done | Clear pre-roll before encrypted content; `METHOD=NONE` transitions |
-| HEVC encryption | To do | Slice-header parser for HEVC (the `hvcC` path); same `cbcs` pattern as H.264 |
+| HEVC encryption | Done | Slice-segment-header parser for HEVC (the `hvcC` path), checked against `FFmpeg`'s own parser on x265 and hand-built streams; same `cbcs` pattern as H.264. See [TDD 0009](technical-design/0009-common-encryption-and-drm.md#implementation-status) |
 | Whole-segment HLS AES-128 | To do | nginx-vod-module's "HLS AES-128": simple protection without a DRM vendor. Whole-fragment AES-128-CBC with a key URI, independent of `cbcs` |
 | Key rotation within an asset | To do | Key periods over the timeline. HLS: new `EXT-X-KEY` at period boundaries. DASH: per-Period or `pssh` in fragments |
 | Decrypting CENC-encrypted source files | To do | nginx-vod-module repackages already-encrypted MP4s. Needs `encv`/`enca` parsing and a source-key field in the mapper answer |
