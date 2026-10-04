@@ -75,3 +75,10 @@ pub fn max_input_bytes() -> u64 {
 pub fn exercise_avc_slice_header(data: &[u8]) {
     crate::cenc::fuzz_avc(data);
 }
+
+/// Feeds arbitrary bytes to the H.265 parameter-set and slice-header parsers used for `cbcs`,
+/// split as for [`exercise_avc_slice_header`].
+#[doc(hidden)]
+pub fn exercise_hevc_slice_header(data: &[u8]) {
+    crate::cenc::fuzz_hevc(data);
+}

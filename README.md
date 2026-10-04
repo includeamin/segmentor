@@ -41,8 +41,7 @@ proportional to the segment asked for, not to the length of the video.
   joining files is done on keyframes, not by re-encoding ([clips](docs/mapper-api.md#clips)).
 - **No live streaming, no MPEG-TS output.** Segments are fragmented MP4. DRM is supported through
   `cbcs` encryption with Widevine, FairPlay, PlayReady, and Clear Key signalling
-  ([mapper API](docs/mapper-api.md#encryption)); video encryption is H.264 for now, with HEVC
-  next.
+  ([mapper API](docs/mapper-api.md#encryption)); video encryption is H.264 and HEVC.
 - **No authentication.** Run it behind a reverse proxy or CDN that provides it; see
   [operations](docs/operations.md). TLS itself is optional but built in ([`[server.tls]`](docs/operations.md#tls))
   for the case of running with no proxy in front.

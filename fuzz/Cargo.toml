@@ -25,3 +25,10 @@ path = "fuzz_targets/avc_slice_header.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hevc-slice-header"
+path = "fuzz_targets/hevc_slice_header.rs"
+test = false
+doc = false
+bench = false

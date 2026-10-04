@@ -2493,9 +2493,10 @@ async fn a_stalled_encrypted_response_is_dropped_and_frees_its_job_slot() {
 #[tokio::test]
 async fn an_unsupported_codec_with_encryption_fails_the_asset() {
     let h = harness().await;
+    // VP9 and Opus have no encryption rules here yet (HEVC does: see the HEVC test below).
     h.mapper.state.set(
         "drm",
-        Answer::file("v1", "hevc-aac.mp4").with_encryption(clear_key_encryption(KEY)),
+        Answer::file("v1", "vp9-opus.mp4").with_encryption(clear_key_encryption(KEY)),
     );
 
     assert_eq!(
@@ -3033,4 +3034,75 @@ async fn ffmpeg_decrypts_every_encrypted_track_we_serve() {
         "",
         "clear decoding of encrypted video fails"
     );
+}
+
+/// `FFmpeg`'s count of the video frames in `path`.
+fn video_frames(path: &std::path::Path) -> u64 {
+    let output = std::process::Command::new("ffprobe")
+        .args(["-v", "error", "-count_frames", "-select_streams", "v:0"])
+        .args(["-show_entries", "stream=nb_read_frames", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// HEVC is encrypted in the `cbcs` pattern like H.264 (TDD 0009): `FFmpeg`'s independent
+/// decryptor recovers every frame with the right key, and cannot decode it with the wrong key or
+/// none.
+#[tokio::test]
+async fn ffmpeg_decrypts_encrypted_hevc() {
+    if std::process::Command::new("ffprobe")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: ffprobe is not installed");
+        return;
+    }
+    let h = harness().await;
+    h.mapper.state.set(
+        "hevc",
+        Answer::file("v1", "hevc-aac.mp4").with_encryption(clear_key_encryption(KEY)),
+    );
+    let master = fetch(&h.app, "/hls/hevc/master.m3u8").await;
+    assert_eq!(master.0, StatusCode::OK, "{}", text(&master.2));
+    let version = version_in(&master.2);
+    let playlist = text(&fetch(&h.app, "/hls/hevc/video/index.m3u8").await.2);
+    let segments = playlist
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert!(!segments.is_empty(), "{playlist}");
+    let clips = vec![(format!("init.mp4?v={version}"), segments)];
+    let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/drm-hevc");
+
+    let frames = decode_each(&h.app, "/hls/hevc/video/", &clips, &directory, Some(KEY)).await;
+
+    let source =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hevc-aac.mp4");
+    assert_eq!(frames, [video_frames(&source)]);
+    let encrypted = directory.join("clip-0.mp4");
+    assert_eq!(decode_errors(&encrypted, Some(KEY)), "", "right key");
+    assert_ne!(decode_errors(&encrypted, None), "", "no key");
+    assert_ne!(
+        decode_errors(&encrypted, Some("ffeeddccbbaa99887766554433221100")),
+        "",
+        "wrong key"
+    );
+    // The init segment declares what a player needs to find the key.
+    let init = fetch(&h.app, &format!("/hls/hevc/video/init.mp4?v={version}"))
+        .await
+        .2;
+    for name in [&b"encv"[..], b"hvc1", b"sinf", b"cbcs", b"tenc"] {
+        assert!(
+            init.windows(4).any(|window| window == name),
+            "{}",
+            String::from_utf8_lossy(name)
+        );
+    }
 }

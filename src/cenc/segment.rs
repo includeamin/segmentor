@@ -8,6 +8,7 @@ use bytes::Bytes;
 
 use super::avc::AvcParameters;
 use super::cipher::{Cipher, Pattern};
+use super::hevc::HevcParameters;
 use super::keys::{ContentKey, Encryption};
 use crate::error::{Error, Result};
 use crate::fmp4::{self, InitProtection, MAX_SUBSAMPLES};
@@ -19,8 +20,15 @@ use crate::source::Metadata;
 pub(crate) struct TrackProtection {
     pub(crate) key: ContentKey,
     pub(crate) kind: TrackKind,
-    /// H.264 parameter sets, for finding slice headers; `None` for audio.
-    pub(crate) avc: Option<AvcParameters>,
+    /// Parameter sets, for finding slice headers; `None` for audio.
+    pub(crate) video: Option<VideoParameters>,
+}
+
+/// The parameter sets of a video track, by codec.
+#[derive(Debug)]
+pub(crate) enum VideoParameters {
+    Avc(AvcParameters),
+    Hevc(HevcParameters),
 }
 
 impl TrackProtection {
@@ -61,18 +69,21 @@ impl AssetProtection {
     ) -> Result<Self> {
         let mut protected = HashMap::with_capacity(tracks.len());
         for track in tracks {
-            let avc = match &track.codec {
+            let video = match &track.codec {
                 CodecConfig::Avc { .. } => {
                     let (_, entry) = fmp4::sample_entry(metadata, track.id)?;
-                    Some(AvcParameters::from_sample_entry(&entry)?)
+                    Some(VideoParameters::Avc(AvcParameters::from_sample_entry(
+                        &entry,
+                    )?))
+                }
+                CodecConfig::Hevc { .. } => {
+                    let (_, entry) = fmp4::sample_entry(metadata, track.id)?;
+                    Some(VideoParameters::Hevc(HevcParameters::from_sample_entry(
+                        &entry,
+                    )?))
                 }
                 CodecConfig::Aac { .. } | CodecConfig::Ac3 { .. } | CodecConfig::Eac3 { .. } => {
                     None
-                }
-                CodecConfig::Hevc { .. } => {
-                    return Err(Error::Unsupported(
-                        "HEVC encryption is not supported yet".to_owned(),
-                    ));
                 }
                 other => {
                     return Err(Error::Unsupported(format!(
@@ -86,7 +97,7 @@ impl AssetProtection {
                 Arc::new(TrackProtection {
                     key: encryption.key_for(track.kind).clone(),
                     kind: track.kind,
-                    avc,
+                    video,
                 }),
             );
         }
@@ -146,8 +157,9 @@ impl PendingEncryption {
         for sample in &self.samples {
             let size = usize::try_from(sample.size).map_err(|_| invalid("sample too large"))?;
             let bytes = &mut payload[offset..offset + size];
-            let map = match &self.protection.avc {
-                Some(avc) => avc_subsamples(avc, bytes)?,
+            let map = match &self.protection.video {
+                Some(VideoParameters::Avc(avc)) => avc_subsamples(avc, bytes)?,
+                Some(VideoParameters::Hevc(hevc)) => hevc_subsamples(hevc, bytes)?,
                 None => Vec::new(),
             };
             if map.is_empty() {
@@ -217,6 +229,65 @@ pub(super) fn avc_subsamples(parameters: &AvcParameters, sample: &[u8]) -> Resul
                 ));
             }
             7 | 8 => {
+                in_band
+                    .get_or_insert_with(|| parameters.clone())
+                    .update(nal)?;
+                clear += length_size + length;
+            }
+            _ => clear += length_size + length,
+        }
+        at = end;
+    }
+    if clear > 0 {
+        push_subsample(&mut map, clear, 0)?;
+    }
+    if map.len() > MAX_SUBSAMPLES {
+        return Err(invalid(
+            "a sample has more than 42 subsamples, more than saiz can describe",
+        ));
+    }
+    Ok(map)
+}
+
+/// One H.265 sample's `(clear, protected)` subsamples (TDD 0009, "What is encrypted"): every NAL
+/// unit that is not a slice segment joins the next clear run, and each slice segment's header stays
+/// clear, as for H.264.
+pub(super) fn hevc_subsamples(
+    parameters: &HevcParameters,
+    sample: &[u8],
+) -> Result<Vec<(u16, u32)>> {
+    let invalid = |message: &str| Error::InvalidMedia(message.to_owned());
+    let length_size = parameters.nal_length_size();
+    let mut in_band: Option<HevcParameters> = None;
+    let mut map = Vec::new();
+    let mut clear = 0usize;
+    let mut at = 0usize;
+    while at < sample.len() {
+        let prefix = sample
+            .get(at..at + length_size)
+            .ok_or_else(|| invalid("a NAL length is truncated"))?;
+        let length = prefix
+            .iter()
+            .fold(0usize, |value, byte| value << 8 | usize::from(*byte));
+        let start = at + length_size;
+        let end = start
+            .checked_add(length)
+            .filter(|end| *end <= sample.len())
+            .ok_or_else(|| invalid("a NAL unit runs past its sample"))?;
+        let nal = &sample[start..end];
+        let nal_type = (nal.first().ok_or_else(|| invalid("an empty NAL unit"))? >> 1) & 0x3f;
+        match nal_type {
+            0..=9 | 16..=21 => {
+                let header = in_band.as_ref().unwrap_or(parameters).clear_bytes(nal)?;
+                push_subsample(&mut map, clear + length_size + header, length - header)?;
+                clear = 0;
+            }
+            10..=15 | 22..=31 => {
+                return Err(Error::Unsupported(format!(
+                    "H.265 NAL unit type {nal_type} cannot be encrypted"
+                )));
+            }
+            32..=34 => {
                 in_band
                     .get_or_insert_with(|| parameters.clone())
                     .update(nal)?;

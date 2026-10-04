@@ -279,7 +279,7 @@ Any other system ID is accepted and signalled in DASH only (its `pssh` and `lice
 
 **segmentor never contacts a licence server.** It encrypts with the keys you give it and tells players where to get a licence; the player fetches the licence from your DRM vendor. The `pssh` boxes and URLs are yours to produce.
 
-**Codecs.** H.264 video and AAC, AC-3, and E-AC-3 audio can be encrypted. HEVC encryption is not supported yet: an asset with HEVC and an `encryption` object fails with "HEVC encryption is not supported yet". VP9, AV1, Opus, and FLAC cannot be encrypted. A source file that is itself encrypted is still rejected.
+**Codecs.** H.264 and HEVC video and AAC, AC-3, and E-AC-3 audio can be encrypted. HEVC streams in the multiview, scalable, 3D, and screen-content profiles, or with layers above the base layer, are refused with a message naming the cause. VP9, AV1, Opus, and FLAC cannot be encrypted. A source file that is itself encrypted is still rejected.
 
 **A malformed `encryption` object makes the whole answer malformed**: a `502` to players, never cached as valid, like any other bad answer. That covers an unknown scheme, a bad hex length, keys that do not cover every track, more than eight systems, a `pssh` that is not a well-formed box or names another system, a `license_url` that is not `https`, a FairPlay entry without `hls_uri`, and FairPlay listed with separate video and audio keys. Error messages and logs never contain key material.
 

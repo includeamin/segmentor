@@ -4,6 +4,7 @@
 mod avc;
 mod bits;
 mod cipher;
+mod hevc;
 mod keys;
 mod segment;
 mod signal;
@@ -28,6 +29,21 @@ pub(crate) fn fuzz_avc(data: &[u8]) {
     let _ = parameters.update(pps);
     let _ = parameters.clear_bytes(slice);
     let _ = segment::avc_subsamples(&parameters, slice);
+}
+
+/// See `fuzzing::exercise_hevc_slice_header`.
+pub(crate) fn fuzz_hevc(data: &[u8]) {
+    let Some((&split, rest)) = data.split_first() else {
+        return;
+    };
+    let split = usize::from(split).min(rest.len());
+    let (sps, rest) = rest.split_at(split);
+    let (pps, slice) = rest.split_at(rest.len() / 2);
+    let mut parameters = hevc::HevcParameters::empty(4);
+    let _ = parameters.update(sps);
+    let _ = parameters.update(pps);
+    let _ = parameters.clear_bytes(slice);
+    let _ = segment::hevc_subsamples(&parameters, slice);
 }
 
 #[cfg(test)]
