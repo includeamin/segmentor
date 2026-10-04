@@ -774,6 +774,7 @@ impl AssetRegistry {
                 version: None,
                 encryption: resolved.encryption.clone(),
                 hls_mux_audio: self.settings.hls_mux_audio,
+                hls_aes128: resolved.hls_aes128.clone(),
             },
             self.settings.segment_duration_ms,
             &self.limits,

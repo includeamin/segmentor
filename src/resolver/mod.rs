@@ -120,6 +120,9 @@ pub(crate) struct ResolvedAsset {
     pub(crate) hard_expiry: Option<Instant>,
     /// Content keys and DRM systems for the whole asset (TDD 0009); `None` serves it clear.
     pub(crate) encryption: Option<std::sync::Arc<crate::cenc::Encryption>>,
+    /// Whole-segment HLS `AES-128` for a single file (TDD 0012); mutually exclusive with
+    /// `encryption`.
+    pub(crate) hls_aes128: Option<std::sync::Arc<crate::cenc::Aes128>>,
 }
 
 impl ResolvedAsset {

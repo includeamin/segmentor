@@ -26,6 +26,7 @@
   - [Common encryption and DRM](technical-design/0009-common-encryption-and-drm.md)
   - [Compact sample index](technical-design/0010-compact-sample-index.md)
   - [Muxed audio and video for HLS](technical-design/0011-muxed-hls-audio.md)
+  - [Whole-segment HLS AES-128](technical-design/0012-hls-aes-128.md)
   - [Technical design template](technical-design/template.md)
 
 # Implementation

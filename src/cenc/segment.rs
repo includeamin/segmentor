@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
+use super::aes128::Aes128;
 use super::avc::AvcParameters;
 use super::cipher::{Cipher, Pattern};
 use super::hevc::HevcParameters;
@@ -118,9 +119,53 @@ impl AssetProtection {
     }
 }
 
-/// A segment of an encrypted track, prepared up to the point where its bytes are needed.
+/// A segment that must be encrypted once its bytes are read (TDD 0009, "The encrypted segment
+/// path"): a `cbcs` track's samples, or a whole `AES-128` segment.
 #[derive(Debug, Clone)]
-pub(crate) struct PendingEncryption {
+pub(crate) enum PendingEncryption {
+    Cbcs(PendingCbcs),
+    /// Header and payload encrypted together as one message (TDD 0012).
+    WholeSegment {
+        /// The fragment's `moof` and `mdat` header, which the payload follows.
+        header: Bytes,
+        segment_index: u32,
+        key: Arc<Aes128>,
+    },
+}
+
+impl PendingEncryption {
+    /// Room to reserve ahead of the payload, so [`Self::finish`] can build the fragment in the
+    /// same buffer the payload was read into.
+    pub(crate) fn header_room(&self) -> usize {
+        match self {
+            Self::Cbcs(pending) => pending.header_room(),
+            // The header, and up to a block of padding.
+            Self::WholeSegment { header, .. } => header.len() + 16,
+        }
+    }
+
+    /// Encrypts `payload` (the samples' bytes, in order) and returns the finished fragment.
+    pub(crate) fn finish(&self, payload: Vec<u8>) -> Result<Bytes> {
+        match self {
+            Self::Cbcs(pending) => pending.finish(payload),
+            Self::WholeSegment {
+                header,
+                segment_index,
+                key,
+            } => {
+                let mut message = Vec::with_capacity(header.len() + payload.len() + 16);
+                message.extend_from_slice(header);
+                message.extend_from_slice(&payload);
+                key.encrypt_segment(*segment_index, &mut message);
+                Ok(Bytes::from(message))
+            }
+        }
+    }
+}
+
+/// A segment of a `cbcs` track, prepared up to the point where its bytes are needed.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingCbcs {
     pub(crate) track_id: u32,
     pub(crate) kind: TrackKind,
     pub(crate) samples: Vec<Sample>,
@@ -129,7 +174,7 @@ pub(crate) struct PendingEncryption {
     pub(crate) protection: Arc<TrackProtection>,
 }
 
-impl PendingEncryption {
+impl PendingCbcs {
     /// Room to reserve ahead of the payload for the fragment header, so [`Self::finish`] can put
     /// the header in front without copying the payload into a second buffer. An estimate: a
     /// sample's `trun`, `senc` (a few subsamples), and `saiz` entries, plus the fixed boxes; a

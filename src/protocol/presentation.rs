@@ -23,6 +23,7 @@ pub(crate) struct Presentation<'a> {
     version: &'a str,
     subtitles: &'a [Subtitle],
     encryption: Option<&'a crate::cenc::Encryption>,
+    aes128: Option<&'a crate::cenc::Aes128>,
     muxed: bool,
 }
 
@@ -34,8 +35,18 @@ impl<'a> Presentation<'a> {
             version,
             subtitles: &[],
             encryption: None,
+            aes128: None,
             muxed: false,
         }
+    }
+
+    /// The same view, with every HLS media segment encrypted whole under `aes128` (TDD 0012).
+    pub(crate) const fn with_aes128(self, aes128: Option<&'a crate::cenc::Aes128>) -> Self {
+        Self { aes128, ..self }
+    }
+
+    pub(crate) const fn aes128(&self) -> Option<&'a crate::cenc::Aes128> {
+        self.aes128
     }
 
     /// The same view, with HLS video segments carrying the default audio track (TDD 0011).

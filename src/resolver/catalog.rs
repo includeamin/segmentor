@@ -36,6 +36,7 @@ impl StaticResolver {
             valid_until: Instant::now() + FOREVER,
             hard_expiry: None,
             encryption: None,
+            hls_aes128: None,
         }))
     }
 }
