@@ -918,7 +918,14 @@ pub(crate) mod tests {
     }
 
     /// A short x265 stream with the given settings, made once and kept under `target/`.
+    ///
+    /// Tests run in parallel and each wants the same streams, so one at a time makes them: the
+    /// others then find the finished file instead of racing to write it.
     fn encode(name: &str, filters: &str, pixel_format: &str, tag: &str, params: &str) -> PathBuf {
+        static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ONE_AT_A_TIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/hevc-tests");
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join(format!("{name}.mp4"));
