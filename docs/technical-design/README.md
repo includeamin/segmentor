@@ -17,6 +17,7 @@ Technical design documents explain a proposed subsystem before or during impleme
 | [0009](0009-common-encryption-and-drm.md) | Common encryption and DRM | Accepted; H.264, HEVC, and audio implemented |
 | [0010](0010-compact-sample-index.md) | Compact sample index | Accepted; implemented |
 | [0011](0011-muxed-hls-audio.md) | Muxed audio and video for HLS | Accepted; implemented for clear single-file assets |
+| [0012](0012-hls-aes-128.md) | Whole-segment HLS AES-128 | Accepted; implemented for single-file assets |
 
 ## Workflow
 

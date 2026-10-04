@@ -110,6 +110,7 @@ pub(crate) fn build(
                 encryption,
                 // A sequence serves its own playlists; clips are never muxed (TDD 0011).
                 hls_mux_audio: false,
+                hls_aes128: None,
             },
         )
         .map_err(named(position))?;

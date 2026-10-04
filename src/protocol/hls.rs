@@ -202,6 +202,17 @@ pub(crate) fn media_playlist(presentation: Presentation<'_>, key: TrackKey) -> R
     playlist.push_str(&key_lines(presentation, track));
     writeln!(playlist, "#EXT-X-MAP:URI=\"init.mp4?v={version}\"")
         .expect("writing to a String cannot fail");
+    // After the map, not before it: a key applies to the initialization sections that follow it
+    // (RFC 8216, 4.3.2.4), and the init segment is sent clear. No `IV`: the default is each
+    // segment's media sequence number, which is its position here, counting from 0.
+    if let Some(aes128) = presentation.aes128() {
+        writeln!(
+            playlist,
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"{}\"",
+            aes128.uri()
+        )
+        .expect("writing to a String cannot fail");
+    }
     write_segment_entries(&mut playlist, presentation, track, 0, version)?;
     playlist.push_str("#EXT-X-ENDLIST\n");
     Ok(playlist)
@@ -508,6 +519,10 @@ pub(crate) fn iframe_stream(
     let Some(track) = video else {
         return Ok(None);
     };
+    // The I-frame fragments are not encrypted whole, so an AES-128 asset does not offer them.
+    if presentation.aes128().is_some() {
+        return Ok(None);
+    }
     let frames = keyframes(track)?;
     let (Some(peak), Some(average)) = (
         frames.peak_bandwidth(track.timescale),
