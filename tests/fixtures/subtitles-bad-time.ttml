@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<tt xmlns="http://www.w3.org/ns/ttml"><body><div>
+<p begin="0s" end="1s">fine</p>
+<p begin="2s" end="soon">broken</p>
+</div></body></tt>

@@ -9,6 +9,8 @@
 
 use std::fmt::Write;
 
+mod ttml;
+
 use bytes::Bytes;
 
 use crate::error::{Error, Result};
@@ -24,11 +26,12 @@ pub(crate) struct Subtitle {
     pub(crate) data: Bytes,
 }
 
-/// Validates `data` as `WebVTT` (or converts it from `SubRip`) and moves every cue `offset_ms`
-/// later.
+/// Validates `data` as `WebVTT` (or converts it from `SubRip` or TTML) and moves every cue
+/// `offset_ms` later.
 ///
 /// The file must be UTF-8 and either begin with `WEBVTT` (after an optional byte order mark) or be
-/// `SubRip`: numbered or bare cues of `HH:MM:SS,mmm --> HH:MM:SS,mmm` and text. With no offset a
+/// `SubRip`: numbered or bare cues of `HH:MM:SS,mmm --> HH:MM:SS,mmm` and text, or TTML/DFXP: an XML
+/// document with a `tt` root (see `ttml`). With no offset a
 /// `WebVTT` file's original bytes are returned untouched, but a cue timing line that cannot be
 /// read is refused either way, so a bad file is caught when the asset loads and not when a
 /// viewer's player meets it.
@@ -42,11 +45,13 @@ pub(crate) fn prepare(language: &str, data: &[u8], offset_ms: u64) -> Result<Byt
         .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t', '\n', '\r']));
     let converted = if header_ok {
         None
+    } else if ttml::looks_like_ttml(body) {
+        Some(webvtt_from(ttml::ttml_cues(body).map_err(refuse)?))
     } else if looks_like_srt(body) {
         Some(srt_to_webvtt(body).map_err(refuse)?)
     } else {
         return Err(refuse(
-            "does not begin with WEBVTT and is not SubRip (SRT) either",
+            "does not begin with WEBVTT and is neither SubRip (SRT) nor TTML",
         ));
     };
     let body = converted.as_deref().unwrap_or(body);
@@ -85,6 +90,26 @@ struct Cue {
     start: u64,
     end: u64,
     text: String,
+}
+
+/// Puts cues in start order, which players expect and editors do not guarantee, and writes them
+/// as a `WebVTT` file.
+fn webvtt_from(mut cues: Vec<Cue>) -> String {
+    cues.sort_by_key(|cue| cue.start);
+    let mut out =
+        String::with_capacity(cues.iter().map(|cue| cue.text.len() + 40).sum::<usize>() + 16);
+    out.push_str("WEBVTT\n");
+    for cue in &cues {
+        write!(
+            out,
+            "\n{} --> {}\n{}\n",
+            format_timestamp(cue.start),
+            format_timestamp(cue.end),
+            cue.text
+        )
+        .expect("writing to a String cannot fail");
+    }
+    out
 }
 
 /// Converts `SubRip` text to `WebVTT`.
@@ -135,20 +160,7 @@ fn srt_to_webvtt(body: &str) -> std::result::Result<String, &'static str> {
     if !found_timing {
         return Err(UNREADABLE);
     }
-    cues.sort_by_key(|cue| cue.start);
-    let mut out = String::with_capacity(body.len() + body.len() / 4 + 16);
-    out.push_str("WEBVTT\n");
-    for cue in &cues {
-        write!(
-            out,
-            "\n{} --> {}\n{}\n",
-            format_timestamp(cue.start),
-            format_timestamp(cue.end),
-            cue.text
-        )
-        .expect("writing to a String cannot fail");
-    }
-    Ok(out)
+    Ok(webvtt_from(cues))
 }
 
 /// `start --> end`, with anything after the end time (screen coordinates) ignored.
@@ -541,6 +553,53 @@ mod tests {
             "second line",
         ] {
             assert!(out.contains(expected), "{expected:?} in {out}");
+        }
+    }
+
+    #[test]
+    fn a_ttml_file_becomes_webvtt_and_is_moved_like_any_other() {
+        let ttml = r#"<?xml version="1.0"?><tt xmlns="http://www.w3.org/ns/ttml"><body><div>
+            <p begin="00:00:01.000" end="00:00:02.000">Hi<br/>there</p></div></body></tt>"#;
+
+        assert_eq!(
+            converted(ttml),
+            "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nHi\nthere\n"
+        );
+        assert_eq!(
+            shifted(ttml, 2500),
+            "WEBVTT\n\n00:00:03.500 --> 00:00:04.500\nHi\nthere\n"
+        );
+        // Converted once, it is plain WebVTT, which converts to itself.
+        let once = converted(ttml);
+        assert_eq!(converted(&once), once);
+        // With a byte order mark too.
+        assert_eq!(converted(&format!("\u{feff}{ttml}")), once);
+    }
+
+    #[test]
+    fn bad_ttml_is_refused_naming_the_language_and_the_reason() {
+        for (data, needle) in [
+            (
+                "<tt><body><div><p begin=\"0s\" end=\"x\">a</p></div></body></tt>",
+                "time expression",
+            ),
+            (
+                "<tt><body><div><p begin=\"0s\" end=\"1s\">a</div></body></tt>",
+                "XML",
+            ),
+            ("<!DOCTYPE tt []><tt/>", "neither"),
+            (
+                "<tt ttp:timeBase=\"smpte\" xmlns:ttp=\"http://www.w3.org/ns/ttml#parameter\"/>",
+                "time base",
+            ),
+        ] {
+            let error = prepare("it", data.as_bytes(), 0)
+                .expect_err("should be refused")
+                .to_string();
+            assert!(
+                error.contains("`it`") && error.contains(needle),
+                "{data}: {error}"
+            );
         }
     }
 

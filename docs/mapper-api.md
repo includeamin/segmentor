@@ -130,7 +130,7 @@ So: set `expires_at` on anything signed, keep the **same `version`** when you on
 
 ## Subtitles
 
-An answer may attach WebVTT or SubRip (SRT) subtitle files to the asset:
+An answer may attach WebVTT, SubRip (SRT), or TTML/DFXP subtitle files to the asset:
 
 ```json
 {
@@ -154,7 +154,7 @@ An answer may attach WebVTT or SubRip (SRT) subtitle files to the asset:
 | `forced` | No | The track is meant to be shown even when the viewer has not asked for subtitles |
 | `location` | Yes | A `file` or `http` location with the same rules as the media's, including the `[remote_media]` policy. An `http` origin must support ranged requests, as media origins do |
 
-The server fetches each file when the asset loads and keeps it in memory, so playback never touches the subtitle origin. A file must be UTF-8 and either begin with `WEBVTT` or be SubRip (see below), and must have readable cue timing lines. It is limited by `limits.max_subtitle_bytes` (2 MiB), `limits.max_subtitles_total_bytes` (8 MiB per asset), and `limits.max_subtitles` (16). **One bad file fails the whole asset** with the language named, so a viewer never gets a language that is silently missing.
+The server fetches each file when the asset loads and keeps it in memory, so playback never touches the subtitle origin. A file must be UTF-8 and either begin with `WEBVTT`, or be SubRip or TTML (see below), and must have readable cue timing. It is limited by `limits.max_subtitle_bytes` (2 MiB), `limits.max_subtitles_total_bytes` (8 MiB per asset), and `limits.max_subtitles` (16). **One bad file fails the whole asset** with the language named, so a viewer never gets a language that is silently missing.
 
 Cue times are read as times on the source file's own clock, the one its edit lists describe. Packaging can move a file onto a later timeline so that no timestamp is negative (this is what an edit list that trims encoder delay does, and it is typically a few tens of milliseconds), and the server adds that same offset to every cue so they stay in step with the picture. A video that simply starts late, through a leading empty edit, is not an offset: the cues were written against a clock that already includes that gap, so they are left alone. A fragmented file's timeline starts at zero and cues are not moved. Nothing else in the file changes.
 
@@ -165,7 +165,14 @@ Cue times are read as times on the source file's own clock, the one its edit lis
 - keeps `<b>`, `<i>`, and `<u>`, removes `<font>` tags and `{\an8}`-style override blocks (colours and positions are not carried over), and escapes any other `<`, `>`, or bare `&` so it stays text;
 - drops a cue that has no text or ends no later than it starts, since it could never be shown, and puts the cues in start order, which players expect and editors do not guarantee.
 
-A file in another encoding (Windows-1252 and UTF-16 are common for SRT) is refused with a message asking for UTF-8. TTML and other formats are not read.
+A file in another encoding (Windows-1252 and UTF-16 are common for SRT) is refused with a message asking for UTF-8.
+
+**TTML and DFXP are converted too** (W3C TTML 1 and 2, the older DFXP namespace, EBU-TT-D and IMSC1 text profiles in as far as they carry words and times), recognized by a `tt` root element. Only words, times, line breaks, and italic, bold, and underline are carried over: regions, colours, fonts, and positions are not, as for SubRip.
+
+- Times: `begin`, `end`, and `dur` on `<p>`, and `begin`/`end` on `<div>` and `<body>`, counted from the start of the parent; clock times (`00:00:01.500`, and `00:00:01:12` in frames), and offsets in `h`, `m`, `s`, `ms`, `f` (frames), and `t` (ticks), using the root's `ttp:frameRate`, `ttp:frameRateMultiplier`, and `ttp:tickRate`. A paragraph with no `end` or `dur` lasts as long as its parent, and one with no end at all is refused.
+- Text: `<br/>` is a line break, runs of white space are one space (unless `xml:space="preserve"`), `<span>` is inline, and `tts:fontStyle`, `tts:fontWeight`, and `tts:textDecoration` become `<i>`, `<b>`, and `<u>`, whether set on the element or through a referenced `<style>`. Timed spans (karaoke) are shown for the whole cue.
+- Refused: a `ttp:timeBase` other than `media` (SMPTE and clock time bases need a timeline segmentor does not have), a `DOCTYPE`, malformed XML, an entity the document does not define (`&nbsp;` is not an XML entity), and nesting deeper than 64 elements.
+- Elements are TTML's when bound to a TTML namespace, with or without a prefix; a document with no namespaces is read as TTML.
 
 **Change `version` when a subtitle file changes.** The server reloads an asset only when its `version` or location changes, so an edited caption under an unchanged version is not picked up until the asset is evicted.
 
