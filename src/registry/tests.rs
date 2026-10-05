@@ -1349,8 +1349,16 @@ async fn changing_a_caption_gives_the_asset_new_urls() {
 #[tokio::test]
 async fn a_bad_subtitle_fails_the_asset() {
     for (path, expected) in [
-        // Not WebVTT: the media is fine and the file is not.
-        ("subtitles-bad.srt", StatusCode::INTERNAL_SERVER_ERROR),
+        // Neither WebVTT nor SubRip: the media is fine and the file is not.
+        (
+            "subtitles-not-a-subtitle.txt",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
+        // SubRip, with a cue timing line that cannot be read.
+        (
+            "subtitles-bad-timing.srt",
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ),
         // Not there: the mapper pointed at something that does not exist.
         ("missing.vtt", StatusCode::BAD_GATEWAY),
     ] {
@@ -1461,6 +1469,73 @@ async fn cues_follow_the_shared_offset_of_the_edit_lists_and_nothing_else() {
             "{unchanged}"
         );
     }
+}
+
+/// A `SubRip` file is served as the `WebVTT` it is converted to, in both protocols, and its cues
+/// move with the timeline exactly as a `WebVTT` file's do.
+#[tokio::test]
+async fn srt_subtitles_are_served_as_webvtt_and_follow_the_timeline() {
+    let h = harness().await;
+    for (asset, file) in [
+        ("edited", "h264-aac-default-edits.mp4"),
+        ("plain", "h264-aac.mp4"),
+    ] {
+        h.mapper.state.set(
+            asset,
+            Answer::file("v1", file).with_subtitle("en", "subtitles-en.srt"),
+        );
+    }
+
+    let version = version_in(&fetch(&h.app, "/hls/plain/master.m3u8").await.2);
+    let (status, headers, file) = fetch(
+        &h.app,
+        &format!("/hls/plain/subtitles/en/sub.vtt?v={version}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "text/vtt; charset=utf-8");
+    assert_eq!(
+        text(&file),
+        "WEBVTT\n\n00:00:00.500 --> 00:00:01.500\nHello\n\n00:00:01.500 --> 00:00:02.500\n<i>World</i> &amp; friends\n"
+    );
+    // DASH serves the same bytes.
+    let dash = fetch(
+        &h.app,
+        &format!("/dash/plain/subtitles/en/sub.vtt?v={version}"),
+    )
+    .await;
+    assert_eq!(dash.2, file);
+    assert!(
+        text(&fetch(&h.app, "/dash/plain/manifest.mpd").await.2).contains("mimeType=\"text/vtt\"")
+    );
+
+    // The edit lists put everything 66.7 ms later, cues included.
+    let edited_version = version_in(&fetch(&h.app, "/hls/edited/master.m3u8").await.2);
+    let edited = text(
+        &fetch(
+            &h.app,
+            &format!("/hls/edited/subtitles/en/sub.vtt?v={edited_version}"),
+        )
+        .await
+        .2,
+    );
+    assert!(
+        edited.contains("00:00:00.567 --> 00:00:01.567\nHello"),
+        "{edited}"
+    );
+    assert!(
+        edited.contains("00:00:01.567 --> 00:00:02.567\n<i>World</i>"),
+        "{edited}"
+    );
+
+    // The version depends on the bytes served, so changing a caption, in either format, gives
+    // new URLs.
+    h.mapper.state.set(
+        "other",
+        Answer::file("v1", "h264-aac.mp4").with_subtitle("en", "subtitles-fr.vtt"),
+    );
+    let other = version_in(&fetch(&h.app, "/hls/other/master.m3u8").await.2);
+    assert_ne!(version, other);
 }
 
 // ---------------------------------------------------------------------------------------------

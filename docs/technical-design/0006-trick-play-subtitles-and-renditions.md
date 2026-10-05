@@ -158,4 +158,4 @@ Three independent changes, in order. The first needs no mapper change and can sh
 - **IDR versus other sync samples.** Should the I-frame playlist inspect the NAL unit type of each keyframe, so open-GOP HEVC files do not list pictures that cannot decode alone?
 - **I-frame streams per rendition.** Is one stream, from the lowest rendition, enough for Apple's seek bar, or should each rendition have one?
 - **Default subtitle track.** When the mapper marks none as `default`, should segmentor pick none, or the first?
-- **Other subtitle formats.** SRT is common in source libraries; converting it to WebVTT is small, but it should be a decision and not a surprise.
+- **Other subtitle formats.** SubRip (SRT) is now converted to WebVTT when the asset loads (decided and implemented 2026-10-05; see the [mapper API](../mapper-api.md#subtitles) for the rules). TTML and other formats are still open.

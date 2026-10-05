@@ -130,7 +130,7 @@ So: set `expires_at` on anything signed, keep the **same `version`** when you on
 
 ## Subtitles
 
-An answer may attach WebVTT subtitle files to the asset:
+An answer may attach WebVTT or SubRip (SRT) subtitle files to the asset:
 
 ```json
 {
@@ -154,9 +154,18 @@ An answer may attach WebVTT subtitle files to the asset:
 | `forced` | No | The track is meant to be shown even when the viewer has not asked for subtitles |
 | `location` | Yes | A `file` or `http` location with the same rules as the media's, including the `[remote_media]` policy. An `http` origin must support ranged requests, as media origins do |
 
-The server fetches each file when the asset loads and keeps it in memory, so playback never touches the subtitle origin. A file must be UTF-8, must begin with `WEBVTT`, and must have readable cue timing lines. It is limited by `limits.max_subtitle_bytes` (2 MiB), `limits.max_subtitles_total_bytes` (8 MiB per asset), and `limits.max_subtitles` (16). **One bad file fails the whole asset** with the language named, so a viewer never gets a language that is silently missing.
+The server fetches each file when the asset loads and keeps it in memory, so playback never touches the subtitle origin. A file must be UTF-8 and either begin with `WEBVTT` or be SubRip (see below), and must have readable cue timing lines. It is limited by `limits.max_subtitle_bytes` (2 MiB), `limits.max_subtitles_total_bytes` (8 MiB per asset), and `limits.max_subtitles` (16). **One bad file fails the whole asset** with the language named, so a viewer never gets a language that is silently missing.
 
 Cue times are read as times on the source file's own clock, the one its edit lists describe. Packaging can move a file onto a later timeline so that no timestamp is negative (this is what an edit list that trims encoder delay does, and it is typically a few tens of milliseconds), and the server adds that same offset to every cue so they stay in step with the picture. A video that simply starts late, through a leading empty edit, is not an offset: the cues were written against a clock that already includes that gap, so they are left alone. A fragmented file's timeline starts at zero and cues are not moved. Nothing else in the file changes.
+
+**SubRip (SRT) is converted to WebVTT** when the asset loads, so players, both protocols, and the timeline correction below only ever see WebVTT; the format is recognized from the content, not the file name or a field. The conversion:
+
+- reads numbered or bare cues, any of `,` or `.` before the milliseconds, short hour, minute, and fraction fields (`,5` is half a second), and CRLF, LF, or CR line endings, with or without a byte order mark;
+- drops the cue number, and the screen coordinates (`X1:63 X2:223 ...`) some editors append to the timing line;
+- keeps `<b>`, `<i>`, and `<u>`, removes `<font>` tags and `{\an8}`-style override blocks (colours and positions are not carried over), and escapes any other `<`, `>`, or bare `&` so it stays text;
+- drops a cue that has no text or ends no later than it starts, since it could never be shown, and puts the cues in start order, which players expect and editors do not guarantee.
+
+A file in another encoding (Windows-1252 and UTF-16 are common for SRT) is refused with a message asking for UTF-8. TTML and other formats are not read.
 
 **Change `version` when a subtitle file changes.** The server reloads an asset only when its `version` or location changes, so an edited caption under an unchanged version is not picked up until the asset is evicted.
 
