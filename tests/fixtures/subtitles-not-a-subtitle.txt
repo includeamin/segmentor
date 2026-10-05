@@ -1,0 +1,2 @@
+This is not a subtitle file.
+It is neither WebVTT nor SubRip.
