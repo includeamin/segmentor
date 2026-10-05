@@ -43,7 +43,7 @@ pub(crate) fn prepare(language: &str, data: &[u8], offset_ms: u64) -> Result<Byt
     let converted = if header_ok {
         None
     } else if looks_like_srt(body) {
-        Some(srt_to_webvtt(body).map_err(&refuse)?)
+        Some(srt_to_webvtt(body).map_err(refuse)?)
     } else {
         return Err(refuse(
             "does not begin with WEBVTT and is not SubRip (SRT) either",
