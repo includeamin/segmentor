@@ -1360,6 +1360,8 @@ async fn a_bad_subtitle_fails_the_asset() {
             "subtitles-bad-timing.srt",
             StatusCode::INTERNAL_SERVER_ERROR,
         ),
+        // TTML, with a time expression that cannot be read.
+        ("subtitles-bad-time.ttml", StatusCode::INTERNAL_SERVER_ERROR),
         // Not there: the mapper pointed at something that does not exist.
         ("missing.vtt", StatusCode::BAD_GATEWAY),
     ] {
@@ -1537,6 +1539,60 @@ async fn srt_subtitles_are_served_as_webvtt_and_follow_the_timeline() {
     );
     let other = version_in(&fetch(&h.app, "/hls/other/master.m3u8").await.2);
     assert_ne!(version, other);
+}
+
+/// A TTML file is served as the `WebVTT` it is converted to, in both protocols, and its cues move
+/// with the timeline exactly as a `WebVTT` file's do.
+#[tokio::test]
+async fn ttml_subtitles_are_served_as_webvtt_and_follow_the_timeline() {
+    let h = harness().await;
+    for (asset, file) in [
+        ("edited", "h264-aac-default-edits.mp4"),
+        ("plain", "h264-aac.mp4"),
+    ] {
+        h.mapper.state.set(
+            asset,
+            Answer::file("v1", file).with_subtitle("en", "subtitles-en.ttml"),
+        );
+    }
+
+    let version = version_in(&fetch(&h.app, "/hls/plain/master.m3u8").await.2);
+    let (status, headers, file) = fetch(
+        &h.app,
+        &format!("/hls/plain/subtitles/en/sub.vtt?v={version}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-type"], "text/vtt; charset=utf-8");
+    assert_eq!(
+        text(&file),
+        "WEBVTT\n\n00:00:00.500 --> 00:00:01.500\nHello\n\n00:00:01.500 --> 00:00:02.500\n<i>World &amp; friends\nsecond line</i>\n"
+    );
+    let dash = fetch(
+        &h.app,
+        &format!("/dash/plain/subtitles/en/sub.vtt?v={version}"),
+    )
+    .await;
+    assert_eq!(dash.2, file);
+
+    // The edit lists put everything 66.7 ms later, cues included.
+    let edited_version = version_in(&fetch(&h.app, "/hls/edited/master.m3u8").await.2);
+    let edited = text(
+        &fetch(
+            &h.app,
+            &format!("/hls/edited/subtitles/en/sub.vtt?v={edited_version}"),
+        )
+        .await
+        .2,
+    );
+    assert!(
+        edited.contains("00:00:00.567 --> 00:00:01.567\nHello"),
+        "{edited}"
+    );
+    assert!(
+        edited.contains("00:00:01.567 --> 00:00:02.567\n<i>World"),
+        "{edited}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -46,7 +46,7 @@ DRM is the most common reason a studio-licensed catalog cannot move. These steps
 | Step | Status | Notes |
 | --- | --- | --- |
 | SRT input converted to WebVTT | Done | Converted when the asset loads, so nothing downstream changes; the format is recognized from the content. Checked against FFmpeg's WebVTT parser. UTF-8 only; colours and positions are not carried over ([mapper API](mapper-api.md#subtitles)) |
-| TTML/DFXP input | To do | Needs an XML parser; keep styling out of scope as nginx-vod-module does |
+| TTML/DFXP input | Done | Converted to WebVTT like SRT: words, times (clock, frames, offsets, ticks), line breaks, italic, bold, and underline; styling, regions, and positions are not carried over; SMPTE and clock time bases and any DOCTYPE are refused ([mapper API](mapper-api.md#subtitles)) |
 | CAP (Cheetah) input | Decide first | Rare; build only for a known catalog that uses it |
 | Segmented subtitles | To do | Segmented WebVTT for HLS, and WebVTT or SMPTE-TT segments for DASH, instead of one sidecar file |
 | Text tracks inside the MP4 (`tx3g`, `wvtt`) | To do | Today only sidecar files are served |

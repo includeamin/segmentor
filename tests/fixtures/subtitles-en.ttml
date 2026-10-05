@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<tt xmlns="http://www.w3.org/ns/ttml"
+    xmlns:tts="http://www.w3.org/ns/ttml#styling"
+    xmlns:ttp="http://www.w3.org/ns/ttml#parameter"
+    ttp:timeBase="media" ttp:frameRate="25" xml:lang="en">
+  <head>
+    <styling>
+      <style xml:id="emphasis" tts:fontStyle="italic" tts:color="yellow"/>
+    </styling>
+    <layout>
+      <region xml:id="bottom" tts:origin="10% 80%" tts:extent="80% 15%"/>
+    </layout>
+  </head>
+  <body region="bottom">
+    <div>
+      <p begin="00:00:00.500" end="00:00:01.500">Hello</p>
+      <p begin="00:00:01.500" end="00:00:02.500" style="emphasis">World &amp; friends<br/>second line</p>
+    </div>
+  </body>
+</tt>
