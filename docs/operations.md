@@ -90,6 +90,12 @@ Alert on a rising `vod_segment_queue_timeouts_total` or `vod_http_requests_shed_
 
 Each loaded asset keeps its sample index in memory in compact form, about 16 bytes per sample: 4 for the sample's size, and the rest for chunk and timing tables, more when a file has many small chunks ([TDD 0010](technical-design/0010-compact-sample-index.md)). `limits.max_index_bytes` (default 4 GiB) rejects a catalog whose combined indexes exceed it, and startup fails with the measured size. Size the container's memory limit above that budget plus headroom for in-flight segment reads (`stream_chunk_bytes` times `max_segment_jobs`).
 
+## Viewer authorization
+
+With an `[authorization]` table, every media request needs a signed playback token (a JWT) that your own system mints; segmentor only verifies it, locally, with no network call. The token's `exp` and `asset` claims are required, and `renditions` and `subtitles` can narrow it. `/health`, `/ready`, `/metrics` and `/admin/status` stay open.
+
+A token can arrive as `Authorization: Bearer`, as a cookie (`segmentor_auth`), or as a query parameter (`auth`). The query form works with players that cannot be configured, because playlists and manifests carry it into every URL they list. Those playlists are then per viewer and uncacheable, and every segment URL differs per token, so a CDN shares nothing between viewers. For a shared cache, use the header or cookie and make the CDN key on the URL alone while forwarding the cookie to the origin. A missing or invalid token is `401`, a token for another asset is `403`, and neither says whether the asset exists. Watch `vod_authorization_checks_total{outcome}`. The reasoning is in [TDD 0007](technical-design/0007-viewer-authorization.md).
+
 ## Content encryption
 
 Assets whose mapper answer carries an `encryption` object ([mapper API](mapper-api.md#encryption)) are encrypted per request. The segment is read into memory, encrypted, and then sent in `limits.stream_chunk_bytes` pieces like any other. Its bytes are held under a segment-job slot from the read until the response finishes, so encrypted serving holds at most `limits.max_segment_jobs × limits.max_segment_bytes`. `max_segment_jobs` defaults to 2 × CPU cores, at most 32, and `max_segment_bytes` to 64 MiB: 512 MiB on a 4-core host, up to 2 GiB. Count it in the container's memory limit next to the index budget above, and lower either limit on small hosts. A client that stops reading an encrypted segment is cut off after `limits.response_idle_timeout_ms`, like any other, which frees its slot.

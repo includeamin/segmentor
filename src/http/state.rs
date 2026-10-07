@@ -11,7 +11,7 @@ use super::cors::cors_layer;
 use super::error::{HttpError, HttpResult};
 use super::router::ROUTES;
 use crate::composite::ServedAsset;
-use crate::config::{Config, ResolverSettings};
+use crate::config::{AuthorizationSettings, Config, ResolverSettings};
 use crate::error::Result;
 use crate::observability::metrics::Metrics;
 use crate::registry::{AssetRegistry, RegistrySettings, SourceOpener};
@@ -28,6 +28,8 @@ pub(crate) struct AppState {
     /// Cleared by the background probe while the mapper is unreachable.
     pub(crate) resolver_healthy: Arc<AtomicBool>,
     pub(crate) cors: Option<CorsLayer>,
+    /// Signed playback tokens (TDD 0007); `None` adds no check to the router at all.
+    pub(crate) authorization: Option<Arc<AuthorizationSettings>>,
     pub(crate) segment_queue_timeout: Duration,
     pub(crate) stream_chunk_bytes: usize,
     pub(crate) max_request_header_bytes: usize,
@@ -99,6 +101,7 @@ impl AppState {
             segment_jobs: Arc::new(Semaphore::new(config.limits.max_segment_jobs)),
             request_slots: Arc::new(Semaphore::new(config.limits.max_concurrent_requests)),
             metrics,
+            authorization: config.authorization.clone().map(Arc::new),
             ready: Arc::new(AtomicBool::new(true)),
             resolver_healthy: Arc::new(AtomicBool::new(true)),
             cors,

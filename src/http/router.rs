@@ -8,6 +8,7 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::{DefaultOnFailure, DefaultOnRequest, DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
+use super::authorize::authorize;
 use super::handlers::{
     admin_status, clip_init_segment, dash_manifest, health, iframe_playlist, iframe_segment,
     init_segment, master_playlist, media_playlist, media_segment, metrics, ready, subtitle_file,
@@ -61,11 +62,9 @@ pub(crate) const ROUTES: [&str; 18] = [
 ];
 
 pub(crate) fn router(state: AppState) -> Router {
-    let router = Router::new()
-        .route(HEALTH, get(health))
-        .route(ADMIN_STATUS, get(admin_status))
-        .route(READY, get(ready))
-        .route(METRICS, get(metrics))
+    // What a viewer fetches. A token check applies here and nowhere else: the probes, metrics, and
+    // admin status stay reachable whoever is watching.
+    let media = Router::new()
         .route(HLS_MASTER, get(master_playlist))
         .route(HLS_MEDIA_PLAYLIST, get(media_playlist))
         .route(HLS_IFRAME_PLAYLIST, get(iframe_playlist))
@@ -79,7 +78,20 @@ pub(crate) fn router(state: AppState) -> Router {
         .route(DASH_MANIFEST, get(dash_manifest))
         .route(DASH_INIT, get(init_segment))
         .route(DASH_CLIP_INIT, get(clip_init_segment))
-        .route(DASH_SEGMENT, get(media_segment))
+        .route(DASH_SEGMENT, get(media_segment));
+    // Added only when `[authorization]` is configured: without it the router is unchanged, with no
+    // branch and no cost.
+    let media = if state.authorization.is_some() {
+        media.route_layer(middleware::from_fn_with_state(state.clone(), authorize))
+    } else {
+        media
+    };
+    let router = Router::new()
+        .route(HEALTH, get(health))
+        .route(ADMIN_STATUS, get(admin_status))
+        .route(READY, get(ready))
+        .route(METRICS, get(metrics))
+        .merge(media)
         // Layers run outermost-last: timeout is innermost, request IDs outermost. CORS sits
         // outside the limit layers so 408, 431, and 503 responses stay readable by browsers.
         .layer(TimeoutLayer::with_status_code(

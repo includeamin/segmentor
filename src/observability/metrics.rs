@@ -28,6 +28,7 @@ pub(crate) struct Metrics {
     in_flight: AtomicI64,
     connections_open: AtomicI64,
     resolver_outcomes: [AtomicU64; RESOLVER_OUTCOMES.len()],
+    authorization_outcomes: [AtomicU64; AUTHORIZATION_OUTCOMES.len()],
     cache_events: [AtomicU64; CACHE_EVENTS.len()],
     loads_ok: AtomicU64,
     loads_failed: AtomicU64,
@@ -67,6 +68,7 @@ impl Metrics {
             in_flight: AtomicI64::new(0),
             connections_open: AtomicI64::new(0),
             resolver_outcomes: std::array::from_fn(|_| AtomicU64::new(0)),
+            authorization_outcomes: std::array::from_fn(|_| AtomicU64::new(0)),
             cache_events: std::array::from_fn(|_| AtomicU64::new(0)),
             loads_ok: AtomicU64::new(0),
             loads_failed: AtomicU64::new(0),
@@ -121,6 +123,20 @@ pub(crate) enum ResolverOutcome {
     Unavailable,
     Rejected,
 }
+
+/// How an authorization check ended (TDD 0007, "Observability").
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum AuthorizationOutcome {
+    Granted,
+    /// A bad signature, or a valid token that does not cover what was asked for.
+    Denied,
+    /// Expired or not yet valid.
+    Expired,
+    /// No token, or one that is not a token the configuration accepts.
+    Malformed,
+}
+
+const AUTHORIZATION_OUTCOMES: [&str; 4] = ["granted", "denied", "expired", "malformed"];
 
 const RESOLVER_OUTCOMES: [&str; 5] = ["ok", "unchanged", "not_found", "unavailable", "rejected"];
 
@@ -183,6 +199,10 @@ impl Metrics {
     pub(crate) fn connection_opened(self: &Arc<Self>) -> OpenConnection {
         self.connections_open.fetch_add(1, Relaxed);
         OpenConnection(Arc::clone(self))
+    }
+
+    pub(crate) fn authorization_check(&self, outcome: AuthorizationOutcome) {
+        self.authorization_outcomes[outcome as usize].fetch_add(1, Relaxed);
     }
 
     pub(crate) fn resolver_result(&self, outcome: ResolverOutcome) {
@@ -392,6 +412,20 @@ impl Metrics {
                 self.stream_aborts_client.load(Relaxed),
             ),
         ];
+        let _ = writeln!(
+            out,
+            "# HELP vod_authorization_checks_total Playback token checks by outcome.\n# TYPE vod_authorization_checks_total counter"
+        );
+        for (label, count) in AUTHORIZATION_OUTCOMES
+            .iter()
+            .zip(&self.authorization_outcomes)
+        {
+            let _ = writeln!(
+                out,
+                "vod_authorization_checks_total{{outcome=\"{label}\"}} {}",
+                count.load(Relaxed)
+            );
+        }
         let _ = writeln!(
             out,
             "# HELP vod_resolver_requests_total Asset resolver calls by outcome.\n# TYPE vod_resolver_requests_total counter"

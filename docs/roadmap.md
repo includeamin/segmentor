@@ -75,7 +75,7 @@ These change what segmentor is, so each starts with a new TDD.
 
 | Step | Status | Notes |
 | --- | --- | --- |
-| Viewer authorization (signed tokens, optional live check) | Draft | [TDD 0007](technical-design/0007-viewer-authorization.md). nginx-vod-module relies on NGINX modules for this |
+| Viewer authorization (signed tokens, optional live check) | Signed tokens done; live check not started | [TDD 0007](technical-design/0007-viewer-authorization.md). nginx-vod-module relies on NGINX modules for this |
 | Apple Media Stream Validator on served HLS | To do | Release-time check ([conformance](conformance.md)) |
 | DASH-IF conformance tool on served MPDs | To do | Release-time check |
 | Browser playback suite (hls.js, dash.js, Safari native) | To do | Start, seek, and play, across the codecs and DRM modes above |

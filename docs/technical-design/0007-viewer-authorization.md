@@ -1,8 +1,8 @@
 # TDD 0007: Viewer authorization
 
-- Status: Draft
+- Status: Accepted; Mode 1 (signed tokens) implemented, Mode 2 (live check) not started
 - Created: 2026-09-23
-- Updated: 2026-09-23
+- Updated: 2026-10-07
 - Related ADRs: None
 - Related designs: [TDD 0002](0002-asset-map-interface.md) (the mapper interface this sits beside, not inside), [TDD 0006](0006-trick-play-subtitles-and-renditions.md) (renditions this can scope, and DRM, which stays deferred)
 
@@ -116,6 +116,20 @@ Per-viewer authorization and shared-edge caching pull in opposite directions, an
 ## Rollout
 
 Additive and disabled by default: with `[authorization]` absent, the router is unchanged and every existing deployment — including this repository's own docs and examples — is unaffected. Signed tokens (Mode 1) ship first and are the complete feature for most deployments; the live check (Mode 2) is a second, independent stage that composes with it and can land later without revisiting the token format. `docs/mapper-api.md` and `examples/mapper/README.md` gain a short note once Mode 1 ships, since the example mapper and the demo/admin pages built alongside it are the easiest way to see it work.
+
+## Implementation status
+
+Mode 1 is implemented. What differs from, or settles, the design above:
+
+- **Configuration.** `[authorization]` with `algorithm` (`HS256`, `ES256`, `EdDSA`), exactly one of `key_env` (the secret, or a PEM public key, read from that variable) and `key_file`, `transports` (any of `header`, `cookie`, `query`; all by default), `query_parameter` (`auth`), `cookie_name` (`segmentor_auth`), `clock_skew_secs` (30, at most 300) and `max_token_bytes` (4096). Unknown keys are rejected, and no error or `Debug` output includes key material. `HS256` secrets must be at least 32 bytes.
+- **Transports.** The header is `Authorization: Bearer <token>`. They are tried in the order header, cookie, query, and the first one present decides: a bad header is not rescued by a good cookie. A transport that is not enabled is not read.
+- **Cookie.** segmentor reads the cookie and never sets it, so the operator's own login flow sets it, with whatever scope and `SameSite` it needs. It is not path-scoped by segmentor.
+- **Query tokens reach every URL.** A playlist or manifest requested with a query token is rewritten per viewer: each `?v=` URL gains `&auth=<token>` (`&amp;auth=` in DASH). Those responses carry no `ETag` and are `private, no-store`, and are not compressed from the shared cache. Playlists requested with the header or cookie are the shared, cacheable ones, unchanged.
+- **Failure codes.** `401` with `WWW-Authenticate: Bearer` for a missing, malformed, tampered, expired or not-yet-valid token, with a fixed reason body (`invalid token`, `token expired`, `token not yet valid`); `403` for a valid token that does not cover the resource. Refusals are `Cache-Control: no-store`, and never name the asset.
+- **Scope.** The `asset` claim is a string or a list; `renditions` and `subtitles` narrow a grant to those resources. Every media route is protected; `/health`, `/ready`, `/metrics` and `/admin/status` are not.
+- **Metrics.** `vod_authorization_checks_total{outcome}` as specified.
+
+Not done: Mode 2, a token-minting CLI, and the CDN worked example. These remain open below.
 
 ## Open questions
 

@@ -7,12 +7,16 @@ use serde::Deserialize;
 
 use crate::error::{Error, Result};
 
+mod authorization;
 mod cors;
 mod limits;
 mod logging;
 mod resolver;
 mod tls;
 
+pub(crate) use authorization::AuthorizationSettings;
+#[cfg(test)]
+pub(crate) use authorization::Transports;
 pub(crate) use cors::CorsConfig;
 pub(crate) use limits::LimitsConfig;
 pub(crate) use logging::{LogFormat, LoggingConfig};
@@ -32,6 +36,8 @@ pub(crate) struct Config {
     pub(crate) tls: Option<TlsConfig>,
     pub(crate) cors: CorsConfig,
     pub(crate) segment_duration_ms: u64,
+    /// Signed playback tokens (TDD 0007); `None` checks nothing.
+    pub(crate) authorization: Option<AuthorizationSettings>,
     /// Carry the default audio track inside HLS video segments (TDD 0011).
     pub(crate) hls_mux_audio: bool,
     pub(crate) assets: BTreeMap<String, PathBuf>,
@@ -41,6 +47,22 @@ pub(crate) struct Config {
     pub(crate) remote_media: RemoteMediaConfig,
     pub(crate) logging: LoggingConfig,
     pub(crate) limits: LimitsConfig,
+}
+
+impl RawConfig {
+    fn validate_nonzero(&self) -> Result<()> {
+        if self.packaging.segment_duration_ms == 0 {
+            return Err(Error::Configuration(
+                "packaging.segment_duration_ms must be greater than zero".to_owned(),
+            ));
+        }
+        if self.logging.buffer_capacity == 0 {
+            return Err(Error::Configuration(
+                "logging.buffer_capacity must be greater than zero".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Config {
@@ -59,6 +81,7 @@ impl Config {
             tls: None,
             cors: CorsConfig::default(),
             segment_duration_ms,
+            authorization: None,
             hls_mux_audio: default_hls_mux_audio(),
             assets,
             media_root,
@@ -89,16 +112,7 @@ impl Config {
         environment: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self> {
         let raw: RawConfig = toml::from_str(contents)?;
-        if raw.packaging.segment_duration_ms == 0 {
-            return Err(Error::Configuration(
-                "packaging.segment_duration_ms must be greater than zero".to_owned(),
-            ));
-        }
-        if raw.logging.buffer_capacity == 0 {
-            return Err(Error::Configuration(
-                "logging.buffer_capacity must be greater than zero".to_owned(),
-            ));
-        }
+        raw.validate_nonzero()?;
         raw.limits.validate()?;
         raw.server.validate()?;
         let tls = raw
@@ -110,6 +124,10 @@ impl Config {
         raw.cors.validate()?;
         raw.registry.validate()?;
         raw.remote_media.validate()?;
+        let authorization = raw
+            .authorization
+            .map(|raw| raw.validate(config_directory, environment))
+            .transpose()?;
         if raw.assets.len() > raw.limits.max_assets {
             return Err(Error::Configuration(format!(
                 "asset count exceeds configured limit {}",
@@ -181,6 +199,7 @@ impl Config {
             tls,
             cors: raw.cors,
             segment_duration_ms: raw.packaging.segment_duration_ms,
+            authorization,
             hls_mux_audio: raw.packaging.hls_mux_audio,
             assets,
             media_root,
@@ -235,6 +254,8 @@ struct RawConfig {
     registry: RegistryConfig,
     #[serde(default)]
     remote_media: RemoteMediaConfig,
+    #[serde(default)]
+    authorization: Option<authorization::RawAuthorization>,
     #[serde(default)]
     assets: BTreeMap<String, AssetConfig>,
 }
@@ -480,6 +501,106 @@ mod tests {
             ),
             &fixture_directory(),
         )
+    }
+
+    fn authorization_with(extra: &str, env: &[(&str, &str)]) -> Result<Config> {
+        let env: Vec<(String, String)> = env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        Config::parse_with(
+            &format!(
+                r#"
+                    [server]
+                    listen = "127.0.0.1:8080"
+                    [storage]
+                    media_root = "."
+                    [authorization]
+                    {extra}
+                    [assets.sample]
+                    path = "h264-aac.mp4"
+                "#
+            ),
+            &fixture_directory(),
+            &|name| env.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()),
+        )
+    }
+
+    const GOOD_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn authorization_is_off_unless_configured() {
+        assert!(parse_with("").unwrap().authorization.is_none());
+    }
+
+    #[test]
+    fn authorization_takes_its_secret_from_the_environment_with_defaults() {
+        let config = authorization_with(
+            "algorithm = \"HS256\"\nkey_env = \"TOKEN_KEY\"",
+            &[("TOKEN_KEY", GOOD_SECRET)],
+        )
+        .unwrap();
+        let settings = config.authorization.unwrap();
+        assert_eq!(
+            settings.transports,
+            Transports {
+                header: true,
+                cookie: true,
+                query: true
+            }
+        );
+        assert_eq!(settings.query_parameter, "auth");
+        assert_eq!(settings.cookie_name, "segmentor_auth");
+        assert!(!format!("{settings:?}").contains(GOOD_SECRET));
+    }
+
+    #[test]
+    fn authorization_rejects_what_it_cannot_use() {
+        let env = [("TOKEN_KEY", GOOD_SECRET)];
+        let base = "algorithm = \"HS256\"\nkey_env = \"TOKEN_KEY\"\n";
+        for (extra, env, needle) in [
+            (
+                "algorithm = \"RS256\"\nkey_env = \"TOKEN_KEY\"".to_owned(),
+                &env[..],
+                "RS256",
+            ),
+            (base.replace("TOKEN_KEY", "MISSING"), &env[..], "MISSING"),
+            ("algorithm = \"HS256\"".to_owned(), &env[..], "exactly one"),
+            (
+                format!("{base}key_file = \"k.pem\""),
+                &env[..],
+                "exactly one",
+            ),
+            (base.to_owned(), &[("TOKEN_KEY", "short")][..], "key"),
+            (format!("{base}transports = []"), &env[..], "at least one"),
+            (
+                format!("{base}transports = [\"header\", \"header\"]"),
+                &env[..],
+                "twice",
+            ),
+            (format!("{base}transports = [\"body\"]"), &env[..], "body"),
+            (
+                format!("{base}clock_skew_secs = 301"),
+                &env[..],
+                "clock_skew_secs",
+            ),
+            (
+                format!("{base}max_token_bytes = 8"),
+                &env[..],
+                "max_token_bytes",
+            ),
+            (
+                format!("{base}query_parameter = \"a b\""),
+                &env[..],
+                "query_parameter",
+            ),
+            (format!("{base}cookie_name = \"\""), &env[..], "cookie_name"),
+            (format!("{base}surprise = 1"), &env[..], "surprise"),
+        ] {
+            let error = authorization_with(&extra, env).unwrap_err().to_string();
+            assert!(error.contains(needle), "{extra}: {error}");
+            assert!(!error.contains(GOOD_SECRET), "{error}");
+        }
     }
 
     #[test]

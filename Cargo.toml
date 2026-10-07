@@ -19,6 +19,7 @@ exclude = ["/.github", "/docs", "/demo", "/fuzz", "/tests/fixtures", "/Dockerfil
 aes = "0.9"
 axum = "0.8"
 base64 = "0.23"
+aws-lc-rs = { version = "1.18", default-features = false, features = ["aws-lc-sys", "alloc"] }
 bytes = "1"
 hyper-util = { version = "0.1", features = ["http1", "http2", "server-auto", "server-graceful", "service", "tokio"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }

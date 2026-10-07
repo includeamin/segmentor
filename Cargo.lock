@@ -1530,6 +1530,7 @@ name = "segmentor"
 version = "0.1.0"
 dependencies = [
  "aes",
+ "aws-lc-rs",
  "axum",
  "base64",
  "blake3",
