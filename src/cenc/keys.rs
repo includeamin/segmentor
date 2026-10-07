@@ -76,8 +76,21 @@ pub(crate) struct DrmSystem {
 /// What the mapper's `encryption` object asks for, validated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Encryption {
+    /// The keys of the first encrypted period: the ones the init segment's `tenc` declares. For
+    /// an asset without rotation, the only ones.
     pub(crate) keys: Keys,
     pub(crate) systems: Vec<DrmSystem>,
+    /// The whole timeline (TDD 0013), or empty for one key over the whole asset. When present it
+    /// starts at 0, and `keys` and `systems` repeat its first encrypted period.
+    pub(crate) periods: Vec<KeyPeriod>,
+}
+
+/// A stretch of the timeline with its own keys, or none (TDD 0013).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KeyPeriod {
+    pub(crate) start_ms: u64,
+    /// `None` is a clear period. A period's own `periods` are always empty.
+    pub(crate) encryption: Option<Box<Encryption>>,
 }
 
 impl Encryption {
@@ -98,12 +111,34 @@ impl Encryption {
         }
     }
 
-    /// Key IDs in UUID form, for status reporting: never the keys.
-    pub(crate) fn key_ids(&self) -> Vec<String> {
-        self.distinct_keys()
-            .into_iter()
-            .map(|key| uuid_string(&key.key_id))
+    /// Whether the keys change over the timeline (TDD 0013).
+    pub(crate) fn is_rotating(&self) -> bool {
+        !self.periods.is_empty()
+    }
+
+    /// Every encrypted period's encryption, in timeline order; just this one without rotation.
+    pub(crate) fn encrypted_periods(&self) -> Vec<&Self> {
+        if self.periods.is_empty() {
+            return vec![self];
+        }
+        self.periods
+            .iter()
+            .filter_map(|period| period.encryption.as_deref())
             .collect()
+    }
+
+    /// Key IDs in UUID form, for status reporting: never the keys. Every period's, once each.
+    pub(crate) fn key_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        for encryption in self.encrypted_periods() {
+            for key in encryption.distinct_keys() {
+                let id = uuid_string(&key.key_id);
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        ids
     }
 
     /// Everything the encrypted bytes and the signalling depend on, hashed, for the URL version.
@@ -125,6 +160,13 @@ impl Encryption {
             feed(system.license_url.as_deref().unwrap_or_default().as_bytes());
             feed(system.hls_uri.as_deref().unwrap_or_default().as_bytes());
         }
+        for period in &self.periods {
+            feed(&period.start_ms.to_be_bytes());
+            match &period.encryption {
+                Some(encryption) => feed(&encryption.fingerprint()),
+                None => feed(b"clear"),
+            }
+        }
         hasher.finalize().into()
     }
 }
@@ -134,10 +176,30 @@ impl Encryption {
 #[derive(Debug, Deserialize)]
 pub(crate) struct WireEncryption {
     scheme: String,
+    #[serde(default)]
+    keys: Vec<WireKey>,
+    #[serde(default)]
+    systems: Vec<WireSystem>,
+    /// Shorthand for a clear first period of this length, then `keys` (TDD 0013).
+    #[serde(default)]
+    clear_lead_ms: Option<u64>,
+    /// The timeline, in place of `keys` and `systems` (TDD 0013).
+    #[serde(default)]
+    periods: Vec<WirePeriod>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WirePeriod {
+    start_ms: u64,
+    #[serde(default)]
+    clear: bool,
+    #[serde(default)]
     keys: Vec<WireKey>,
     #[serde(default)]
     systems: Vec<WireSystem>,
 }
+
+const MAX_PERIODS: usize = 256;
 
 #[derive(Deserialize)]
 struct WireKey {
@@ -175,82 +237,152 @@ impl WireEncryption {
         if self.scheme != "cbcs" {
             return Err("encryption scheme is not supported; only cbcs is".to_owned());
         }
-        let keys = self.keys()?;
-        let systems = self.systems()?;
-        // FairPlay's key line has no key ID, so a player could not tell the audio key apart.
-        if matches!(keys, Keys::Split { .. })
-            && systems.iter().any(|system| system.system_id == FAIRPLAY)
-        {
+        if self.periods.is_empty() {
+            let primary = single_period(&self.keys, &self.systems)?;
+            return match self.clear_lead_ms {
+                None | Some(0) => Ok(primary),
+                Some(lead) => timeline(vec![(0, None), (lead, Some(primary))]),
+            };
+        }
+        if !self.keys.is_empty() || !self.systems.is_empty() || self.clear_lead_ms.is_some() {
             return Err(
-                "FairPlay needs one key for all tracks (encryption keys tracks \"all\")".to_owned(),
+                "encryption periods cannot be combined with keys, systems, or clear_lead_ms"
+                    .to_owned(),
             );
         }
-        Ok(Encryption { keys, systems })
-    }
-
-    fn keys(&self) -> Result<Keys, String> {
-        let mut all = None;
-        let mut video = None;
-        let mut audio = None;
-        for wire in &self.keys {
-            let key = ContentKey {
-                key_id: hex16(&wire.key_id, "key_id")?,
-                key: KeyBytes(hex16(&wire.key, "key")?),
-                iv: match &wire.iv {
-                    Some(iv) => hex16(iv, "iv")?,
-                    None => derived_iv(&hex16(&wire.key_id, "key_id")?),
-                },
-            };
-            let slot = match wire.tracks.as_deref() {
-                None | Some("all") => &mut all,
-                Some("video") => &mut video,
-                Some("audio") => &mut audio,
-                Some(_) => {
-                    return Err("encryption key tracks must be all, video, or audio".to_owned());
+        if self.periods.len() > MAX_PERIODS {
+            return Err(format!("encryption lists more than {MAX_PERIODS} periods"));
+        }
+        let mut periods = Vec::with_capacity(self.periods.len());
+        for period in &self.periods {
+            let content = if period.clear {
+                if !period.keys.is_empty() || !period.systems.is_empty() {
+                    return Err("an encryption period is clear or has keys, not both".to_owned());
                 }
+                None
+            } else {
+                Some(single_period(&period.keys, &period.systems)?)
             };
-            if slot.replace(key).is_some() {
-                return Err(SHAPE.to_owned());
-            }
+            periods.push((period.start_ms, content));
         }
-        match (all, video, audio) {
-            (Some(key), None, None) => Ok(Keys::All(key)),
-            (None, Some(video), Some(audio)) => Ok(Keys::Split { video, audio }),
-            _ => Err(SHAPE.to_owned()),
-        }
-    }
-
-    fn systems(&self) -> Result<Vec<DrmSystem>, String> {
-        if self.systems.len() > MAX_SYSTEMS {
-            return Err(format!("encryption lists more than {MAX_SYSTEMS} systems"));
-        }
-        let mut systems: Vec<DrmSystem> = Vec::with_capacity(self.systems.len());
-        for wire in &self.systems {
-            let system_id = uuid(&wire.system_id)?;
-            if systems.iter().any(|known| known.system_id == system_id) {
-                return Err("encryption lists a system_id twice".to_owned());
-            }
-            let pssh = wire
-                .pssh
-                .as_deref()
-                .map(|encoded| decode_pssh(encoded, &system_id))
-                .transpose()?;
-            let license_url = wire.license_url.as_deref().map(license_url).transpose()?;
-            let hls_uri = wire.hls_uri.as_deref().map(hls_uri).transpose()?;
-            if system_id == FAIRPLAY && hls_uri.is_none() {
-                return Err("FairPlay needs an hls_uri".to_owned());
-            }
-            systems.push(DrmSystem {
-                system_id,
-                pssh,
-                license_url,
-                hls_uri,
-            });
-        }
-        Ok(systems)
+        timeline(periods)
     }
 }
 
+/// One period's keys and systems.
+fn single_period(keys: &[WireKey], systems: &[WireSystem]) -> Result<Encryption, String> {
+    let keys = keys_of(keys)?;
+    let systems = systems_of(systems)?;
+    // FairPlay's key line has no key ID, so a player could not tell the audio key apart.
+    if matches!(keys, Keys::Split { .. })
+        && systems.iter().any(|system| system.system_id == FAIRPLAY)
+    {
+        return Err(
+            "FairPlay needs one key for all tracks (encryption keys tracks \"all\")".to_owned(),
+        );
+    }
+    Ok(Encryption {
+        keys,
+        systems,
+        periods: Vec::new(),
+    })
+}
+
+/// The rules of TDD 0013 for a list of `(start_ms, keys or clear)`. A list that is one encrypted
+/// period from 0 is not rotation at all.
+fn timeline(periods: Vec<(u64, Option<Encryption>)>) -> Result<Encryption, String> {
+    if periods.first().map(|(start, _)| *start) != Some(0) {
+        return Err("the first encryption period must start at 0".to_owned());
+    }
+    if periods.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+        return Err("encryption period start_ms must increase".to_owned());
+    }
+    let Some(primary) = periods.iter().find_map(|(_, content)| content.clone()) else {
+        return Err("encryption needs at least one period with keys".to_owned());
+    };
+    for pair in periods.windows(2) {
+        if let (Some(before), Some(after)) = (&pair[0].1, &pair[1].1)
+            && before.key_ids() == after.key_ids()
+        {
+            return Err("adjacent encryption periods must use different key_id values".to_owned());
+        }
+    }
+    if let [(_, Some(_))] = periods.as_slice() {
+        return Ok(primary);
+    }
+    Ok(Encryption {
+        periods: periods
+            .into_iter()
+            .map(|(start_ms, content)| KeyPeriod {
+                start_ms,
+                encryption: content.map(Box::new),
+            })
+            .collect(),
+        ..primary
+    })
+}
+
+fn keys_of(wire_keys: &[WireKey]) -> Result<Keys, String> {
+    let mut all = None;
+    let mut video = None;
+    let mut audio = None;
+    for wire in wire_keys {
+        let key = ContentKey {
+            key_id: hex16(&wire.key_id, "key_id")?,
+            key: KeyBytes(hex16(&wire.key, "key")?),
+            iv: match &wire.iv {
+                Some(iv) => hex16(iv, "iv")?,
+                None => derived_iv(&hex16(&wire.key_id, "key_id")?),
+            },
+        };
+        let slot = match wire.tracks.as_deref() {
+            None | Some("all") => &mut all,
+            Some("video") => &mut video,
+            Some("audio") => &mut audio,
+            Some(_) => {
+                return Err("encryption key tracks must be all, video, or audio".to_owned());
+            }
+        };
+        if slot.replace(key).is_some() {
+            return Err(SHAPE.to_owned());
+        }
+    }
+    match (all, video, audio) {
+        (Some(key), None, None) => Ok(Keys::All(key)),
+        (None, Some(video), Some(audio)) => Ok(Keys::Split { video, audio }),
+        _ => Err(SHAPE.to_owned()),
+    }
+}
+
+fn systems_of(wire_systems: &[WireSystem]) -> Result<Vec<DrmSystem>, String> {
+    if wire_systems.len() > MAX_SYSTEMS {
+        return Err(format!("encryption lists more than {MAX_SYSTEMS} systems"));
+    }
+    let mut systems: Vec<DrmSystem> = Vec::with_capacity(wire_systems.len());
+    for wire in wire_systems {
+        let system_id = uuid(&wire.system_id)?;
+        if systems.iter().any(|known| known.system_id == system_id) {
+            return Err("encryption lists a system_id twice".to_owned());
+        }
+        let pssh = wire
+            .pssh
+            .as_deref()
+            .map(|encoded| decode_pssh(encoded, &system_id))
+            .transpose()?;
+        let license_url = wire.license_url.as_deref().map(license_url).transpose()?;
+        let hls_uri = wire.hls_uri.as_deref().map(hls_uri).transpose()?;
+        if system_id == FAIRPLAY && hls_uri.is_none() {
+            return Err("FairPlay needs an hls_uri".to_owned());
+        }
+        systems.push(DrmSystem {
+            system_id,
+            pssh,
+            license_url,
+            hls_uri,
+        });
+    }
+    Ok(systems)
+}
 const SHAPE: &str =
     "encryption keys must be one for all tracks, or one for video and one for audio";
 
@@ -607,5 +739,184 @@ mod tests {
             uuid_string(&CLEARKEY),
             "e2719d58-a985-b3c9-781a-b030af78d30e"
         );
+    }
+
+    // ---- Key periods (TDD 0013) ----
+
+    const KID_B: &str = "fedcba9876543210fedcba9876543210";
+    const KEY_B: &str = "ffeeddccbbaa99887766554433221100";
+
+    fn encrypted(start: u64, kid: &str, key: &str) -> String {
+        format!(r#"{{"start_ms":{start},"keys":[{{"key_id":"{kid}","key":"{key}"}}]}}"#)
+    }
+
+    fn timeline_json(periods: &[String]) -> String {
+        format!(r#"{{"scheme":"cbcs","periods":[{}]}}"#, periods.join(","))
+    }
+
+    #[test]
+    fn periods_make_a_timeline_whose_first_encrypted_period_is_the_primary() {
+        let encryption = wire(&timeline_json(&[
+            r#"{"start_ms":0,"clear":true}"#.to_owned(),
+            encrypted(12_000, KID, KEY),
+            encrypted(600_000, KID_B, KEY_B),
+        ]))
+        .validate()
+        .unwrap();
+
+        assert!(encryption.is_rotating());
+        assert_eq!(
+            hex_string(&encryption.key_for(TrackKind::Video).key_id),
+            KID
+        );
+        assert_eq!(encryption.periods.len(), 3);
+        assert_eq!(encryption.periods[0].encryption, None);
+        assert_eq!(encryption.periods[2].start_ms, 600_000);
+        // Every period's key ID is reported, once, in timeline order.
+        assert_eq!(
+            encryption.key_ids(),
+            [
+                "01234567-89ab-cdef-0123-456789abcdef",
+                "fedcba98-7654-3210-fedc-ba9876543210"
+            ]
+        );
+    }
+
+    #[test]
+    fn clear_lead_is_shorthand_for_a_clear_first_period() {
+        let shorthand = wire(&one_key(r#","clear_lead_ms":12000"#))
+            .validate()
+            .unwrap();
+        let explicit = wire(&timeline_json(&[
+            r#"{"start_ms":0,"clear":true}"#.to_owned(),
+            encrypted(12_000, KID, KEY),
+        ]))
+        .validate()
+        .unwrap();
+
+        assert_eq!(shorthand, explicit);
+        assert_eq!(shorthand.fingerprint(), explicit.fingerprint());
+        // Zero means no lead, which is no rotation at all.
+        let none = wire(&one_key(r#","clear_lead_ms":0"#)).validate().unwrap();
+        assert!(!none.is_rotating());
+        assert_eq!(none, wire(&one_key("")).validate().unwrap());
+    }
+
+    #[test]
+    fn one_encrypted_period_from_zero_is_not_rotation() {
+        let encryption = wire(&timeline_json(&[encrypted(0, KID, KEY)]))
+            .validate()
+            .unwrap();
+        assert!(!encryption.is_rotating());
+        assert_eq!(encryption, wire(&one_key("")).validate().unwrap());
+    }
+
+    #[test]
+    fn every_period_changes_the_fingerprint() {
+        let base = [
+            r#"{"start_ms":0,"clear":true}"#.to_owned(),
+            encrypted(1000, KID, KEY),
+            encrypted(2000, KID_B, KEY_B),
+        ];
+        let reference = wire(&timeline_json(&base))
+            .validate()
+            .unwrap()
+            .fingerprint();
+        let mut moved = base.clone();
+        moved[2] = encrypted(3000, KID_B, KEY_B);
+        let mut rekeyed = base.clone();
+        rekeyed[2] = encrypted(2000, KID_B, KID);
+        let mut unclear = base;
+        unclear[0] = encrypted(0, KID_B, KEY_B);
+        for changed in [moved, rekeyed, unclear] {
+            assert_ne!(
+                wire(&timeline_json(&changed))
+                    .validate()
+                    .unwrap()
+                    .fingerprint(),
+                reference
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_timelines_are_refused_without_echoing_a_key() {
+        let clear = r#"{"start_ms":0,"clear":true}"#.to_owned();
+        let cases = [
+            (timeline_json(&[encrypted(5, KID, KEY)]), "start at 0"),
+            (
+                timeline_json(&[
+                    clear.clone(),
+                    encrypted(1000, KID, KEY),
+                    encrypted(1000, KID_B, KEY_B),
+                ]),
+                "increase",
+            ),
+            (
+                timeline_json(&[
+                    clear.clone(),
+                    encrypted(2000, KID, KEY),
+                    encrypted(1000, KID_B, KEY_B),
+                ]),
+                "increase",
+            ),
+            (timeline_json(std::slice::from_ref(&clear)), "at least one"),
+            (
+                timeline_json(&[encrypted(0, KID, KEY), encrypted(1000, KID, KEY_B)]),
+                "different key_id",
+            ),
+            (
+                format!(
+                    r#"{{"scheme":"cbcs","periods":[{{"start_ms":0,"clear":true,"keys":[{{"key_id":"{KID}","key":"{KEY}"}}]}}]}}"#
+                ),
+                "clear or has keys",
+            ),
+            (
+                format!(
+                    r#"{{"scheme":"cbcs","keys":[{{"key_id":"{KID}","key":"{KEY}"}}],"periods":[{{"start_ms":0,"clear":true}}]}}"#
+                ),
+                "cannot be combined",
+            ),
+            (
+                r#"{"scheme":"cbcs","clear_lead_ms":5,"periods":[{"start_ms":0,"clear":true}]}"#
+                    .to_owned(),
+                "cannot be combined",
+            ),
+            (
+                timeline_json(
+                    &[r#"{"start_ms":0,"keys":[{"key_id":"zz","key":"00"}]}"#.to_owned()],
+                ),
+                "key",
+            ),
+        ];
+        for (json, needle) in cases {
+            let error = wire(&json).validate().expect_err(&json);
+            assert!(error.contains(needle), "{json}: {error}");
+            assert!(!error.contains(KEY) && !error.contains(KEY_B), "{error}");
+        }
+        // Alternating keys, up to the cap, and one beyond it.
+        let many = |count: usize| {
+            let mut periods = vec![encrypted(0, KID, KEY)];
+            for step in 1..count {
+                let (kid, key) = if step % 2 == 1 {
+                    (KID_B, KEY_B)
+                } else {
+                    (KID, KEY)
+                };
+                periods.push(encrypted(step as u64 * 1000, kid, key));
+            }
+            timeline_json(&periods)
+        };
+        assert_eq!(wire(&many(256)).validate().unwrap().periods.len(), 256);
+        assert!(wire(&many(257)).validate().unwrap_err().contains("256"));
+    }
+
+    #[test]
+    fn each_period_follows_the_rules_for_its_own_keys() {
+        let split = format!(
+            r#"{{"start_ms":0,"keys":[{{"tracks":"video","key_id":"{KID}","key":"{KEY}"}},{{"tracks":"audio","key_id":"{KID_B}","key":"{KEY_B}"}}],"systems":[{{"system_id":"94ce86fb-07ff-4f43-adb8-93d2fa968ca2","hls_uri":"skd://a"}}]}}"#
+        );
+        let error = wire(&timeline_json(&[split])).validate().unwrap_err();
+        assert!(error.contains("FairPlay"), "{error}");
     }
 }

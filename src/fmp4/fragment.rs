@@ -68,6 +68,7 @@ pub(crate) fn prepare_media_segment(
         sequence_number,
         0,
         &[],
+        &[],
     )?;
     let data_offset = i32::try_from(provisional_moof.len() + 8)
         .map_err(|_| Error::InvalidMedia("fragment header is too large".to_owned()))?;
@@ -78,6 +79,7 @@ pub(crate) fn prepare_media_segment(
         segment.decode_time,
         sequence_number,
         data_offset,
+        &[],
         &[],
     )?;
     let payload_len = samples.iter().try_fold(0u64, |total, sample| {
@@ -175,7 +177,7 @@ pub(crate) fn prepare_muxed_segment(
             .collect::<Result<Vec<_>>>()
     };
     // Data offsets are fixed-width fields, so the `moof`'s length does not depend on them.
-    let moof_len = moof_of(sequence_number, &trafs(&vec![0; expanded.len()])?)?.len();
+    let moof_len = moof_of(sequence_number, &[], &trafs(&vec![0; expanded.len()])?)?.len();
     let mut offsets = Vec::with_capacity(expanded.len());
     let mut offset = u64::try_from(moof_len + 8)
         .map_err(|_| Error::InvalidMedia("fragment header is too large".to_owned()))?;
@@ -186,7 +188,7 @@ pub(crate) fn prepare_muxed_segment(
         );
         offset += part.3;
     }
-    let moof = moof_of(sequence_number, &trafs(&offsets)?)?;
+    let moof = moof_of(sequence_number, &[], &trafs(&offsets)?)?;
     let mut header = Vec::with_capacity(moof.len() + 8);
     header.extend_from_slice(&moof);
     write_box_header(&mut header, payload_len + 8, *b"mdat")?;
@@ -224,6 +226,10 @@ fn coalesced_ranges(samples: &[Sample]) -> Result<Vec<ByteRange>> {
     Ok(ranges)
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each is a distinct fragment field; a struct would only rename them"
+)]
 fn build_moof(
     track_id: u32,
     kind: TrackKind,
@@ -232,18 +238,21 @@ fn build_moof(
     sequence_number: u32,
     data_offset: i32,
     extra: &[u8],
+    moof_extra: &[u8],
 ) -> Result<Vec<u8>> {
     let traf = build_traf(track_id, kind, samples, decode_time, data_offset, extra)?;
-    moof_of(sequence_number, &[traf])
+    moof_of(sequence_number, moof_extra, &[traf])
 }
 
-/// A `moof` holding `trafs`, each a complete `traf` box.
-fn moof_of(sequence_number: u32, trafs: &[Vec<u8>]) -> Result<Vec<u8>> {
+/// A `moof` holding `trafs`, each a complete `traf` box, after `moof_extra` (whole boxes that sit
+/// beside them, such as `pssh`).
+fn moof_of(sequence_number: u32, moof_extra: &[u8], trafs: &[Vec<u8>]) -> Result<Vec<u8>> {
     let mut mfhd = Vec::new();
     write_full_box_fields(&mut mfhd, 0, 0);
     mfhd.extend_from_slice(&sequence_number.to_be_bytes());
     let mut moof_payload = Vec::new();
     write_box(&mut moof_payload, *b"mfhd", &mfhd)?;
+    moof_payload.extend_from_slice(moof_extra);
     for traf in trafs {
         moof_payload.extend_from_slice(traf);
     }
@@ -324,20 +333,101 @@ fn write_box_header(output: &mut Vec<u8>, size: u64, name: [u8; 4]) -> Result<()
 /// Most subsamples one sample can have: `saiz` records each sample's `2 + 6n` bytes in a `u8`.
 pub(crate) const MAX_SUBSAMPLES: usize = 42;
 
-/// The `moof` and `mdat` header of an encrypted fragment: the usual boxes plus `senc`, `saiz`,
-/// and `saio`, which describe each sample's clear and protected bytes (ISO/IEC 23001-7, 7.2).
-/// An empty map means a whole-sample (audio) encryption with no subsamples.
-pub(crate) fn encrypted_fragment_header(
+/// How a fragment says which key protects it when that is not the init segment's `tenc` (TDD
+/// 0013): a `seig` sample group in its `traf`, and the `pssh` boxes of its period in its `moof`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FragmentRotation {
+    pub(crate) group: Option<SampleGroup>,
+    /// Whole `pssh` boxes, back to back.
+    pub(crate) pssh: Vec<u8>,
+}
+
+/// A `seig` entry (ISO/IEC 23001-7, 6.1) for a `cbcs` track with a constant IV.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SampleGroup {
+    Clear,
+    Protected {
+        crypt_byte_block: u8,
+        skip_byte_block: u8,
+        key_id: [u8; 16],
+        constant_iv: [u8; 16],
+    },
+}
+
+/// The `sgpd` and `sbgp` boxes that put every sample of a fragment in one `seig` group.
+fn sample_group_boxes(group: &SampleGroup, sample_count: u32) -> Result<Vec<u8>> {
+    let mut entry = vec![0u8];
+    match group {
+        SampleGroup::Clear => {
+            entry.extend_from_slice(&[0, 0, 0]);
+            entry.extend_from_slice(&[0; 16]);
+        }
+        SampleGroup::Protected {
+            crypt_byte_block,
+            skip_byte_block,
+            key_id,
+            constant_iv,
+        } => {
+            entry.push((crypt_byte_block << 4) | (skip_byte_block & 0x0f));
+            entry.extend_from_slice(&[1, 0]);
+            entry.extend_from_slice(key_id);
+            entry.push(16);
+            entry.extend_from_slice(constant_iv);
+        }
+    }
+    let entry_length = u32::try_from(entry.len())
+        .map_err(|_| Error::InvalidMedia("sample group entry is too large".to_owned()))?;
+    let mut description = Vec::new();
+    write_full_box_fields(&mut description, 1, 0);
+    description.extend_from_slice(b"seig");
+    description.extend_from_slice(&entry_length.to_be_bytes());
+    description.extend_from_slice(&1u32.to_be_bytes());
+    description.extend_from_slice(&entry);
+    let mut mapping = Vec::new();
+    write_full_box_fields(&mut mapping, 0, 0);
+    mapping.extend_from_slice(b"seig");
+    mapping.extend_from_slice(&1u32.to_be_bytes());
+    mapping.extend_from_slice(&sample_count.to_be_bytes());
+    // Index 1 of the fragment-local descriptions, which count from 0x10001.
+    mapping.extend_from_slice(&0x0001_0001u32.to_be_bytes());
+    let mut boxes = Vec::new();
+    write_box(&mut boxes, *b"sgpd", &description)?;
+    write_box(&mut boxes, *b"sbgp", &mapping)?;
+    Ok(boxes)
+}
+
+/// The boxes a fragment's `traf` gains for `rotation`, and the ones beside it in the `moof`.
+fn rotation_boxes(
+    rotation: Option<&FragmentRotation>,
+    sample_count: usize,
+) -> Result<(Vec<u8>, &[u8])> {
+    let Some(rotation) = rotation else {
+        return Ok((Vec::new(), &[]));
+    };
+    let count = u32::try_from(sample_count)
+        .map_err(|_| Error::InvalidMedia("too many samples".to_owned()))?;
+    let groups = rotation
+        .group
+        .as_ref()
+        .map(|group| sample_group_boxes(group, count))
+        .transpose()?
+        .unwrap_or_default();
+    Ok((groups, &rotation.pssh))
+}
+
+/// The `moof` and `mdat` header of a clear fragment inside a rotating asset, which says it is
+/// clear with a `seig` group (TDD 0013).
+pub(crate) fn clear_fragment_header(
     track_id: u32,
     kind: TrackKind,
     samples: &[Sample],
     decode_time: u64,
     sequence_number: u32,
-    subsamples: &[Vec<(u16, u32)>],
+    rotation: &FragmentRotation,
     payload_len: usize,
 ) -> Result<Vec<u8>> {
-    let overflow = || Error::InvalidMedia("encrypted fragment is too large".to_owned());
-    let probe_extra = encryption_boxes(subsamples, 0)?;
+    let overflow = || Error::InvalidMedia("fragment is too large".to_owned());
+    let (extra, moof_extra) = rotation_boxes(Some(rotation), samples.len())?;
     let probe = build_moof(
         track_id,
         kind,
@@ -345,15 +435,8 @@ pub(crate) fn encrypted_fragment_header(
         decode_time,
         sequence_number,
         0,
-        &probe_extra,
-    )?;
-    // `senc` is the first extra box, at the end of the `moof`; its entries start 16 bytes in
-    // (box header 8, version and flags 4, sample count 4). Box sizes do not depend on the values
-    // filled in below, so the probe's layout is the final one.
-    let senc_entries = probe.len() - probe_extra.len() + 16;
-    let extra = encryption_boxes(
-        subsamples,
-        u32::try_from(senc_entries).map_err(|_| overflow())?,
+        &extra,
+        moof_extra,
     )?;
     let data_offset = i32::try_from(probe.len() + 8).map_err(|_| overflow())?;
     let mut header = build_moof(
@@ -364,6 +447,68 @@ pub(crate) fn encrypted_fragment_header(
         sequence_number,
         data_offset,
         &extra,
+        moof_extra,
+    )?;
+    let payload = u64::try_from(payload_len).map_err(|_| overflow())?;
+    write_box_header(
+        &mut header,
+        payload.checked_add(8).ok_or_else(overflow)?,
+        *b"mdat",
+    )?;
+    Ok(header)
+}
+
+/// The `moof` and `mdat` header of an encrypted fragment: the usual boxes plus `senc`, `saiz`,
+/// and `saio`, which describe each sample's clear and protected bytes (ISO/IEC 23001-7, 7.2).
+/// An empty map means a whole-sample (audio) encryption with no subsamples. `rotation` adds what
+/// a fragment under another key than the init segment's needs (TDD 0013).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each is a distinct fragment field; a struct would only rename them"
+)]
+pub(crate) fn encrypted_fragment_header(
+    track_id: u32,
+    kind: TrackKind,
+    samples: &[Sample],
+    decode_time: u64,
+    sequence_number: u32,
+    subsamples: &[Vec<(u16, u32)>],
+    payload_len: usize,
+    rotation: Option<&FragmentRotation>,
+) -> Result<Vec<u8>> {
+    let overflow = || Error::InvalidMedia("encrypted fragment is too large".to_owned());
+    let (groups, moof_extra) = rotation_boxes(rotation, samples.len())?;
+    let mut probe_extra = encryption_boxes(subsamples, 0)?;
+    probe_extra.extend_from_slice(&groups);
+    let probe = build_moof(
+        track_id,
+        kind,
+        samples,
+        decode_time,
+        sequence_number,
+        0,
+        &probe_extra,
+        moof_extra,
+    )?;
+    // `senc` is the first extra box, at the end of the `moof`; its entries start 16 bytes in
+    // (box header 8, version and flags 4, sample count 4). Box sizes do not depend on the values
+    // filled in below, so the probe's layout is the final one.
+    let senc_entries = probe.len() - probe_extra.len() + 16;
+    let mut extra = encryption_boxes(
+        subsamples,
+        u32::try_from(senc_entries).map_err(|_| overflow())?,
+    )?;
+    extra.extend_from_slice(&groups);
+    let data_offset = i32::try_from(probe.len() + 8).map_err(|_| overflow())?;
+    let mut header = build_moof(
+        track_id,
+        kind,
+        samples,
+        decode_time,
+        sequence_number,
+        data_offset,
+        &extra,
+        moof_extra,
     )?;
     let payload = u64::try_from(payload_len).map_err(|_| overflow())?;
     write_box_header(
@@ -449,7 +594,7 @@ mod tests {
         let subsamples = vec![vec![(10, 90)], vec![(5, 20), (7, 28)]];
 
         let header =
-            encrypted_fragment_header(1, TrackKind::Video, &samples, 0, 3, &subsamples, 160)
+            encrypted_fragment_header(1, TrackKind::Video, &samples, 0, 3, &subsamples, 160, None)
                 .unwrap();
 
         let senc = position(&header, *b"senc");
@@ -482,9 +627,17 @@ mod tests {
     fn whole_sample_audio_lists_zero_sized_entries() {
         let samples = [sample(50), sample(50)];
 
-        let header =
-            encrypted_fragment_header(2, TrackKind::Audio, &samples, 0, 1, &[vec![], vec![]], 100)
-                .unwrap();
+        let header = encrypted_fragment_header(
+            2,
+            TrackKind::Audio,
+            &samples,
+            0,
+            1,
+            &[vec![], vec![]],
+            100,
+            None,
+        )
+        .unwrap();
 
         let senc = position(&header, *b"senc");
         assert_eq!(&header[senc + 8..senc + 16], &[0, 0, 0, 0, 0, 0, 0, 2]);

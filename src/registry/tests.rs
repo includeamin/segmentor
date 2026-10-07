@@ -3616,3 +3616,558 @@ async fn a_token_file_is_not_re_read_when_reloading_is_off() {
         StatusCode::BAD_GATEWAY
     );
 }
+
+// ---- Key rotation within an asset (TDD 0013) ----
+
+/// A version 0 `pssh` box for `system` holding `data`, as base64.
+fn pssh_b64(system: &[u8; 16], data: &[u8]) -> String {
+    use base64::Engine;
+    let mut boxed = u32::try_from(32 + data.len())
+        .unwrap()
+        .to_be_bytes()
+        .to_vec();
+    boxed.extend_from_slice(b"pssh");
+    boxed.extend_from_slice(&[0; 4]);
+    boxed.extend_from_slice(system);
+    boxed.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+    boxed.extend_from_slice(data);
+    base64::engine::general_purpose::STANDARD.encode(boxed)
+}
+
+const WIDEVINE_ID: [u8; 16] = [
+    0xed, 0xef, 0x8b, 0xa9, 0x79, 0xd6, 0x4a, 0xce, 0xa3, 0xc8, 0x27, 0xdc, 0xd5, 0x1d, 0x21, 0xed,
+];
+const WIDEVINE_UUID: &str = "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
+
+fn period(start_ms: u64, key_id: &str, key: &str, tag: &str) -> serde_json::Value {
+    serde_json::json!({
+        "start_ms": start_ms,
+        "keys": [{ "key_id": key_id, "key": key }],
+        "systems": [{ "system_id": WIDEVINE_UUID, "pssh": pssh_b64(&WIDEVINE_ID, tag.as_bytes()) }],
+    })
+}
+
+/// The 1 s fixture's three segments: clear, then `KEY`, then `KEY_B`.
+fn rotating_encryption() -> serde_json::Value {
+    serde_json::json!({
+        "scheme": "cbcs",
+        "periods": [
+            { "start_ms": 0, "clear": true },
+            period(1000, KEY_ID, KEY, "period-one"),
+            period(2000, KEY_ID_B, KEY_B, "period-two"),
+        ],
+    })
+}
+
+/// The child box types of `bytes`, or of the payload at `path` of nested box names.
+fn child_boxes<'a>(mut bytes: &'a [u8], path: &[&[u8; 4]]) -> Vec<(&'a [u8], &'a [u8])> {
+    fn walk(bytes: &[u8]) -> Vec<(&[u8], &[u8])> {
+        let mut found = Vec::new();
+        let mut at = 0;
+        while at + 8 <= bytes.len() {
+            let size = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+            assert!(size >= 8 && at + size <= bytes.len(), "a well-formed box");
+            found.push((&bytes[at + 4..at + 8], &bytes[at + 8..at + size]));
+            at += size;
+        }
+        found
+    }
+    for name in path {
+        bytes = walk(bytes)
+            .into_iter()
+            .find(|(kind, _)| kind == name)
+            .unwrap_or_else(|| panic!("no {}", String::from_utf8_lossy(*name)))
+            .1;
+    }
+    walk(bytes)
+}
+
+fn box_names(boxes: &[(&[u8], &[u8])]) -> Vec<String> {
+    boxes
+        .iter()
+        .map(|(kind, _)| String::from_utf8_lossy(kind).into_owned())
+        .collect()
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one asset, every box checked in turn"
+)]
+async fn fragments_say_which_key_protects_them() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "rot",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(rotating_encryption()),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/rot/master.m3u8").await.2);
+    let segment = |n: u32| {
+        let h = &h;
+        let version = version.clone();
+        async move {
+            fetch(
+                &h.app,
+                &format!("/hls/rot/video/segments/{n}/media.m4s?v={version}"),
+            )
+            .await
+            .2
+        }
+    };
+
+    // The init segment declares the first *encrypted* period, though the asset starts clear.
+    let init = fetch(&h.app, &format!("/hls/rot/video/init.mp4?v={version}"))
+        .await
+        .2;
+    let kid: Vec<u8> = (0..16)
+        .map(|i| u8::from_str_radix(&KEY_ID[i * 2..i * 2 + 2], 16).unwrap())
+        .collect();
+    let tenc = init.windows(4).position(|w| w == b"tenc").expect("tenc");
+    assert_eq!(
+        &init[tenc + 4 + 4 + 4..tenc + 4 + 4 + 4 + 16],
+        kid.as_slice()
+    );
+
+    let clear = segment(0).await;
+    let first = segment(1).await;
+    let second = segment(2).await;
+    let kid_b: Vec<u8> = (0..16)
+        .map(|i| u8::from_str_radix(&KEY_ID_B[i * 2..i * 2 + 2], 16).unwrap())
+        .collect();
+
+    // moof children: mfhd, then pssh boxes of the period, then the traf.
+    let moof = |bytes: &Bytes| {
+        child_boxes(bytes, &[b"moof"])
+            .into_iter()
+            .map(|(k, p)| (k.to_vec(), p.to_vec()))
+            .collect::<Vec<_>>()
+    };
+    let names = |parts: &[(Vec<u8>, Vec<u8>)]| {
+        parts
+            .iter()
+            .map(|(k, _)| String::from_utf8_lossy(k).into_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&moof(&clear)), ["mfhd", "traf"]);
+    assert_eq!(names(&moof(&first)), ["mfhd", "pssh", "traf"]);
+    assert_eq!(names(&moof(&second)), ["mfhd", "pssh", "traf"]);
+    let pssh_data = |parts: &[(Vec<u8>, Vec<u8>)]| {
+        let payload = &parts.iter().find(|(k, _)| k == b"pssh").unwrap().1;
+        String::from_utf8_lossy(&payload[4 + 16 + 4..]).into_owned()
+    };
+    assert_eq!(pssh_data(&moof(&first)), "period-one");
+    assert_eq!(pssh_data(&moof(&second)), "period-two");
+
+    let traf = |bytes: &Bytes| box_names(&child_boxes(bytes, &[b"moof", b"traf"]));
+    // Clear: a `seig` group and no encryption boxes. Under the init segment's own key: no group.
+    // Under another key: a group naming it.
+    assert_eq!(traf(&clear), ["tfhd", "tfdt", "trun", "sgpd", "sbgp"]);
+    assert_eq!(
+        traf(&first),
+        ["tfhd", "tfdt", "trun", "senc", "saiz", "saio"]
+    );
+    assert_eq!(
+        traf(&second),
+        [
+            "tfhd", "tfdt", "trun", "senc", "saiz", "saio", "sgpd", "sbgp"
+        ]
+    );
+
+    let group = |bytes: &Bytes| {
+        let parts = child_boxes(bytes, &[b"moof", b"traf"]);
+        let description = parts
+            .iter()
+            .find(|(k, _)| *k == b"sgpd")
+            .unwrap()
+            .1
+            .to_vec();
+        let mapping = parts
+            .iter()
+            .find(|(k, _)| *k == b"sbgp")
+            .unwrap()
+            .1
+            .to_vec();
+        (description, mapping)
+    };
+    // sgpd: version/flags 4, type 4, default_length 4, entry_count 4, then the entry:
+    // reserved, pattern, isProtected, ivsize, kid, [constant iv size, constant iv].
+    let (description, mapping) = group(&second);
+    assert_eq!(description[0], 1, "version 1");
+    assert_eq!(&description[4..8], b"seig");
+    assert_eq!(
+        u32::from_be_bytes(description[8..12].try_into().unwrap()),
+        37
+    );
+    let entry = &description[16..];
+    assert_eq!(
+        &entry[..4],
+        [0, 0x19, 1, 0],
+        "1:9 pattern, protected, constant IV"
+    );
+    assert_eq!(&entry[4..20], kid_b.as_slice());
+    assert_eq!(entry[20], 16);
+    assert_eq!(
+        &entry[21..37],
+        derived_iv_of(KEY_ID_B).as_slice(),
+        "the constant IV TDD 0009 derives"
+    );
+    assert_eq!(&mapping[4..8], b"seig");
+    assert_eq!(
+        u32::from_be_bytes(mapping[12..16].try_into().unwrap()),
+        30,
+        "every sample"
+    );
+    assert_eq!(
+        u32::from_be_bytes(mapping[16..20].try_into().unwrap()),
+        0x0001_0001
+    );
+    let (description, _) = group(&clear);
+    assert_eq!(
+        u32::from_be_bytes(description[8..12].try_into().unwrap()),
+        20
+    );
+    assert_eq!(&description[16..20], [0, 0, 0, 0], "not protected");
+
+    // The first period's samples are the source's own bytes; the later ones are not.
+    assert_ne!(first.len(), 0);
+    assert_ne!(clear[clear.len() - 64..], first[first.len() - 64..]);
+}
+
+#[tokio::test]
+async fn hls_names_each_periods_key_before_its_first_segment() {
+    use base64::Engine;
+    let h = harness().await;
+    h.mapper.state.set(
+        "rot",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(rotating_encryption()),
+    );
+    let master = text(&fetch(&h.app, "/hls/rot/master.m3u8").await.2);
+    let playlist = text(&fetch(&h.app, "/hls/rot/video/index.m3u8").await.2);
+    let lines: Vec<&str> = playlist.lines().collect();
+
+    assert_eq!(
+        lines.iter().filter(|l| l.starts_with("#EXT-X-MAP")).count(),
+        1
+    );
+    assert!(!playlist.contains("DISCONTINUITY"), "{playlist}");
+    let position = |needle: &str| lines.iter().position(|l| l.contains(needle)).unwrap();
+    let key_lines: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with("#EXT-X-KEY"))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(key_lines.len(), 2, "{playlist}");
+    // The asset starts clear, so no key precedes the first segment, and each later period's
+    // key is the line right before the EXTINF of its first segment.
+    assert!(key_lines[0] > position("segments/0/"), "{playlist}");
+    assert_eq!(key_lines[0] + 1, position("segments/1/") - 1, "{playlist}");
+    assert_eq!(key_lines[1] + 1, position("segments/2/") - 1, "{playlist}");
+    // Each key line carries its own period's `pssh`.
+    let uri = |line: &str| {
+        line.split("base64,")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    let decode = |line: &str| {
+        base64::engine::general_purpose::STANDARD
+            .decode(uri(line))
+            .unwrap()
+    };
+    assert!(decode(lines[key_lines[0]]).ends_with(b"period-one"));
+    assert!(decode(lines[key_lines[1]]).ends_with(b"period-two"));
+    assert!(lines[key_lines[0]].contains(&format!("KEYID=0x{KEY_ID}")));
+    assert!(lines[key_lines[1]].contains(&format!("KEYID=0x{KEY_ID_B}")));
+    // The master offers every period's licence ahead of time.
+    assert_eq!(master.matches("#EXT-X-SESSION-KEY").count(), 2, "{master}");
+    // No I-frame stream: a keyframe's fragment would need its period's key.
+    assert!(!master.contains("I-FRAME"), "{master}");
+    assert_eq!(
+        status(&h.app, "/hls/rot/video/iframes.m3u8").await,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn a_period_can_end_the_encryption_with_method_none() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "tail",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(serde_json::json!({
+            "scheme": "cbcs",
+            "periods": [
+                period(0, KEY_ID, KEY, "head"),
+                { "start_ms": 1000, "clear": true },
+            ],
+        })),
+    );
+    let playlist = text(&fetch(&h.app, "/hls/tail/video/index.m3u8").await.2);
+    let lines: Vec<&str> = playlist.lines().collect();
+    let none = lines
+        .iter()
+        .position(|l| *l == "#EXT-X-KEY:METHOD=NONE")
+        .expect(&playlist);
+    let one = lines
+        .iter()
+        .position(|l| l.contains("segments/1/"))
+        .unwrap();
+    assert_eq!(none + 2, one, "{playlist}");
+    // The opening key is before the map, as for any encrypted asset.
+    let first_key = lines
+        .iter()
+        .position(|l| l.starts_with("#EXT-X-KEY:METHOD=SAMPLE-AES"))
+        .unwrap();
+    assert!(
+        first_key
+            < lines
+                .iter()
+                .position(|l| l.starts_with("#EXT-X-MAP"))
+                .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn dash_declares_the_first_encrypted_period_in_one_period() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "rot",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(rotating_encryption()),
+    );
+    let manifest = text(&fetch(&h.app, "/dash/rot/manifest.mpd").await.2);
+    assert_eq!(manifest.matches("<Period").count(), 1, "{manifest}");
+    assert!(
+        manifest.contains("cenc:default_KID=\"01234567-89ab-cdef-0123-456789abcdef\""),
+        "{manifest}"
+    );
+    assert!(!manifest.contains("fedcba98-7654"), "{manifest}");
+}
+
+#[tokio::test]
+async fn re_keying_any_period_gives_new_urls() {
+    let h = harness().await;
+    // Three assets whose timelines differ in exactly one respect from the first.
+    let base = rotating_encryption();
+    let mut rekeyed = rotating_encryption();
+    rekeyed["periods"][2] = period(2000, KEY_ID_B, KEY, "period-two");
+    let mut moved = rotating_encryption();
+    moved["periods"][2]["start_ms"] = serde_json::json!(2500);
+    let mut versions = Vec::new();
+    for (id, encryption) in [("a", base), ("b", rekeyed), ("c", moved)] {
+        h.mapper.state.set(
+            id,
+            Answer::file("v1", "h264-aac.mp4").with_encryption(encryption),
+        );
+        versions.push(version_in(
+            &fetch(&h.app, &format!("/hls/{id}/master.m3u8")).await.2,
+        ));
+    }
+    assert_ne!(versions[0], versions[1], "a re-keyed period");
+    assert_ne!(versions[0], versions[2], "a moved period");
+    assert_ne!(versions[1], versions[2]);
+}
+
+#[tokio::test]
+async fn clear_lead_is_the_same_asset_as_the_explicit_period_list() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "lead",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(serde_json::json!({
+            "scheme": "cbcs",
+            "clear_lead_ms": 1000,
+            "keys": [{ "key_id": KEY_ID, "key": KEY }],
+            "systems": [{ "system_id": WIDEVINE_UUID, "pssh": pssh_b64(&WIDEVINE_ID, b"period-one") }],
+        })),
+    );
+    h.mapper.state.set(
+        "explicit",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(serde_json::json!({
+            "scheme": "cbcs",
+            "periods": [{ "start_ms": 0, "clear": true }, period(1000, KEY_ID, KEY, "period-one")],
+        })),
+    );
+    let lead = text(&fetch(&h.app, "/hls/lead/video/index.m3u8").await.2);
+    let explicit = text(&fetch(&h.app, "/hls/explicit/video/index.m3u8").await.2);
+    assert_eq!(lead, explicit);
+    assert!(lead.contains("EXT-X-KEY"));
+}
+
+#[tokio::test]
+async fn periods_are_refused_where_they_are_not_supported() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "adaptive",
+        Answer::renditions(
+            "v1",
+            &[("720p", "rendition-720p.mp4"), ("360p", "h264-aac.mp4")],
+        )
+        .with_encryption(rotating_encryption()),
+    );
+    h.mapper.state.set(
+        "seq",
+        Answer::clips(
+            "v1",
+            &[
+                clip("h264-aac.mp4", None, None),
+                clip("h264-aac.mp4", None, None),
+            ],
+        )
+        .with_encryption(rotating_encryption()),
+    );
+    for id in ["adaptive", "seq"] {
+        assert_eq!(
+            status(&h.app, &format!("/hls/{id}/master.m3u8")).await,
+            StatusCode::BAD_GATEWAY,
+            "{id}"
+        );
+    }
+}
+
+/// The IV TDD 0009 derives when the mapper gives none, from the formula alone.
+fn derived_iv_of(key_id_hex: &str) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"segmentor cbcs iv");
+    hasher.update(hex_bytes(key_id_hex));
+    hasher.finalize()[..16].to_vec()
+}
+
+fn hex_bytes(hex: &str) -> Vec<u8> {
+    (0..hex.len() / 2)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap())
+        .collect()
+}
+
+/// An independent implementation recovers every frame, period by period, with that period's key
+/// and not with another's.
+#[tokio::test]
+async fn ffmpeg_decrypts_each_period_under_its_own_key() {
+    if std::process::Command::new("ffprobe")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: ffprobe is not installed");
+        return;
+    }
+    let h = harness().await;
+    h.mapper.state.set(
+        "rot",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(rotating_encryption()),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/rot/master.m3u8").await.2);
+    let directory =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/key-rotation");
+    std::fs::create_dir_all(&directory).unwrap();
+    let init = fetch(&h.app, &format!("/hls/rot/video/init.mp4?v={version}"))
+        .await
+        .2;
+    // FFmpeg takes a fragment's key and IV from `tenc` and ignores `seig` groups' IVs, so a later
+    // period is judged against an init segment whose `tenc` names that period's key and IV: the
+    // encrypted bytes are then checked by FFmpeg, and the `seig` entry by the box test above.
+    let init_for = |key_id: &str| {
+        let mut bytes = init.to_vec();
+        let at = bytes.windows(4).position(|w| w == b"tenc").unwrap() + 4 + 8;
+        bytes[at..at + 16].copy_from_slice(&hex_bytes(key_id));
+        bytes[at + 17..at + 33].copy_from_slice(&derived_iv_of(key_id));
+        bytes
+    };
+    for (segment, own, other) in [
+        (0u32, None, Some(KEY)),
+        (1, Some(KEY), Some(KEY_B)),
+        (2, Some(KEY_B), Some(KEY)),
+    ] {
+        let mut bytes = if segment == 2 {
+            init_for(KEY_ID_B)
+        } else {
+            init.to_vec()
+        };
+        bytes.extend_from_slice(
+            &fetch(
+                &h.app,
+                &format!("/hls/rot/video/segments/{segment}/media.m4s?v={version}"),
+            )
+            .await
+            .2,
+        );
+        let path = directory.join(format!("segment-{segment}.mp4"));
+        std::fs::write(&path, bytes).unwrap();
+
+        let frames = |key: Option<&str>| {
+            let mut probe = std::process::Command::new("ffprobe");
+            probe.args(["-v", "error", "-count_frames", "-select_streams", "v:0"]);
+            probe.args(["-show_entries", "stream=nb_read_frames", "-of", "csv=p=0"]);
+            if let Some(key) = key {
+                probe.args(["-decryption_key", key]);
+            }
+            String::from_utf8_lossy(&probe.arg(&path).output().unwrap().stdout)
+                .trim_matches([',', ' ', '\n'])
+                .to_owned()
+        };
+        assert_eq!(
+            decode_errors(&path, own),
+            "",
+            "segment {segment} under its own key"
+        );
+        assert_eq!(frames(own), "30", "segment {segment}");
+        if segment != 0 {
+            assert_ne!(
+                decode_errors(&path, other),
+                "",
+                "segment {segment} under another period's key"
+            );
+        }
+    }
+}
+
+/// A period begins at the first segment that starts at or after its `start_ms`: one asked for
+/// mid-segment waits for the next segment, one past the end never starts, and two that land on one
+/// segment cannot both be honoured.
+#[tokio::test]
+async fn periods_begin_on_segment_boundaries() {
+    let h = harness().await;
+    let timeline = |periods: Vec<serde_json::Value>| serde_json::json!({ "scheme": "cbcs", "periods": periods });
+    h.mapper.state.set(
+        "late",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(timeline(vec![
+            serde_json::json!({ "start_ms": 0, "clear": true }),
+            period(1500, KEY_ID, KEY, "mid"),
+            period(60_000, KEY_ID_B, KEY_B, "never"),
+        ])),
+    );
+    h.mapper.state.set(
+        "crowded",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(timeline(vec![
+            serde_json::json!({ "start_ms": 0, "clear": true }),
+            period(1200, KEY_ID, KEY, "one"),
+            period(1800, KEY_ID_B, KEY_B, "two"),
+        ])),
+    );
+
+    let playlist = text(&fetch(&h.app, "/hls/late/video/index.m3u8").await.2);
+    let lines: Vec<&str> = playlist.lines().collect();
+    let key = lines
+        .iter()
+        .position(|l| l.starts_with("#EXT-X-KEY"))
+        .expect(&playlist);
+    let two = lines
+        .iter()
+        .position(|l| l.contains("segments/2/"))
+        .unwrap();
+    assert_eq!(
+        key + 2,
+        two,
+        "1500 ms starts at the segment at 2000 ms\n{playlist}"
+    );
+    assert_eq!(
+        lines.iter().filter(|l| l.starts_with("#EXT-X-KEY")).count(),
+        1,
+        "the period past the end never starts"
+    );
+    assert_eq!(
+        status(&h.app, "/hls/crowded/video/index.m3u8").await,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+}

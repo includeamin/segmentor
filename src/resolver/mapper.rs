@@ -501,7 +501,7 @@ impl HttpResolver {
                         from_ms,
                         to_ms: clip.to_ms,
                     },
-                    encryption: Self::interpret_encryption(clip.encryption.as_ref()).map_err(
+                    encryption: Self::interpret_clip_encryption(clip.encryption.as_ref()).map_err(
                         |message| ResolveError::Rejected(format!("clip {position}: {message}")),
                     )?,
                 })
@@ -515,6 +515,17 @@ impl HttpResolver {
     ) -> Result<Option<Arc<crate::cenc::Encryption>>, String> {
         wire.map(|encryption| encryption.validate().map(Arc::new))
             .transpose()
+    }
+
+    /// A clip's own `encryption`: a single key set, never a timeline (TDD 0013).
+    fn interpret_clip_encryption(
+        wire: Option<&crate::cenc::WireEncryption>,
+    ) -> Result<Option<Arc<crate::cenc::Encryption>>, String> {
+        let encryption = Self::interpret_encryption(wire)?;
+        if encryption.as_ref().is_some_and(|e| e.is_rotating()) {
+            return Err("encryption periods are supported for a single file only".to_owned());
+        }
+        Ok(encryption)
     }
 
     /// Validates a `200` answer against the request and the location policy.
@@ -576,6 +587,11 @@ impl HttpResolver {
         }
         let encryption =
             Self::interpret_encryption(wire.encryption.as_ref()).map_err(ResolveError::Rejected)?;
+        if encryption.as_ref().is_some_and(|e| e.is_rotating()) && location.is_none() {
+            return Err(ResolveError::Rejected(
+                "encryption periods are supported for a single file only".to_owned(),
+            ));
+        }
         let hls_aes128 = wire
             .hls_aes128
             .as_ref()
