@@ -60,6 +60,9 @@ impl ServedAsset {
     }
 
     pub(crate) fn dash_manifest(&self) -> Result<Manifest> {
+        if self.is_hls_only() {
+            return Err(Error::NotFound("an AES-128 asset has no DASH manifest"));
+        }
         match self {
             Self::Single(asset) => asset.dash_manifest(),
             Self::Composite(asset) => Ok(asset.rendered.dash.clone()),
@@ -196,7 +199,11 @@ impl ServedAsset {
 
     /// Whether the asset exists for HLS only: DASH has no whole-segment `AES-128` (TDD 0012).
     pub(crate) fn is_hls_only(&self) -> bool {
-        matches!(self, Self::Single(asset) if asset.is_aes128())
+        match self {
+            Self::Single(asset) => asset.is_aes128(),
+            Self::Composite(asset) => asset.video[0].asset.is_aes128(),
+            Self::Sequence(asset) => asset.is_aes128(),
+        }
     }
 
     /// Whether HLS serves the muxed stream, for status reporting.
@@ -760,7 +767,9 @@ fn version_of(
 }
 
 fn presentation_for<'a>(asset: &'a PackagedAsset, version: &'a str) -> Presentation<'a> {
-    Presentation::new(&asset.index.tracks, &asset.plan, version).with_encryption(asset.encryption())
+    Presentation::new(&asset.index.tracks, &asset.plan, version)
+        .with_encryption(asset.encryption())
+        .with_aes128(asset.aes128())
 }
 
 /// Which underlying asset supplies one member of the shared audio group.

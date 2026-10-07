@@ -599,16 +599,15 @@ impl HttpResolver {
             .transpose()
             .map_err(ResolveError::Rejected)?;
         if hls_aes128.is_some() {
-            // One key per asset, one clear init segment, and playlists that name the key: only a
-            // plain file has all three today.
+            // One key for the whole asset: every rendition and every clip is encrypted under it.
             if encryption.is_some() {
                 return Err(ResolveError::Rejected(
                     "hls_aes128 and encryption cannot both be set".to_owned(),
                 ));
             }
-            if location.is_none() {
+            if clips.iter().any(|clip| clip.encryption.is_some()) {
                 return Err(ResolveError::Rejected(
-                    "hls_aes128 is supported for a single file only".to_owned(),
+                    "hls_aes128 and a clip's encryption cannot both be set".to_owned(),
                 ));
             }
         }

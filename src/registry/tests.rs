@@ -3437,17 +3437,17 @@ async fn aes128_answers_the_mapper_may_not_give() {
                 .with_encryption(encryption.clone()),
         ),
         (
-            "renditions",
-            Answer::renditions(
+            "clip-encryption",
+            Answer::clips_with_encryption(
                 "v1",
-                &[("a", "rendition-480p.mp4"), ("b", "rendition-720p.mp4")],
+                &[clip_encrypted(
+                    "h264-aac.mp4",
+                    None,
+                    None,
+                    Some(clear_key_encryption(KEY)),
+                )],
             )
             .with_hls_aes128(AES_KEY, AES_KEY_URI),
-        ),
-        (
-            "clips",
-            Answer::clips("v1", &[clip("h264-aac.mp4", None, None)])
-                .with_hls_aes128(AES_KEY, AES_KEY_URI),
         ),
         (
             "short-key",
@@ -4170,4 +4170,310 @@ async fn periods_begin_on_segment_boundaries() {
         status(&h.app, "/hls/crowded/video/index.m3u8").await,
         StatusCode::INTERNAL_SERVER_ERROR
     );
+}
+
+/// Every segment URI of `playlist` (the lines that are not tags), in order. The media sequence
+/// number of the Nth is N, whatever discontinuities lie between, because the playlist starts at 0.
+fn segment_uris(playlist: &str) -> Vec<String> {
+    playlist
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Fetches `uri` relative to the HLS directory `base` of `id`, under that asset's own version.
+async fn fetch_segment(h: &Harness, id: &str, base: &str, uri: &str, version: &str) -> Bytes {
+    let path = uri.split('?').next().unwrap();
+    let (status, _, bytes) = fetch(&h.app, &format!("/hls/{id}/{base}{path}?v={version}")).await;
+    assert_eq!(status, StatusCode::OK, "{id}/{base}{path}");
+    bytes
+}
+
+/// Every segment of every media playlist in `playlists`, decrypted with OpenSSL under its media
+/// sequence number as the IV, must equal the same segment of the clear twin.
+async fn assert_segments_decrypt_to_the_clear_twin(
+    h: &Harness,
+    encrypted: &str,
+    clear: &str,
+    playlists: &[&str],
+) -> usize {
+    let version = version_in(
+        &fetch(&h.app, &format!("/hls/{encrypted}/master.m3u8"))
+            .await
+            .2,
+    );
+    let clear_version = version_in(&fetch(&h.app, &format!("/hls/{clear}/master.m3u8")).await.2);
+    let mut checked = 0;
+    for playlist in playlists {
+        let (base, _) = playlist
+            .rsplit_once('/')
+            .map_or(("", *playlist), |(b, f)| (b, f));
+        let base = if base.is_empty() {
+            String::new()
+        } else {
+            format!("{base}/")
+        };
+        let text = text(
+            &fetch(&h.app, &format!("/hls/{encrypted}/{playlist}"))
+                .await
+                .2,
+        );
+        for (index, uri) in segment_uris(&text).iter().enumerate() {
+            let sealed = fetch_segment(h, encrypted, &base, uri, &version).await;
+            let plain = fetch_segment(h, clear, &base, uri, &clear_version).await;
+            assert_eq!(sealed.len() % 16, 0, "{playlist} {index}");
+            let opened = openssl_decrypt(AES_KEY, u32::try_from(index).unwrap(), &sealed)
+                .unwrap_or_else(|| panic!("{playlist} {index} decrypts and unpads"));
+            assert_eq!(opened, plain.to_vec(), "{playlist} {index}");
+            assert_eq!(&opened[4..8], b"moof");
+            checked += 1;
+        }
+    }
+    checked
+}
+
+fn openssl_available() -> bool {
+    std::process::Command::new("openssl")
+        .arg("version")
+        .output()
+        .is_ok()
+}
+
+#[tokio::test]
+async fn an_adaptive_asset_encrypts_every_rendition_under_one_key() {
+    let h = harness().await;
+    let renditions = [("a", "rendition-480p.mp4"), ("b", "rendition-720p.mp4")];
+    h.mapper.state.set(
+        "aes",
+        Answer::renditions("v1", &renditions).with_hls_aes128(AES_KEY, AES_KEY_URI),
+    );
+    h.mapper
+        .state
+        .set("clear", Answer::renditions("v1", &renditions));
+
+    let master = fetch(&h.app, "/hls/aes/master.m3u8").await;
+    assert_eq!(master.0, StatusCode::OK);
+    let master_text = text(&master.2);
+    assert!(!master_text.contains("I-FRAME"), "{master_text}");
+    let version = version_in(&master.2);
+    assert_ne!(
+        version,
+        version_in(&fetch(&h.app, "/hls/clear/master.m3u8").await.2)
+    );
+
+    let mut playlists = Vec::new();
+    for line in master_text.lines() {
+        let uri = line
+            .strip_prefix("#EXT-X-MEDIA:")
+            .and_then(|rest| rest.split("URI=\"").nth(1))
+            .and_then(|rest| rest.split('"').next())
+            .or_else(|| (!line.starts_with('#') && !line.is_empty()).then_some(line));
+        if let Some(uri) = uri {
+            playlists.push(uri.split('?').next().unwrap().to_owned());
+        }
+    }
+    assert!(playlists.len() >= 2, "{master_text}");
+    for playlist in &playlists {
+        let body = text(&fetch(&h.app, &format!("/hls/aes/{playlist}")).await.2);
+        let lines = body.lines().collect::<Vec<_>>();
+        let map = lines
+            .iter()
+            .position(|l| l.starts_with("#EXT-X-MAP"))
+            .unwrap();
+        let key = lines
+            .iter()
+            .position(|l| l.starts_with("#EXT-X-KEY"))
+            .unwrap();
+        assert!(
+            map < key,
+            "{playlist}: the init segment stays clear\n{body}"
+        );
+        assert_eq!(
+            lines[key],
+            format!("#EXT-X-KEY:METHOD=AES-128,URI=\"{AES_KEY_URI}\""),
+            "{playlist}"
+        );
+    }
+    for uri in [
+        "/dash/aes/manifest.mpd".to_owned(),
+        format!("/dash/aes/video-a/init.mp4?v={version}"),
+        "/hls/aes/video/iframes.m3u8".to_owned(),
+    ] {
+        assert_eq!(status(&h.app, &uri).await, StatusCode::NOT_FOUND, "{uri}");
+    }
+    assert_eq!(
+        status(&h.app, "/dash/clear/manifest.mpd").await,
+        StatusCode::OK
+    );
+
+    if openssl_available() {
+        let refs = playlists.iter().map(String::as_str).collect::<Vec<_>>();
+        let checked = assert_segments_decrypt_to_the_clear_twin(&h, "aes", "clear", &refs).await;
+        assert!(checked >= 4, "{checked} segments checked");
+    }
+}
+
+/// A sequence numbers its segments across clips, so the IV of a segment is its global number, not
+/// its place in its own clip; and each clip's init segment is sent clear by switching the key off
+/// for its `EXT-X-MAP` and on again after it.
+#[tokio::test]
+async fn a_sequence_encrypts_segments_under_their_global_media_sequence_number() {
+    let h = harness().await;
+    let clips = [
+        clip("h264-aac.mp4", None, None),
+        clip("rendition-720p.mp4", None, None),
+        clip("h264-aac.mp4", Some(1500), None),
+    ];
+    h.mapper.state.set(
+        "aes",
+        Answer::clips("v1", &clips).with_hls_aes128(AES_KEY, AES_KEY_URI),
+    );
+    h.mapper.state.set("clear", Answer::clips("v1", &clips));
+
+    let master = fetch(&h.app, "/hls/aes/master.m3u8").await;
+    assert_eq!(master.0, StatusCode::OK);
+    let playlist = text(&fetch(&h.app, "/hls/aes/video/index.m3u8").await.2);
+    let key_line = format!("#EXT-X-KEY:METHOD=AES-128,URI=\"{AES_KEY_URI}\"");
+    let lines = playlist.lines().collect::<Vec<_>>();
+    let maps = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with("#EXT-X-MAP"))
+        .map(|(i, _)| i)
+        .collect::<Vec<_>>();
+    assert_eq!(maps.len(), 3, "{playlist}");
+    for (position, &map) in maps.iter().enumerate() {
+        assert_eq!(
+            lines[map + 1],
+            key_line,
+            "clip {position}: key right after its map\n{playlist}"
+        );
+        if position > 0 {
+            assert_eq!(
+                lines[map - 1],
+                "#EXT-X-KEY:METHOD=NONE",
+                "clip {position}\n{playlist}"
+            );
+            assert_eq!(
+                lines[map - 2],
+                "#EXT-X-DISCONTINUITY",
+                "clip {position}\n{playlist}"
+            );
+        } else {
+            assert!(
+                lines[..map].iter().all(|l| !l.starts_with("#EXT-X-KEY")),
+                "{playlist}"
+            );
+        }
+    }
+    assert!(playlist.contains("#EXT-X-MEDIA-SEQUENCE:0"));
+    let version = version_in(&master.2);
+    assert_eq!(
+        status(&h.app, "/dash/aes/manifest.mpd").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        status(&h.app, "/dash/clear/manifest.mpd").await,
+        StatusCode::OK
+    );
+    assert_ne!(
+        version,
+        version_in(&fetch(&h.app, "/hls/clear/master.m3u8").await.2)
+    );
+    // The init segments stay clear.
+    let init = fetch(
+        &h.app,
+        &format!("/hls/aes/video/clips/1/init.mp4?v={version}"),
+    )
+    .await;
+    assert_eq!(&init.2[4..8], b"ftyp");
+
+    if openssl_available() {
+        let checked = assert_segments_decrypt_to_the_clear_twin(
+            &h,
+            "aes",
+            "clear",
+            &["video/index.m3u8", "audio-1/index.m3u8"],
+        )
+        .await;
+        assert!(checked >= 6, "{checked} segments checked");
+    }
+}
+
+/// `FFmpeg`'s HLS client plays an adaptive `AES-128` asset to the same frame count as its clear
+/// twin, and plays nothing from the same stream behind another key.
+#[tokio::test]
+async fn ffmpeg_plays_an_adaptive_aes128_asset() {
+    if std::process::Command::new("ffprobe")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: ffprobe is not installed");
+        return;
+    }
+    let data_uri = |key: &str| {
+        let bytes = (0..16)
+            .map(|at| u8::from_str_radix(&key[at * 2..at * 2 + 2], 16).unwrap())
+            .collect::<Vec<_>>();
+        format!(
+            "data:text/plain;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    };
+    let renditions = [("a", "rendition-480p.mp4"), ("b", "rendition-720p.mp4")];
+    let h = harness().await;
+    h.mapper.state.set(
+        "aes",
+        Answer::renditions("v1", &renditions).with_hls_aes128(AES_KEY, &data_uri(AES_KEY)),
+    );
+    h.mapper.state.set(
+        "wrong",
+        Answer::renditions("v1", &renditions)
+            .with_hls_aes128(AES_KEY, &data_uri("00112233445566778899aabbccddeeff")),
+    );
+    h.mapper
+        .state
+        .set("clear", Answer::renditions("v1", &renditions));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = h.app.clone();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let frames = |path: String| {
+        tokio::task::spawn_blocking(move || {
+            let output = std::process::Command::new("ffprobe")
+                .args(["-v", "error", "-count_frames", "-select_streams", "v:0"])
+                .args(["-show_entries", "stream=nb_read_frames", "-of", "csv=p=0"])
+                .args(["-allowed_extensions", "ALL"])
+                .arg(format!("http://{address}{path}"))
+                .output()
+                .unwrap();
+            (
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim_end_matches(',')
+                    .to_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )
+        })
+    };
+    let (expected, clear_errors) = frames("/hls/clear/master.m3u8".to_owned()).await.unwrap();
+    assert_ne!(expected, "");
+    let (played, errors) = frames("/hls/aes/master.m3u8".to_owned()).await.unwrap();
+    // The clear twin has the same noise from probing the second variant; encryption adds none.
+    // (FFmpeg prints a context pointer in each message, so those are masked.)
+    let masked = |text: &str| {
+        text.lines()
+            .map(|line| line.split_once("] ").map_or(line, |(_, rest)| rest))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(played, expected);
+    assert_eq!(masked(&errors), masked(&clear_errors));
+    let (garbage, _) = frames("/hls/wrong/master.m3u8".to_owned()).await.unwrap();
+    assert_ne!(garbage, expected, "a wrong key does not decrypt");
+    server.abort();
 }
