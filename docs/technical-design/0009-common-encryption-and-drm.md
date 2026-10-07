@@ -198,7 +198,7 @@ Additive: a mapper that sends no `encryption` gets byte-identical output, and th
 ## Deferred
 
 - **AV1 and VP9**, which need their own subsample rules (OBU and superframe aware).
-- **Key rotation** within an asset.
+- **Key rotation** within an asset: see [TDD 0013](0013-key-rotation.md).
 - **Whole-segment HLS AES-128**, a separate, simpler mode that protects without DRM.
 - **Encrypted source passthrough**: re-segmenting files that are already `cbcs`-encrypted.
 - **A SPEKE v2 adapter**, so a mapper can hand key retrieval to a DRM vendor's standard endpoint.

@@ -18,6 +18,7 @@ Technical design documents explain a proposed subsystem before or during impleme
 | [0010](0010-compact-sample-index.md) | Compact sample index | Accepted; implemented |
 | [0011](0011-muxed-hls-audio.md) | Muxed audio and video for HLS | Accepted; implemented for clear single-file assets |
 | [0012](0012-hls-aes-128.md) | Whole-segment HLS AES-128 | Accepted; implemented for single-file assets |
+| [0013](0013-key-rotation.md) | Key rotation within an asset | Draft |
 
 ## Workflow
 
