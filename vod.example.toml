@@ -59,6 +59,15 @@ exposed_headers = ["content-length", "content-range", "accept-ranges", "etag", "
 allow_credentials = false           # cannot be combined with "*"
 max_age_seconds = 86400
 
+# Require a signed playback token (a JWT) on every media request. Off when this table is absent.
+# [authorization]
+# algorithm = "HS256"               # or "ES256" / "EdDSA" with a PEM public key
+# key_env = "SEGMENTOR_TOKEN_KEY"   # the secret itself never goes in this file; or key_file = "token.pub"
+# transports = ["header", "cookie", "query"]
+# query_parameter = "auth"
+# cookie_name = "segmentor_auth"
+# clock_skew_secs = 30
+
 [assets.sample]
 path = "h264-aac.mp4"
 

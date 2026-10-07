@@ -20,8 +20,8 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::http::header::{
-    ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_RANGE, CONTENT_TYPE, ETAG,
-    IF_NONE_MATCH, IF_RANGE, RANGE, RETRY_AFTER,
+    ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_RANGE, CONTENT_TYPE,
+    COOKIE, ETAG, IF_NONE_MATCH, IF_RANGE, RANGE, RETRY_AFTER, WWW_AUTHENTICATE,
 };
 use axum::response::Response;
 use bytes::Bytes;
@@ -1396,4 +1396,466 @@ async fn byte_ranges_of_a_muxed_segment_slice_the_full_body() {
     }
     let tail = get_with(&app, &path, &[(RANGE, "bytes=-1000")]).await;
     assert_eq!(body(tail).await, full.slice(total - 1000..));
+}
+
+// ---- Playback tokens (TDD 0007) ----
+
+mod authorization {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::authorization::testing::{SECRET, mint, mint_for, seconds_from_now};
+    use crate::authorization::{Algorithm, Key, Verifier};
+    use crate::config::{AuthorizationSettings, Transports};
+    use crate::http::router::ROUTES;
+
+    const ALL: Transports = Transports {
+        header: true,
+        cookie: true,
+        query: true,
+    };
+
+    fn settings(transports: Transports) -> AuthorizationSettings {
+        AuthorizationSettings {
+            verifier: Verifier::new(
+                Algorithm::Hs256,
+                Key::parse(Algorithm::Hs256, SECRET).unwrap(),
+                Duration::from_secs(30),
+                4096,
+            ),
+            transports,
+            query_parameter: "auth".to_owned(),
+            cookie_name: "segmentor_auth".to_owned(),
+        }
+    }
+
+    fn state_with(transports: Transports) -> AppState {
+        let mut config = test_config(LimitsConfig::default(), CorsConfig::default());
+        config.authorization = Some(settings(transports));
+        AppState::new(&config).unwrap()
+    }
+
+    fn authorized(transports: Transports) -> Router {
+        router(state_with(transports))
+    }
+
+    /// The probes and operator endpoints: reachable whoever is watching.
+    const OPEN: [&str; 4] = ["/health", "/ready", "/metrics", "/admin/status"];
+
+    /// A concrete URL for a route template.
+    fn instance(template: &str) -> String {
+        template
+            .replace("{asset_id}", "sample")
+            .replace("{track}", "video")
+            .replace("{segment_index}", "0")
+            .replace("{frame_index}", "0")
+            .replace("{language}", "en")
+            .replace("{clip}", "0")
+    }
+
+    async fn status_with(app: &Router, uri: &str, headers: &[(HeaderName, String)]) -> Response {
+        let mut request = Request::get(uri);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        app.clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn bearer(token: &str) -> Vec<(HeaderName, String)> {
+        vec![(AUTHORIZATION, format!("Bearer {token}"))]
+    }
+
+    /// Every route a viewer can reach is refused without a grant, and a route added later is
+    /// covered without anyone remembering to: everything not named as open must refuse.
+    #[tokio::test]
+    async fn every_media_route_refuses_a_request_without_a_valid_grant() {
+        let app = authorized(ALL);
+        let valid = mint_for("sample");
+        let elsewhere = mint_for("another-asset");
+        let mut media = 0;
+        for template in ROUTES {
+            if OPEN.contains(&template) {
+                continue;
+            }
+            media += 1;
+            let uri = instance(template);
+
+            let none = status_with(&app, &uri, &[]).await;
+            assert_eq!(none.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            assert_eq!(none.headers()[WWW_AUTHENTICATE], "Bearer", "{uri}");
+            assert_eq!(none.headers()[CACHE_CONTROL], "no-store", "{uri}");
+            let garbage = status_with(&app, &uri, &bearer("not.a.token")).await;
+            assert_eq!(garbage.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            let other = status_with(&app, &uri, &bearer(&elsewhere)).await;
+            assert_eq!(other.status(), StatusCode::FORBIDDEN, "{uri}");
+            // A grant for the asset is let through to the handler, whatever the handler says.
+            let granted = status_with(&app, &uri, &bearer(&valid)).await;
+            assert!(
+                !matches!(
+                    granted.status(),
+                    StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+                ),
+                "{uri}: {}",
+                granted.status()
+            );
+        }
+        assert_eq!(media, ROUTES.len() - OPEN.len());
+        assert!(media >= 14, "{media} media routes");
+    }
+
+    #[tokio::test]
+    async fn the_probes_stay_reachable_without_a_token() {
+        let app = authorized(ALL);
+        for uri in OPEN {
+            let response = get(&app, uri).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+    }
+
+    /// The check runs before the asset is looked up, so the answer for an asset that exists and
+    /// one that does not is the same: no oracle.
+    #[tokio::test]
+    async fn a_refusal_says_nothing_about_whether_the_asset_exists() {
+        let app = authorized(ALL);
+        for credentials in [vec![], bearer("junk"), bearer(&mint_for("somebody-else"))] {
+            let real = status_with(&app, "/hls/sample/master.m3u8", &credentials).await;
+            let ghost = status_with(&app, "/hls/ghost/master.m3u8", &credentials).await;
+            assert_eq!(real.status(), ghost.status());
+            let (real_body, ghost_body) = (body(real).await, body(ghost).await);
+            assert_eq!(real_body, ghost_body);
+        }
+        // With a grant for the ghost, the ghost is a plain 404, as it was before.
+        let response =
+            status_with(&app, "/hls/ghost/master.m3u8", &bearer(&mint_for("ghost"))).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn each_reason_gets_its_own_status_and_a_message_without_the_asset() {
+        let app = authorized(ALL);
+        let check = |token: String| {
+            let app = app.clone();
+            async move { status_with(&app, "/hls/sample/master.m3u8", &bearer(&token)).await }
+        };
+
+        let expired = check(mint(
+            &serde_json::json!({ "exp": seconds_from_now(-3600), "asset": "sample" }),
+        ))
+        .await;
+        assert_eq!(expired.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body(expired).await, "token expired");
+        let early = check(mint(&serde_json::json!({ "exp": seconds_from_now(7200), "nbf": seconds_from_now(3600), "asset": "sample" }))).await;
+        assert_eq!(early.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body(early).await, "token not yet valid");
+        let wrong_asset = check(mint_for("other")).await;
+        assert_eq!(wrong_asset.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            body(wrong_asset).await,
+            "the token does not cover this resource"
+        );
+        let tampered = {
+            let token = mint_for("sample");
+            let mut bytes = token.into_bytes();
+            let last = bytes.len() - 2;
+            bytes[last] = if bytes[last] == b'A' { b'B' } else { b'A' };
+            check(String::from_utf8(bytes).unwrap()).await
+        };
+        assert_eq!(tampered.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(body(tampered).await, "invalid token");
+        let oversized = check("a".repeat(5000)).await;
+        assert_eq!(oversized.status(), StatusCode::UNAUTHORIZED);
+        // No refusal names the asset or hints at whether it exists.
+        for token in [mint_for("other"), "junk".to_owned()] {
+            let text = String::from_utf8_lossy(&body(check(token).await).await).to_lowercase();
+            assert!(
+                !text.contains("sample") && !text.contains("exist"),
+                "{text}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_three_transports_each_carry_a_token_and_only_enabled_ones_count() {
+        let token = mint_for("sample");
+        let header = bearer(&token);
+        let cookie = vec![(
+            COOKIE,
+            format!("theme=dark; segmentor_auth={token}; other=1"),
+        )];
+        let query = format!("/hls/sample/master.m3u8?v=x&auth={token}");
+
+        let app = authorized(ALL);
+        assert_eq!(
+            status_with(&app, "/hls/sample/master.m3u8", &header)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_with(&app, "/hls/sample/master.m3u8", &cookie)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            status_with(&app, &query, &[]).await.status(),
+            StatusCode::OK
+        );
+        // The scheme is case-insensitive; another scheme is not a token.
+        let lower = vec![(AUTHORIZATION, format!("bearer {token}"))];
+        assert_eq!(
+            status_with(&app, "/hls/sample/master.m3u8", &lower)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let basic = vec![(AUTHORIZATION, format!("Basic {token}"))];
+        assert_eq!(
+            status_with(&app, "/hls/sample/master.m3u8", &basic)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        // Each transport alone refuses the others.
+        for (only, works, fails) in [
+            (
+                Transports {
+                    header: true,
+                    cookie: false,
+                    query: false,
+                },
+                "header",
+                ["cookie", "query"],
+            ),
+            (
+                Transports {
+                    header: false,
+                    cookie: true,
+                    query: false,
+                },
+                "cookie",
+                ["header", "query"],
+            ),
+            (
+                Transports {
+                    header: false,
+                    cookie: false,
+                    query: true,
+                },
+                "query",
+                ["header", "cookie"],
+            ),
+        ] {
+            let app = authorized(only);
+            let attempt = |name: &str| -> StatusCode {
+                let (uri, headers) = match name {
+                    "header" => ("/hls/sample/master.m3u8".to_owned(), header.clone()),
+                    "cookie" => ("/hls/sample/master.m3u8".to_owned(), cookie.clone()),
+                    _ => (query.clone(), vec![]),
+                };
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current()
+                        .block_on(async { status_with(&app, &uri, &headers).await.status() })
+                })
+            };
+            assert_eq!(attempt(works), StatusCode::OK, "{works} alone");
+            for name in fails {
+                assert_eq!(
+                    attempt(name),
+                    StatusCode::UNAUTHORIZED,
+                    "{name} with only {works}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_token_that_is_bad_is_not_rescued_by_another_transport() {
+        let app = authorized(ALL);
+        let good = mint_for("sample");
+        // The header is checked first; if it is wrong, a good cookie does not help.
+        let headers = vec![
+            (AUTHORIZATION, "Bearer junk".to_owned()),
+            (COOKIE, format!("segmentor_auth={good}")),
+        ];
+        assert_eq!(
+            status_with(&app, "/hls/sample/master.m3u8", &headers)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// A query token must come back in every URL the playlist lists, or a player that follows them
+    /// would be refused on its next request.
+    #[tokio::test]
+    async fn a_query_token_is_carried_into_every_url_a_playlist_lists() {
+        let app = authorized(ALL);
+        let token = mint_for("sample");
+        let version = version();
+        let marker = format!("?v={version}");
+        for (path, xml) in [
+            ("/hls/sample/master.m3u8", false),
+            ("/hls/sample/video/index.m3u8", false),
+            ("/hls/sample/muxed/index.m3u8", false),
+            ("/hls/sample/video/iframes.m3u8", false),
+            ("/dash/sample/manifest.mpd", true),
+        ] {
+            let response = status_with(&app, &format!("{path}?auth={token}"), &[]).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response.headers()[CACHE_CONTROL],
+                "private, no-store",
+                "{path}"
+            );
+            assert!(
+                response.headers().get(ETAG).is_none(),
+                "{path}: per-viewer, so no tag"
+            );
+            assert!(response.headers().get(CONTENT_ENCODING).is_none(), "{path}");
+            let text = String::from_utf8(body(response).await.to_vec()).unwrap();
+            let joiner = if xml { "&amp;" } else { "&" };
+            let carried = format!("{marker}{joiner}auth={token}");
+            let versioned = text.matches(&marker).count();
+            assert!(versioned > 0, "{path}: {text}");
+            assert_eq!(text.matches(&carried).count(), versioned, "{path}: {text}");
+        }
+        // With the token anywhere else, the playlist is the shared, cacheable one.
+        let shared = status_with(&app, "/hls/sample/master.m3u8", &bearer(&token)).await;
+        assert!(shared.headers().get(ETAG).is_some());
+        assert_eq!(shared.headers()[CACHE_CONTROL], "public, max-age=60");
+        assert!(!String::from_utf8_lossy(&body(shared).await).contains("auth="));
+    }
+
+    #[tokio::test]
+    async fn without_authorization_nothing_changes() {
+        // No `[authorization]`: no token is needed, a stray one is ignored, and playlists are the
+        // shared ones.
+        let app = app();
+        let response = get(&app, "/hls/sample/master.m3u8?auth=anything").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CACHE_CONTROL], "public, max-age=60");
+        assert!(!String::from_utf8_lossy(&body(response).await).contains("auth="));
+    }
+
+    #[tokio::test]
+    async fn checks_are_counted_by_outcome() {
+        let state = state_with(ALL);
+        let app = router(state.clone());
+        let ok = bearer(&mint_for("sample"));
+        status_with(&app, "/hls/sample/master.m3u8", &ok).await;
+        status_with(&app, "/hls/sample/master.m3u8", &ok).await;
+        status_with(&app, "/hls/sample/master.m3u8", &bearer(&mint_for("x"))).await;
+        status_with(&app, "/hls/sample/master.m3u8", &[]).await;
+        let expired =
+            mint(&serde_json::json!({ "exp": seconds_from_now(-3600), "asset": "sample" }));
+        status_with(&app, "/hls/sample/master.m3u8", &bearer(&expired)).await;
+
+        let metrics = state.metrics.render(0);
+
+        for line in [
+            "vod_authorization_checks_total{outcome=\"granted\"} 2",
+            "vod_authorization_checks_total{outcome=\"denied\"} 1",
+            "vod_authorization_checks_total{outcome=\"expired\"} 1",
+            "vod_authorization_checks_total{outcome=\"malformed\"} 1",
+        ] {
+            assert!(metrics.contains(line), "{line} in {metrics}");
+        }
+    }
+
+    /// `FFmpeg`'s HLS and DASH clients, which know nothing of the token, play a stream that needs
+    /// one when it reaches them by each transport. This is what the playlists carrying the query
+    /// token buy, checked end to end.
+    #[tokio::test]
+    async fn ffmpeg_plays_a_protected_stream_by_every_transport() {
+        if Command::new("ffprobe").arg("-version").output().is_err() {
+            eprintln!("skipping: ffprobe is not installed");
+            return;
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = authorized(ALL);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let token = mint_for("sample");
+        let frames = |url: String, options: Vec<String>| {
+            tokio::task::spawn_blocking(move || {
+                Command::new("ffprobe")
+                    .args(["-v", "error", "-count_frames", "-select_streams", "v:0"])
+                    .args(["-show_entries", "stream=nb_read_frames", "-of", "csv=p=0"])
+                    .args(options)
+                    .arg(url)
+                    .output()
+                    .unwrap()
+            })
+        };
+        let expected = {
+            let output = Command::new("ffprobe")
+                .args(["-v", "error", "-count_frames", "-select_streams", "v:0"])
+                .args(["-show_entries", "stream=nb_read_frames", "-of", "csv=p=0"])
+                .arg(fixture())
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        assert_ne!(expected, "");
+        let first_line = |output: &std::process::Output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned()
+        };
+
+        for (name, path, options) in [
+            (
+                "hls query",
+                format!("/hls/sample/master.m3u8?auth={token}"),
+                vec![],
+            ),
+            (
+                "dash query",
+                format!("/dash/sample/manifest.mpd?auth={token}"),
+                vec![],
+            ),
+            (
+                "hls header",
+                "/hls/sample/master.m3u8".to_owned(),
+                vec![
+                    "-headers".to_owned(),
+                    format!("Authorization: Bearer {token}\r\n"),
+                ],
+            ),
+            (
+                "hls cookie",
+                "/hls/sample/master.m3u8".to_owned(),
+                vec!["-cookies".to_owned(), format!("segmentor_auth={token}\r\n")],
+            ),
+        ] {
+            let output = frames(format!("http://{address}{path}"), options)
+                .await
+                .unwrap();
+            assert_eq!(
+                first_line(&output),
+                expected,
+                "{name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        // No token, and a token for another asset, play nothing.
+        for url in [
+            format!("http://{address}/hls/sample/master.m3u8"),
+            format!(
+                "http://{address}/hls/sample/master.m3u8?auth={}",
+                mint_for("other")
+            ),
+        ] {
+            let output = frames(url.clone(), vec![]).await.unwrap();
+            assert_ne!(first_line(&output), expected, "{url}");
+        }
+        server.abort();
+    }
 }

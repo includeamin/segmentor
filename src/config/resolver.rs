@@ -13,7 +13,6 @@ use crate::error::{Error, Result};
 pub(crate) struct Secret(String);
 
 impl Secret {
-    #[cfg(test)]
     pub(crate) fn new(value: String) -> Self {
         Self(value)
     }

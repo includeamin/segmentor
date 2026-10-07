@@ -1,6 +1,7 @@
 //! The HTTP origin: router, middleware, handlers, and response streaming.
 //!
 //! See `docs/internals/http-server.md` for how the pieces fit together.
+mod authorize;
 mod cors;
 mod error;
 mod handlers;
