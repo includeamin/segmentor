@@ -1,6 +1,6 @@
 # TDD 0013: Key rotation within an asset
 
-- Status: Draft
+- Status: Accepted; implemented for single-file assets
 - Created: 2026-10-07
 - Updated: 2026-10-07
 - Related ADRs: [ADR 0001](../adr/0001-use-fragmented-mp4-for-media-segments.md)
@@ -115,8 +115,20 @@ Additive. An answer with `keys` and no `periods` is unchanged. Staged:
 2. Adaptive assets (the period list applies to every rendition at the same segment indexes).
 3. Sequences whose clips agree on one period list; other mixes keep using per-clip keys.
 
+## Implementation status
+
+Stage 1 (single-file assets, HLS and DASH) is implemented. What differs from, or settles, the design above:
+
+- **`clear_lead_ms`** exists, as sugar for a clear first period. It was an open question and the answer was yes.
+- **Boundaries** are segment-aligned, rounded up. Two periods that land on one segment make the asset fail to load (`500`, like any load failure), and a period past the last segment is dropped.
+- **Every encrypted fragment** of a rotating asset carries its period's `pssh` boxes, including the first period's, not only later ones. A `seig` group appears only where the key differs from `tenc`.
+- **Clear periods** go through the encrypted-segment path (read into memory, header rebuilt), because their fragments must say they are clear. They are not zero-copy.
+- **Not offered:** I-frame playlists for assets with periods; periods on adaptive assets and sequences (the answer is rejected). Both remain Stage 2 and 3.
+- **`/admin/status`** reports every period's key IDs, not their segment boundaries.
+- **Checked with FFmpeg.** FFmpeg takes a fragment's key and IV from `tenc` and ignores a `seig` group's IV, so the test judges each later period against an init segment whose `tenc` names that period's key and IV, and checks the `seig` entry byte for byte separately. FFmpeg decodes a clear fragment without a key. Real-device playback of `seig`-signalled rotation is not verified here.
+
 ## Open questions
 
 - **Players that ignore `seig`.** Some older MSE players read only `tenc`. Is `seig` plus in-fragment `pssh` enough for the target players, or do we also need an init segment per period as an option (at the cost of a discontinuity)?
 - **Segment-aligned periods only.** Is rounding up to the next segment boundary acceptable to the licence rules this is meant for, or do operators need to pin the segment duration so that a boundary falls exactly where they want it?
-- **Clear lead as its own field.** `"clear_lead_ms": 12000` may be friendlier to mapper authors than a period list for the common case. It would be sugar for a first clear period.
+- ~~Clear lead as its own field~~: added as `clear_lead_ms`.

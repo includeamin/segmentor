@@ -152,7 +152,7 @@ impl PackagedAsset {
         let subtitles = prepare_subtitles(&index, subtitles)?;
         let protection = encryption
             .map(|encryption| {
-                crate::cenc::AssetProtection::new(encryption, &index.tracks, metadata)
+                crate::cenc::AssetProtection::new(encryption, &index.tracks, metadata, &plan)
             })
             .transpose()?;
         let init_segments = index
@@ -334,19 +334,35 @@ impl PackagedAsset {
         sequence_number: u32,
         mut prepared: fmp4::PreparedSegment,
     ) -> fmp4::PreparedSegment {
-        if let Some(protection) = self.protection.as_ref().and_then(|p| p.track(track.id)) {
-            prepared.encryption = Some(Box::new(crate::cenc::PendingEncryption::Cbcs(
-                crate::cenc::PendingCbcs {
-                    track_id: track.id,
-                    kind: track.kind,
-                    samples: track
-                        .samples
-                        .to_vec(segment.first_sample..segment.end_sample),
-                    decode_time: segment.decode_time,
-                    sequence_number,
-                    protection: Arc::clone(protection),
-                },
-            )));
+        let protection = self.protection.as_ref().and_then(|protection| {
+            protection.for_segment(sequence_number.saturating_sub(1), track.id)
+        });
+        if let Some(protection) = protection {
+            let samples = track
+                .samples
+                .to_vec(segment.first_sample..segment.end_sample);
+            prepared.encryption = Some(Box::new(match protection {
+                crate::cenc::SegmentProtection::Encrypted(protection) => {
+                    crate::cenc::PendingEncryption::Cbcs(crate::cenc::PendingCbcs {
+                        track_id: track.id,
+                        kind: track.kind,
+                        samples,
+                        decode_time: segment.decode_time,
+                        sequence_number,
+                        protection,
+                    })
+                }
+                crate::cenc::SegmentProtection::Clear(rotation) => {
+                    crate::cenc::PendingEncryption::Clear(crate::cenc::PendingClear {
+                        track_id: track.id,
+                        kind: track.kind,
+                        samples,
+                        decode_time: segment.decode_time,
+                        sequence_number,
+                        rotation,
+                    })
+                }
+            }));
         } else if let Some(key) = &self.aes128 {
             prepared.encryption = Some(Box::new(Self::whole_segment(
                 key,
@@ -398,6 +414,11 @@ impl PackagedAsset {
         if self.aes128.is_some() {
             return Err(Error::NotFound("an AES-128 asset has no I-frame playlist"));
         }
+        if self.presentation().rotating() {
+            return Err(Error::NotFound(
+                "an asset with key periods has no I-frame playlist",
+            ));
+        }
         cached(&self.rendered.hls_iframes, || {
             Ok(hls::iframe_playlist(self.presentation())?.map(Manifest::from))
         })?
@@ -408,6 +429,11 @@ impl PackagedAsset {
     pub(crate) fn prepare_iframe(&self, frame_index: u32) -> Result<fmp4::PreparedSegment> {
         if self.aes128.is_some() {
             return Err(Error::NotFound("an AES-128 asset has no I-frame playlist"));
+        }
+        if self.presentation().rotating() {
+            return Err(Error::NotFound(
+                "an asset with key periods has no I-frame playlist",
+            ));
         }
         let presentation = self.presentation();
         let track = presentation

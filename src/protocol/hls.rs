@@ -220,7 +220,13 @@ pub(crate) fn media_playlist(presentation: Presentation<'_>, key: TrackKey) -> R
 
 /// The `#EXT-X-KEY` lines for `track`, empty when the presentation is clear.
 fn key_lines(presentation: Presentation<'_>, track: &Track) -> String {
-    key_transition_lines(None, presentation.encryption(), track.kind, "EXT-X-KEY")
+    // A rotating asset starts with its first period's keys, which may be none (TDD 0013).
+    let first = presentation
+        .key_schedule()
+        .first()
+        .map(|period| period.encryption);
+    let encryption = first.unwrap_or_else(|| presentation.encryption());
+    key_transition_lines(None, encryption, track.kind, "EXT-X-KEY")
 }
 
 /// What to write when moving from `previous` clip's encryption to `current` clip's, for `tag`
@@ -258,6 +264,9 @@ fn write_segment_entries(
     first_number: u32,
     version: &str,
 ) -> Result<()> {
+    // Where each later key period begins (TDD 0013): its key lines go before that segment.
+    let schedule = presentation.key_schedule();
+    let mut periods = schedule.iter().skip(1).peekable();
     for (offset, segment) in presentation.track_segments(track.id).enumerate() {
         let milliseconds = segment
             .duration
@@ -268,6 +277,16 @@ fn write_segment_entries(
             .ok()
             .and_then(|offset| offset.checked_add(u64::from(first_number)))
             .ok_or_else(|| Error::InvalidMedia("segment number overflow".to_owned()))?;
+        if let Some(period) = periods.next_if(|period| u64::from(period.first_segment) <= number) {
+            playlist.push_str(&match period.encryption {
+                Some(encryption) => crate::cenc::hls_key_lines(
+                    encryption,
+                    encryption.key_for(track.kind),
+                    "EXT-X-KEY",
+                ),
+                None => crate::cenc::hls_key_none("EXT-X-KEY"),
+            });
+        }
         writeln!(
             playlist,
             "#EXTINF:{}.{:03},\nsegments/{number}/media.m4s?v={version}",
@@ -520,7 +539,8 @@ pub(crate) fn iframe_stream(
         return Ok(None);
     };
     // The I-frame fragments are not encrypted whole, so an AES-128 asset does not offer them.
-    if presentation.aes128().is_some() {
+    // Nor does a rotating asset: a keyframe's fragment would need its period's key (TDD 0013).
+    if presentation.aes128().is_some() || presentation.rotating() {
         return Ok(None);
     }
     let frames = keyframes(track)?;

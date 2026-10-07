@@ -71,6 +71,23 @@ impl<'a> Presentation<'a> {
         self.encryption
     }
 
+    /// Whether the keys change over the timeline (TDD 0013).
+    pub(crate) fn rotating(&self) -> bool {
+        self.encryption
+            .is_some_and(crate::cenc::Encryption::is_rotating)
+    }
+
+    /// The key periods placed on the segments; empty unless [`Self::rotating`].
+    pub(crate) fn key_schedule(&self) -> Vec<crate::cenc::ScheduledPeriod<'a>> {
+        match self.encryption {
+            Some(encryption) if encryption.is_rotating() => {
+                // A schedule that cannot be placed was already refused when the asset loaded.
+                crate::cenc::schedule(encryption, self.tracks, self.plan).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// The same view with the asset's sidecar subtitles.
     pub(crate) const fn with_subtitles(self, subtitles: &'a [Subtitle]) -> Self {
         Self { subtitles, ..self }

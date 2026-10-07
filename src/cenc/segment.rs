@@ -12,8 +12,9 @@ use super::cipher::{Cipher, Pattern};
 use super::hevc::HevcParameters;
 use super::keys::{ContentKey, Encryption};
 use crate::error::{Error, Result};
-use crate::fmp4::{self, InitProtection, MAX_SUBSAMPLES};
+use crate::fmp4::{self, FragmentRotation, InitProtection, MAX_SUBSAMPLES, SampleGroup};
 use crate::media::{CodecConfig, Sample, Track, TrackKind};
+use crate::segment::SegmentPlan;
 use crate::source::Metadata;
 
 /// What a track needs to encrypt its segments.
@@ -23,6 +24,9 @@ pub(crate) struct TrackProtection {
     pub(crate) kind: TrackKind,
     /// Parameter sets, for finding slice headers; `None` for audio.
     pub(crate) video: Option<VideoParameters>,
+    /// What a fragment under this key says about it when the key is not the init segment's
+    /// (TDD 0013).
+    pub(crate) rotation: Option<Arc<FragmentRotation>>,
 }
 
 /// The parameter sets of a video track, by codec.
@@ -56,9 +60,32 @@ impl TrackProtection {
 #[derive(Debug)]
 pub(crate) struct AssetProtection {
     pub(crate) encryption: Arc<Encryption>,
+    /// The first encrypted period's, which the init segments declare.
     tracks: HashMap<u32, Arc<TrackProtection>>,
-    /// Every `pssh` the mapper supplied, for each init segment's `moov`.
+    /// Every `pssh` of the first encrypted period, for each init segment's `moov`.
     pub(crate) pssh: Vec<Vec<u8>>,
+    /// The timeline of a rotating asset (TDD 0013); empty when one key covers everything.
+    periods: Vec<PeriodProtection>,
+}
+
+#[derive(Debug)]
+struct PeriodProtection {
+    first_segment: u32,
+    content: PeriodContent,
+}
+
+#[derive(Debug)]
+enum PeriodContent {
+    Encrypted(HashMap<u32, Arc<TrackProtection>>),
+    Clear(Arc<FragmentRotation>),
+}
+
+/// How one segment of one track is protected.
+#[derive(Debug)]
+pub(crate) enum SegmentProtection {
+    Encrypted(Arc<TrackProtection>),
+    /// A clear stretch of a rotating asset.
+    Clear(Arc<FragmentRotation>),
 }
 
 impl AssetProtection {
@@ -67,7 +94,51 @@ impl AssetProtection {
         encryption: Arc<Encryption>,
         tracks: &[Track],
         metadata: &Metadata,
+        plan: &SegmentPlan,
     ) -> Result<Self> {
+        let rotating = encryption.is_rotating();
+        let primary =
+            Self::track_protections(&encryption, &encryption, tracks, metadata, rotating)?;
+        let pssh = system_pssh(&encryption);
+        let mut periods = Vec::new();
+        if rotating {
+            for scheduled in super::schedule(&encryption, tracks, plan)? {
+                let content = match scheduled.encryption {
+                    Some(period) => PeriodContent::Encrypted(Self::track_protections(
+                        period,
+                        &encryption,
+                        tracks,
+                        metadata,
+                        true,
+                    )?),
+                    None => PeriodContent::Clear(Arc::new(FragmentRotation {
+                        group: Some(SampleGroup::Clear),
+                        pssh: Vec::new(),
+                    })),
+                };
+                periods.push(PeriodProtection {
+                    first_segment: scheduled.first_segment,
+                    content,
+                });
+            }
+        }
+        Ok(Self {
+            encryption,
+            tracks: primary,
+            pssh,
+            periods,
+        })
+    }
+
+    /// Each track's protection under `period`'s keys. `primary` is the period the init segments
+    /// describe; a fragment under other keys says so with a `seig` group.
+    fn track_protections(
+        period: &Encryption,
+        primary: &Encryption,
+        tracks: &[Track],
+        metadata: &Metadata,
+        rotating: bool,
+    ) -> Result<HashMap<u32, Arc<TrackProtection>>> {
         let mut protected = HashMap::with_capacity(tracks.len());
         for track in tracks {
             let video = match &track.codec {
@@ -93,30 +164,70 @@ impl AssetProtection {
                     )));
                 }
             };
-            protected.insert(
-                track.id,
-                Arc::new(TrackProtection {
-                    key: encryption.key_for(track.kind).clone(),
-                    kind: track.kind,
-                    video,
-                }),
-            );
+            let key = period.key_for(track.kind).clone();
+            let mut protection = TrackProtection {
+                key,
+                kind: track.kind,
+                video,
+                rotation: None,
+            };
+            if rotating {
+                let group = (protection.key != *primary.key_for(track.kind)).then(|| {
+                    let pattern = protection.pattern();
+                    SampleGroup::Protected {
+                        crypt_byte_block: pattern.crypt,
+                        skip_byte_block: pattern.skip,
+                        key_id: protection.key.key_id,
+                        constant_iv: protection.key.iv,
+                    }
+                });
+                protection.rotation = Some(Arc::new(FragmentRotation {
+                    group,
+                    pssh: system_pssh(period).concat(),
+                }));
+            }
+            protected.insert(track.id, Arc::new(protection));
         }
-        let pssh = encryption
-            .systems
-            .iter()
-            .filter_map(|system| system.pssh.clone())
-            .collect();
-        Ok(Self {
-            encryption,
-            tracks: protected,
-            pssh,
-        })
+        Ok(protected)
     }
 
+    /// The init segments' view: the first encrypted period.
     pub(crate) fn track(&self, id: u32) -> Option<&Arc<TrackProtection>> {
         self.tracks.get(&id)
     }
+
+    /// How `track_id`'s segment `segment_index` is protected.
+    pub(crate) fn for_segment(
+        &self,
+        segment_index: u32,
+        track_id: u32,
+    ) -> Option<SegmentProtection> {
+        if self.periods.is_empty() {
+            return self
+                .tracks
+                .get(&track_id)
+                .cloned()
+                .map(SegmentProtection::Encrypted);
+        }
+        let at = self
+            .periods
+            .partition_point(|period| period.first_segment <= segment_index);
+        match &self.periods[at.checked_sub(1)?].content {
+            PeriodContent::Encrypted(tracks) => tracks
+                .get(&track_id)
+                .cloned()
+                .map(SegmentProtection::Encrypted),
+            PeriodContent::Clear(rotation) => Some(SegmentProtection::Clear(Arc::clone(rotation))),
+        }
+    }
+}
+
+fn system_pssh(encryption: &Encryption) -> Vec<Vec<u8>> {
+    encryption
+        .systems
+        .iter()
+        .filter_map(|system| system.pssh.clone())
+        .collect()
 }
 
 /// A segment that must be encrypted once its bytes are read (TDD 0009, "The encrypted segment
@@ -124,6 +235,8 @@ impl AssetProtection {
 #[derive(Debug, Clone)]
 pub(crate) enum PendingEncryption {
     Cbcs(PendingCbcs),
+    /// A clear segment of a rotating asset, which still needs its header rebuilt (TDD 0013).
+    Clear(PendingClear),
     /// Header and payload encrypted together as one message (TDD 0012).
     WholeSegment {
         /// The fragment's `moof` and `mdat` header, which the payload follows.
@@ -139,6 +252,7 @@ impl PendingEncryption {
     pub(crate) fn header_room(&self) -> usize {
         match self {
             Self::Cbcs(pending) => pending.header_room(),
+            Self::Clear(pending) => pending.header_room(),
             // The header, and up to a block of padding.
             Self::WholeSegment { header, .. } => header.len() + 16,
         }
@@ -148,6 +262,7 @@ impl PendingEncryption {
     pub(crate) fn finish(&self, payload: Vec<u8>) -> Result<Bytes> {
         match self {
             Self::Cbcs(pending) => pending.finish(payload),
+            Self::Clear(pending) => pending.finish(payload),
             Self::WholeSegment {
                 header,
                 segment_index,
@@ -160,6 +275,39 @@ impl PendingEncryption {
                 Ok(Bytes::from(message))
             }
         }
+    }
+}
+
+/// A clear segment inside a rotating asset: its samples are not encrypted, but its fragment says
+/// that with a `seig` group, so the header is rebuilt once the size is known.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingClear {
+    pub(crate) track_id: u32,
+    pub(crate) kind: TrackKind,
+    pub(crate) samples: Vec<Sample>,
+    pub(crate) decode_time: u64,
+    pub(crate) sequence_number: u32,
+    pub(crate) rotation: Arc<FragmentRotation>,
+}
+
+impl PendingClear {
+    fn header_room(&self) -> usize {
+        self.samples.len().saturating_mul(32).saturating_add(512)
+    }
+
+    fn finish(&self, mut payload: Vec<u8>) -> Result<Bytes> {
+        let header = fmp4::clear_fragment_header(
+            self.track_id,
+            self.kind,
+            &self.samples,
+            self.decode_time,
+            self.sequence_number,
+            &self.rotation,
+            payload.len(),
+        )?;
+        payload.reserve_exact(header.len());
+        payload.splice(0..0, header);
+        Ok(Bytes::from(payload))
     }
 }
 
@@ -230,6 +378,7 @@ impl PendingCbcs {
             self.sequence_number,
             &maps,
             payload.len(),
+            self.protection.rotation.as_deref(),
         )?;
         // Put the header in front within the payload's own buffer (room is usually reserved by
         // the caller), rather than copying the whole payload after the header.

@@ -305,6 +305,28 @@ Any other system ID is accepted and signalled in DASH only (its `pssh` and `lice
 
 **The answer now carries secrets.** The mapper must be reached over `https` and must require the bearer token; do not use `allow_insecure_mapper` with real keys.
 
+### Key rotation and clear lead
+
+For a single file, the keys can change over the timeline. Give `periods` in place of `keys` and `systems`; each period has its own `keys` and `systems`, or is `"clear": true`:
+
+```json
+"encryption": {
+  "scheme": "cbcs",
+  "periods": [
+    { "start_ms": 0,      "clear": true },
+    { "start_ms": 12000,  "keys": [ { "key_id": "…", "key": "…" } ], "systems": [ … ] },
+    { "start_ms": 600000, "keys": [ { "key_id": "…", "key": "…" } ], "systems": [ … ] }
+  ]
+}
+```
+
+- The first period starts at 0 and `start_ms` increases. There are at most 256 periods, and at least one has keys. Two encrypted periods next to each other must have different `key_id` values. Each period follows every rule of the `encryption` object above.
+- **A period begins at the first segment that starts at or after its `start_ms`.** A period asked for mid-segment waits for the next segment. One that starts after the last segment never starts. Two that would begin at the same segment cannot be served and make the asset fail to load (`500`), so choose starts at least one segment apart.
+- `"clear_lead_ms": 12000` next to `keys` is shorthand for a clear first period of that length followed by those keys, which is what nginx-vod-module's clear-lead setting does.
+- The init segment declares the first encrypted period's key. A fragment under another key says so with a `seig` sample group, a clear fragment says it is clear, and every encrypted fragment carries its period's `pssh` boxes, so DASH players learn each key from the media. HLS gets an `#EXT-X-KEY` line set before the first segment of each period (`METHOD=NONE` for a clear one), no discontinuity, and `#EXT-X-SESSION-KEY` lines for every period's licence. The DASH manifest stays one Period and describes the first encrypted period.
+- Every period's keys are hashed into the URL version.
+- **Limits.** Single-file assets only: periods on `renditions` or `clips` (or on a clip's own `encryption`) are rejected. An asset with periods has no I-frame playlist. A clear period is served through the encrypted-segment path, so it is read into memory like an encrypted one. Design: [TDD 0013](technical-design/0013-key-rotation.md).
+
 ### Different keys per clip
 
 In a [clips](#clips) answer, each clip may carry its own `encryption` object. A clip without one uses the answer's own `encryption`; if the answer has none either, that clip is served clear. This covers a clear pre-roll before an encrypted movie, or two programmes under different keys:

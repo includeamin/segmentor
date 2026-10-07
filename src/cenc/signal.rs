@@ -42,7 +42,7 @@ pub(crate) fn hls_session_keys_for_sequence<'a>(
 ) -> String {
     let mut lines = String::new();
     let mut seen: Vec<String> = Vec::new();
-    for encryption in encryptions {
+    for encryption in encryptions.flat_map(Encryption::encrypted_periods) {
         for key in encryption.distinct_keys() {
             for system in &encryption.systems {
                 let Some(identity) = hls_attributes(system, None) else {
