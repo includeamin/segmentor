@@ -119,6 +119,8 @@ base_url = "https://mapper.internal.example.net"
 bearer_token_env = "VOD_MAPPER_TOKEN"
 ```
 
+To rotate the mapper token without a restart, use `bearer_token_file = "/run/secrets/mapper-token"` instead (a path relative to the configuration file also works). The file holds one line of visible ASCII. It is re-read every `bearer_token_reload_ms` (5000 by default; `0` reads it once at startup), so a mounted secret that is updated in place takes effect within that interval. If a re-read fails (the file is missing or empty in the middle of a rotation), the previous token stays in use and a warning is logged. The file must be readable at startup, and the token is never logged. Set only one of `bearer_token_env` and `bearer_token_file`.
+
 Behavior worth knowing before you run it:
 
 - **Assets load on first request.** The first viewer of an asset pays the resolve, open, and parse cost (about 15 ms for a one-hour local file; more for a remote object). Later requests are served from memory. Warm popular assets with a request after deployment if that matters.

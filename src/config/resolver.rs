@@ -2,6 +2,7 @@
 //! caches, and the policy for remote media.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -26,6 +27,21 @@ impl fmt::Debug for Secret {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("Secret(<redacted>)")
     }
+}
+
+/// Reads a bearer token from a file: one line of visible ASCII, a trailing newline allowed.
+/// The reason never includes the contents.
+pub(crate) fn read_token_file(path: &Path) -> std::result::Result<Secret, String> {
+    let contents =
+        std::fs::read_to_string(path).map_err(|error| format!("cannot be read: {error}"))?;
+    let token = contents.trim_end_matches(['\n', '\r']);
+    if token.is_empty() {
+        return Err("is empty".to_owned());
+    }
+    if !token.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err("must be a single line of visible ASCII characters".to_owned());
+    }
+    Ok(Secret(token.to_owned()))
 }
 
 /// Where asset locations come from.
@@ -58,6 +74,10 @@ pub(super) struct RawResolver {
 pub(super) struct RawMapper {
     base_url: String,
     bearer_token_env: Option<String>,
+    /// A file holding the token, re-read every `bearer_token_reload_ms` so a rotated token takes
+    /// effect without a restart. Exclusive with `bearer_token_env`.
+    bearer_token_file: Option<PathBuf>,
+    bearer_token_reload_ms: u64,
     connect_timeout_ms: u64,
     request_timeout_ms: u64,
     max_retries: u32,
@@ -78,6 +98,8 @@ impl Default for RawMapper {
         Self {
             base_url: String::new(),
             bearer_token_env: None,
+            bearer_token_file: None,
+            bearer_token_reload_ms: 5000,
             connect_timeout_ms: 500,
             request_timeout_ms: 2000,
             max_retries: 2,
@@ -100,6 +122,10 @@ impl Default for RawMapper {
 pub(crate) struct MapperConfig {
     pub(crate) base_url: String,
     pub(crate) bearer_token: Option<Secret>,
+    /// Where `bearer_token` came from, when it is a file that is re-read.
+    pub(crate) bearer_token_file: Option<PathBuf>,
+    /// Zero reads the file once, at startup.
+    pub(crate) bearer_token_reload_ms: u64,
     pub(crate) connect_timeout_ms: u64,
     pub(crate) request_timeout_ms: u64,
     pub(crate) max_retries: u32,
@@ -121,6 +147,7 @@ pub(crate) struct MapperConfig {
 impl RawMapper {
     pub(super) fn validate(
         self,
+        config_directory: &Path,
         environment: &dyn Fn(&str) -> Option<String>,
     ) -> Result<MapperConfig> {
         let fail = |message: &str| Err(Error::Configuration(message.to_owned()));
@@ -154,21 +181,44 @@ impl RawMapper {
         if !(self.min_ttl_ms <= self.default_ttl_ms && self.default_ttl_ms <= self.max_ttl_ms) {
             return fail("resolver.http requires min_ttl_ms <= default_ttl_ms <= max_ttl_ms");
         }
-        let bearer_token = match self.bearer_token_env {
-            None => None,
-            Some(name) => Some(Secret(
-                environment(&name)
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(|| {
+        let (bearer_token, bearer_token_file) =
+            match (self.bearer_token_env, self.bearer_token_file) {
+                (None, None) => (None, None),
+                (Some(name), None) => {
+                    let value = environment(&name)
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| {
+                            Error::Configuration(format!(
+                                "resolver.http.bearer_token_env names `{name}`, which is not set"
+                            ))
+                        })?;
+                    (Some(Secret(value)), None)
+                }
+                (None, Some(path)) => {
+                    let path = if path.is_absolute() {
+                        path
+                    } else {
+                        config_directory.join(path)
+                    };
+                    let token = read_token_file(&path).map_err(|reason| {
                         Error::Configuration(format!(
-                            "resolver.http.bearer_token_env names `{name}`, which is not set"
+                            "resolver.http.bearer_token_file {}: {reason}",
+                            path.display()
                         ))
-                    })?,
-            )),
-        };
+                    })?;
+                    (Some(token), Some(path))
+                }
+                (Some(_), Some(_)) => {
+                    return fail(
+                        "resolver.http takes at most one of bearer_token_env and bearer_token_file",
+                    );
+                }
+            };
         Ok(MapperConfig {
             base_url: url.to_owned(),
             bearer_token,
+            bearer_token_file,
+            bearer_token_reload_ms: self.bearer_token_reload_ms,
             connect_timeout_ms: self.connect_timeout_ms,
             request_timeout_ms: self.request_timeout_ms,
             max_retries: self.max_retries,

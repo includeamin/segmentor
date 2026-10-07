@@ -17,7 +17,7 @@ pub(crate) use cors::CorsConfig;
 pub(crate) use limits::LimitsConfig;
 pub(crate) use logging::{LogFormat, LoggingConfig};
 pub(crate) use resolver::{
-    MapperConfig, RegistryConfig, RemoteMediaConfig, ResolverSettings, Secret,
+    MapperConfig, RegistryConfig, RemoteMediaConfig, ResolverSettings, Secret, read_token_file,
 };
 pub(crate) use tls::TlsConfig;
 #[cfg(test)]
@@ -170,7 +170,7 @@ impl Config {
                         "[assets] cannot be combined with resolver.type = \"http\"".to_owned(),
                     ));
                 }
-                ResolverSettings::Http(mapper.validate(environment)?)
+                ResolverSettings::Http(mapper.validate(config_directory, environment)?)
             }
         };
 
@@ -617,6 +617,62 @@ mod tests {
         }
         mapper_config("base_url = \"http://localhost:9\"\nallow_insecure_mapper = true")
             .expect("insecure mapper is allowed when opted in");
+    }
+
+    #[test]
+    fn a_mapper_token_file_is_read_trimmed_and_kept_out_of_debug_output() {
+        let directory = crate::testutil::ScratchDir::new("token-file-read");
+        fs::write(directory.path().join("token"), "file-secret\n").unwrap();
+        let config = Config::parse_with(
+            "[server]\nlisten = \"127.0.0.1:8080\"\n[storage]\nmedia_root = \".\"\n[resolver]\ntype = \"http\"\n[resolver.http]\nbase_url = \"https://m.example.net\"\nbearer_token_file = \"token\"\n[remote_media]\nallowed_hosts = [\"origin.example.net\"]",
+            directory.path(),
+            &|_| None,
+        )
+        .unwrap();
+        let ResolverSettings::Http(mapper) = &config.resolver else {
+            panic!("expected the http resolver");
+        };
+        assert_eq!(
+            mapper.bearer_token.as_ref().unwrap().expose(),
+            "file-secret"
+        );
+        assert_eq!(
+            mapper.bearer_token_file.as_deref(),
+            Some(directory.path().join("token").as_path())
+        );
+        assert_eq!(mapper.bearer_token_reload_ms, 5000);
+        assert!(!format!("{mapper:?}").contains("file-secret"));
+    }
+
+    #[test]
+    fn a_mapper_token_file_that_cannot_be_used_is_rejected_without_its_contents() {
+        let directory = crate::testutil::ScratchDir::new("token-file-bad");
+        let path = directory.path().join("token");
+        for (contents, needle) in [
+            (Some(""), "empty"),
+            (Some("\n"), "empty"),
+            (Some("two words"), "visible ASCII"),
+            (Some("line\nbreak"), "visible ASCII"),
+            (None, "cannot be read"),
+        ] {
+            match contents {
+                Some(contents) => fs::write(&path, contents).unwrap(),
+                None => {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+            let error = read_token_file(&path).unwrap_err();
+            assert!(error.contains(needle), "{contents:?}: {error}");
+        }
+        let error =
+            mapper_config("base_url = \"https://m.example.net\"\nbearer_token_file = \"missing\"")
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("bearer_token_file"), "{error}");
+        mapper_config(
+            "base_url = \"https://m.example.net\"\nbearer_token_file = \"t\"\nbearer_token_env = \"X\"",
+        )
+        .expect_err("env and file together");
     }
 
     #[test]

@@ -3,7 +3,8 @@
 //! `GET {base_url}/v1/assets/{asset_id}` returns a JSON document naming the media's location and
 //! version. Everything in the answer is validated before it is trusted.
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, CACHE_CONTROL, IF_NONE_MATCH, RETRY_AFTER};
@@ -20,7 +21,7 @@ use super::{
 };
 use crate::clip::{ClipWindow, MAX_CLIP_MS};
 use crate::config::Secret;
-use crate::config::{MapperConfig, is_valid_asset_id};
+use crate::config::{MapperConfig, is_valid_asset_id, read_token_file};
 use crate::observability::request_id;
 
 const MAX_VERSION_BYTES: usize = 256;
@@ -29,11 +30,66 @@ const MAX_RETRY_AFTER: Duration = Duration::from_secs(1);
 /// A rendition `id` is a path segment (`video-{id}` in a URL), so it is kept short and plain.
 const MAX_RENDITION_ID_BYTES: usize = 32;
 
+/// The bearer token the mapper is called with. A token read from a file is re-read at most once
+/// per interval, by whichever request finds it due, so a rotated token takes effect without a
+/// restart and with no background task. A file that cannot be read keeps the last good token, so
+/// the moment of a rotation (the file briefly empty or missing) does not break resolution.
+#[derive(Debug)]
+struct TokenSource {
+    state: Mutex<TokenState>,
+    file: Option<(PathBuf, Duration)>,
+}
+
+#[derive(Debug)]
+struct TokenState {
+    token: Secret,
+    checked: Instant,
+}
+
+impl TokenSource {
+    fn new(settings: &MapperConfig) -> Option<Self> {
+        let token = settings.bearer_token.clone()?;
+        let file = settings.bearer_token_file.clone().and_then(|path| {
+            (settings.bearer_token_reload_ms > 0)
+                .then(|| (path, Duration::from_millis(settings.bearer_token_reload_ms)))
+        });
+        Some(Self {
+            state: Mutex::new(TokenState {
+                token,
+                checked: Instant::now(),
+            }),
+            file,
+        })
+    }
+
+    fn current(&self) -> Secret {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((path, interval)) = &self.file
+            && state.checked.elapsed() >= *interval
+        {
+            state.checked = Instant::now();
+            match read_token_file(path) {
+                Ok(token) if token.expose() != state.token.expose() => {
+                    tracing::info!(path = %path.display(), "mapper bearer token reloaded");
+                    state.token = token;
+                }
+                Ok(_) => {}
+                Err(reason) => tracing::warn!(
+                    path = %path.display(),
+                    %reason,
+                    "mapper bearer token file not reloaded; keeping the previous token"
+                ),
+            }
+        }
+        state.token.clone()
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct HttpResolver {
     client: Client,
     base_url: String,
-    token: Option<Secret>,
+    token: Option<TokenSource>,
     settings: MapperConfig,
     policy: LocationPolicy,
     /// `limits.max_clips`: an answer listing more is malformed.
@@ -136,7 +192,7 @@ impl HttpResolver {
         Ok(Self {
             client,
             base_url: settings.base_url.clone(),
-            token: settings.bearer_token.clone(),
+            token: TokenSource::new(settings),
             settings: settings.clone(),
             policy,
             max_clips,
@@ -220,7 +276,10 @@ impl HttpResolver {
 
     fn authorized(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.token {
-            Some(token) => request.header(AUTHORIZATION, format!("Bearer {}", token.expose())),
+            Some(token) => request.header(
+                AUTHORIZATION,
+                format!("Bearer {}", token.current().expose()),
+            ),
             None => request,
         }
     }

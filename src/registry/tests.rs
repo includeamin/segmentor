@@ -26,6 +26,8 @@ fn mapper_settings(url: &str) -> MapperConfig {
     MapperConfig {
         base_url: url.to_owned(),
         bearer_token: None,
+        bearer_token_file: None,
+        bearer_token_reload_ms: 0,
         connect_timeout_ms: 500,
         request_timeout_ms: 2000,
         max_retries: 2,
@@ -3537,4 +3539,80 @@ async fn ffmpeg_plays_an_aes128_stream_and_cannot_with_another_key() {
         "a wrong key does not decrypt"
     );
     server.abort();
+}
+
+/// A rotated token file is picked up without a restart: the mapper starts requiring the new
+/// token, the file is rewritten, and resolution recovers. While the file is unreadable the last
+/// good token keeps working.
+#[tokio::test]
+async fn a_rotated_token_file_is_picked_up_without_a_restart() {
+    let directory = crate::testutil::ScratchDir::new("token-rotation");
+    let file = directory.path().join("token");
+    std::fs::write(&file, "first\n").unwrap();
+    let mapper = MockMapper::start().await;
+    *mapper.state.required_token.lock().unwrap() = Some("first".to_owned());
+    for id in ["a", "b", "c", "d"] {
+        mapper.state.set(id, Answer::file("v1", "h264-aac.mp4"));
+    }
+    let config = config_for(&mapper, |config| {
+        let ResolverSettings::Http(settings) = &mut config.resolver else {
+            unreachable!()
+        };
+        settings.bearer_token = Some(crate::config::read_token_file(&file).unwrap());
+        settings.bearer_token_file = Some(file.clone());
+        settings.bearer_token_reload_ms = 50;
+    });
+    let app = router(AppState::new(&config).unwrap());
+    assert_eq!(status(&app, "/hls/a/master.m3u8").await, StatusCode::OK);
+
+    // The mapper rotates its token and the operator rewrites the file.
+    *mapper.state.required_token.lock().unwrap() = Some("second".to_owned());
+    std::fs::write(&file, "second\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(status(&app, "/hls/b/master.m3u8").await, StatusCode::OK);
+    assert_eq!(
+        mapper
+            .state
+            .seen_tokens
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .as_deref(),
+        Some("Bearer second")
+    );
+
+    // A file that is briefly missing or empty during a rotation does not break resolution.
+    std::fs::write(&file, "").unwrap();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(status(&app, "/hls/c/master.m3u8").await, StatusCode::OK);
+    std::fs::remove_file(&file).unwrap();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    assert_eq!(status(&app, "/hls/d/master.m3u8").await, StatusCode::OK);
+}
+
+/// With reloading off, the token read at startup is the one used for good.
+#[tokio::test]
+async fn a_token_file_is_not_re_read_when_reloading_is_off() {
+    let directory = crate::testutil::ScratchDir::new("token-no-reload");
+    let file = directory.path().join("token");
+    std::fs::write(&file, "first").unwrap();
+    let mapper = MockMapper::start().await;
+    *mapper.state.required_token.lock().unwrap() = Some("second".to_owned());
+    mapper.state.set("a", Answer::file("v1", "h264-aac.mp4"));
+    let config = config_for(&mapper, |config| {
+        let ResolverSettings::Http(settings) = &mut config.resolver else {
+            unreachable!()
+        };
+        settings.bearer_token = Some(crate::config::read_token_file(&file).unwrap());
+        settings.bearer_token_file = Some(file.clone());
+        settings.bearer_token_reload_ms = 0;
+    });
+    let app = router(AppState::new(&config).unwrap());
+    std::fs::write(&file, "second").unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        status(&app, "/hls/a/master.m3u8").await,
+        StatusCode::BAD_GATEWAY
+    );
 }

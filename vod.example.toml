@@ -71,6 +71,8 @@ path = "h264-aac.mp4"
 # [resolver.http]
 # base_url = "https://mapper.internal.example.net"
 # bearer_token_env = "VOD_MAPPER_TOKEN"   # name of an environment variable; never the token itself
+# bearer_token_file = "/run/secrets/mapper-token"   # instead: re-read every bearer_token_reload_ms
+# bearer_token_reload_ms = 5000           # 0 reads the file once, at startup
 # connect_timeout_ms = 500
 # request_timeout_ms = 2000
 # max_retries = 2
