@@ -245,6 +245,10 @@ impl PackagedAsset {
         self.aes128.is_some()
     }
 
+    pub(crate) fn aes128(&self) -> Option<&crate::cenc::Aes128> {
+        self.aes128.as_deref()
+    }
+
     /// Whether HLS serves the muxed stream (TDD 0011).
     pub(crate) const fn is_muxed(&self) -> bool {
         self.muxed.is_some()

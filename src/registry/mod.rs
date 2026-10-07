@@ -561,6 +561,7 @@ impl AssetRegistry {
             let new_locations = new.locations();
             let same_objects = old.version == new.version
                 && old.encryption == new.encryption
+                && old.hls_aes128 == new.hls_aes128
                 // Each clip's own window and encryption override (TDD 0009, "Different keys per
                 // clip"); empty for non-clip assets, so this is a no-op there. Deliberately not a
                 // location comparison: that is `old_locations`/`new_locations` below, compared
@@ -806,6 +807,7 @@ impl AssetRegistry {
             let registry = Arc::clone(self);
             let asset_id = asset_id.to_owned();
             let encryption = resolved.encryption.clone();
+            let hls_aes128 = resolved.hls_aes128.clone();
             tasks.spawn(async move {
                 let outcome: Result<(PackagedAsset, Arc<AssetRefresher>)> = async {
                     let refresher = Arc::new(AssetRefresher {
@@ -825,6 +827,7 @@ impl AssetRegistry {
                         source,
                         Extras {
                             encryption,
+                            hls_aes128,
                             ..Extras::default()
                         },
                         registry.settings.segment_duration_ms,
@@ -941,6 +944,7 @@ impl AssetRegistry {
 
         let asset_id = asset_id.to_owned();
         let version = resolved.version.clone();
+        let aes128 = resolved.hls_aes128.clone();
         let segment_duration_ms = self.settings.segment_duration_ms;
         let limits = self.limits.clone();
         let asset = tokio::task::spawn_blocking(move || {
@@ -949,6 +953,7 @@ impl AssetRegistry {
                 &clip_files,
                 &clips,
                 &version,
+                aes128.as_ref(),
                 segment_duration_ms,
                 &limits,
             )

@@ -385,7 +385,7 @@ What a player sees:
 - **segmentor does not serve the key.** `key_uri` is your own endpoint, and it is where authorization belongs: anyone who can fetch the key can decrypt the stream. This is not DRM; for licensed content use `encryption`.
 - **The init segment is sent clear** (the key line follows the map line), and each segment's IV is its media sequence number, with no `IV` attribute.
 - **HLS only.** An `hls_aes128` asset answers `404` on `/dash/`, and offers no I-frame playlist.
-- **A single file only,** and not together with `encryption`: an answer that sets both, or sets `hls_aes128` on `renditions` or `clips`, is rejected.
+- **Not together with `encryption`:** an answer that sets both, or sets `hls_aes128` with a clip's own `encryption`, is rejected. `hls_aes128` sits on the answer and covers every rendition of an adaptive asset and every clip of a sequence, under the one key. A segment's IV is its media sequence number in the playlist, which counts across the clips of a sequence.
 - **The answer carries a secret.** The same rules as for `encryption` apply: use `https` and the bearer token. Errors name the field and never the key. The key and its URI are part of the URL version, so changing either gives new URLs.
 
 ## What a `version` means to the server

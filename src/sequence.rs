@@ -56,6 +56,7 @@ pub(crate) fn build(
     files: &[ClipFile],
     clips: &[(usize, ClipWindow, Option<Arc<crate::cenc::Encryption>>)],
     mapper_version: &str,
+    aes128: Option<&Arc<crate::cenc::Aes128>>,
     segment_duration_ms: u64,
     limits: &LimitsConfig,
 ) -> Result<ServedAsset> {
@@ -88,6 +89,7 @@ pub(crate) fn build(
     }
     let version = clip::version_of(
         mapper_version,
+        aes128.map(AsRef::as_ref),
         clips.iter().map(|(file, window, encryption)| {
             (
                 &files[*file].parsed.index.source,
@@ -110,7 +112,7 @@ pub(crate) fn build(
                 encryption,
                 // A sequence serves its own playlists; clips are never muxed (TDD 0011).
                 hls_mux_audio: false,
-                hls_aes128: None,
+                hls_aes128: aes128.cloned(),
             },
         )
         .map_err(named(position))?;
@@ -267,6 +269,12 @@ impl SequenceAsset {
         &self.version
     }
 
+    /// Whether every segment is encrypted whole (TDD 0012), which is a property of the answer, so
+    /// the first clip speaks for all of them.
+    pub(crate) fn is_aes128(&self) -> bool {
+        self.clips.first().is_some_and(|clip| clip.is_aes128())
+    }
+
     pub(crate) fn hls_master(&self) -> Manifest {
         self.rendered.hls_master.clone()
     }
@@ -387,7 +395,15 @@ mod tests {
         files: &[ClipFile],
         clips: &[(usize, ClipWindow, Option<Arc<crate::cenc::Encryption>>)],
     ) -> Result<ServedAsset> {
-        build("test", files, clips, "v1", 1000, &LimitsConfig::default())
+        build(
+            "test",
+            files,
+            clips,
+            "v1",
+            None,
+            1000,
+            &LimitsConfig::default(),
+        )
     }
 
     fn sequence(asset: &ServedAsset) -> &SequenceAsset {

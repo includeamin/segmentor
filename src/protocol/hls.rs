@@ -205,6 +205,15 @@ pub(crate) fn media_playlist(presentation: Presentation<'_>, key: TrackKey) -> R
     // After the map, not before it: a key applies to the initialization sections that follow it
     // (RFC 8216, 4.3.2.4), and the init segment is sent clear. No `IV`: the default is each
     // segment's media sequence number, which is its position here, counting from 0.
+    write_aes128_key(&mut playlist, presentation);
+    write_segment_entries(&mut playlist, presentation, track, 0, version)?;
+    playlist.push_str("#EXT-X-ENDLIST\n");
+    Ok(playlist)
+}
+
+/// The whole-segment key line of an `AES-128` presentation (TDD 0012), which must come after the
+/// `EXT-X-MAP` it must not cover.
+fn write_aes128_key(playlist: &mut String, presentation: Presentation<'_>) {
     if let Some(aes128) = presentation.aes128() {
         writeln!(
             playlist,
@@ -213,9 +222,6 @@ pub(crate) fn media_playlist(presentation: Presentation<'_>, key: TrackKey) -> R
         )
         .expect("writing to a String cannot fail");
     }
-    write_segment_entries(&mut playlist, presentation, track, 0, version)?;
-    playlist.push_str("#EXT-X-ENDLIST\n");
-    Ok(playlist)
 }
 
 /// The `#EXT-X-KEY` lines for `track`, empty when the presentation is clear.
@@ -333,11 +339,19 @@ pub(crate) fn sequence_media_playlist(
             ));
             previous_encryption = encryption;
         }
+        // A key applies to every initialization section declared while it is in force (RFC 8216,
+        // 4.3.2.5), and an `AES-128` asset sends its init segments clear. After the first clip the
+        // key from the clip before is still in force, so it is switched off for the map and back
+        // on after it (TDD 0012).
+        if position > 0 && clip.presentation.aes128().is_some() {
+            playlist.push_str("#EXT-X-KEY:METHOD=NONE\n");
+        }
         writeln!(
             playlist,
             "#EXT-X-MAP:URI=\"clips/{position}/init.mp4?v={version}\""
         )
         .expect("writing to a String cannot fail");
+        write_aes128_key(&mut playlist, clip.presentation);
         write_segment_entries(
             &mut playlist,
             clip.presentation,
@@ -498,6 +512,10 @@ pub(crate) fn iframe_playlist(presentation: Presentation<'_>) -> Result<Option<S
     let Some(track) = presentation.video() else {
         return Ok(None);
     };
+    // The fragments of an I-frame playlist are not encrypted whole, so an `AES-128` asset has none.
+    if presentation.aes128().is_some() {
+        return Ok(None);
+    }
     let version = presentation.version();
     let frames = keyframes(track)?;
     let target_duration = frames

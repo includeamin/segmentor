@@ -300,6 +300,7 @@ fn moved_track(track: &Track, range: (usize, usize), origin: u64, base: u64) -> 
 /// changed (TDD 0009, "Different keys per clip").
 pub(crate) fn version_of<'a>(
     mapper_version: &str,
+    aes128: Option<&crate::cenc::Aes128>,
     clips: impl IntoIterator<
         Item = (
             &'a SourceIdentity,
@@ -317,6 +318,12 @@ pub(crate) fn version_of<'a>(
     hasher.update(crate::asset::FORMAT_REVISION.to_be_bytes());
     hasher.update((mapper_version.len() as u64).to_be_bytes());
     hasher.update(mapper_version.as_bytes());
+    // The whole-segment key covers every clip, so it is hashed once, and only when present: a
+    // sequence without it keeps the version it always had.
+    if let Some(aes128) = aes128 {
+        hasher.update(b"aes128");
+        hasher.update(aes128.fingerprint());
+    }
     for (source, window, encryption) in clips {
         hasher.update(
             source
@@ -729,38 +736,39 @@ mod tests {
         let index = parse("h264-aac.mp4");
         let other = parse("hevc-aac.mp4");
         let source = &index.source;
-        let base = version_of("v1", [(source, window(0, Some(2000)), None)]);
+        let base = version_of("v1", None, [(source, window(0, Some(2000)), None)]);
 
         assert_eq!(base.len(), 16);
         assert_eq!(
             base,
-            version_of("v1", [(source, window(0, Some(2000)), None)]),
+            version_of("v1", None, [(source, window(0, Some(2000)), None)]),
             "stable"
         );
         assert_ne!(
             base,
-            version_of("v1", [(source, window(0, Some(3000)), None)]),
+            version_of("v1", None, [(source, window(0, Some(3000)), None)]),
             "the window"
         );
         assert_ne!(
             base,
-            version_of("v1", [(source, window(0, None), None)]),
+            version_of("v1", None, [(source, window(0, None), None)]),
             "an open end"
         );
         assert_ne!(
             base,
-            version_of("v2", [(source, window(0, Some(2000)), None)]),
+            version_of("v2", None, [(source, window(0, Some(2000)), None)]),
             "the mapper version"
         );
         assert_ne!(
             base,
-            version_of("v1", [(&other.source, window(0, Some(2000)), None)]),
+            version_of("v1", None, [(&other.source, window(0, Some(2000)), None)]),
             "the content"
         );
         assert_ne!(
             base,
             version_of(
                 "v1",
+                None,
                 [
                     (source, window(0, Some(2000)), None),
                     (source, window(0, Some(2000)), None)
@@ -776,9 +784,9 @@ mod tests {
         let source = &index.source;
         let one = crate::cenc::tests_support::sample_encryption();
         let other = crate::cenc::tests_support::rekeyed_encryption();
-        let clear = version_of("v1", [(source, window(0, None), None)]);
-        let encrypted = version_of("v1", [(source, window(0, None), Some(&one))]);
-        let rekeyed = version_of("v1", [(source, window(0, None), Some(&other))]);
+        let clear = version_of("v1", None, [(source, window(0, None), None)]);
+        let encrypted = version_of("v1", None, [(source, window(0, None), Some(&one))]);
+        let rekeyed = version_of("v1", None, [(source, window(0, None), Some(&other))]);
 
         assert_ne!(
             clear, encrypted,
@@ -790,6 +798,7 @@ mod tests {
         // change the whole sequence's version, even though clip 0 and the window list match.
         let base = version_of(
             "v1",
+            None,
             [
                 (source, window(0, Some(1000)), None),
                 (source, window(1000, None), Some(&one)),
@@ -797,6 +806,7 @@ mod tests {
         );
         let rekeyed_second = version_of(
             "v1",
+            None,
             [
                 (source, window(0, Some(1000)), None),
                 (source, window(1000, None), Some(&other)),
