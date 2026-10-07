@@ -81,7 +81,7 @@ These change what segmentor is, so each starts with a new TDD.
 | Browser playback suite (hls.js, dash.js, Safari native) | To do | Start, seek, and play, across the codecs and DRM modes above |
 | Benchmarks on the reference host | To do | Budgets are met on a laptop ([benchmarks](benchmarks.md)); record them on the documented four-core host |
 | Load test against a production-like catalog | To do | Cold storage, many assets, remote origins, and CDN miss traffic, not one warm file |
-| Mapper bearer-token rotation without restart | To do | Re-read the token file periodically |
+| Mapper bearer-token rotation without restart | Done | `bearer_token_file`, re-read every `bearer_token_reload_ms`; the last good token is kept if a re-read fails |
 | Tests against a real HTTPS mapper and origin | To do | Today only in-process mocks |
 
 ## Performance: faster than nginx-vod-module everywhere

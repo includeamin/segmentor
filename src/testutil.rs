@@ -533,3 +533,26 @@ pub(crate) fn tfdt(fragment: &[u8]) -> u64 {
         .expect("a fragment has a tfdt box");
     u64::from_be_bytes(fragment[at + 8..at + 16].try_into().unwrap())
 }
+
+/// A fresh, empty directory for one test, removed when the guard drops.
+pub(crate) struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    pub(crate) fn new(name: &str) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("segmentor-test-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("a scratch directory can be created");
+        Self(path)
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}

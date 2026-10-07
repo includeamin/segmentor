@@ -457,6 +457,6 @@ Recorded from review of the first draft.
 
 ## Open questions
 
-- **Token rotation.** A single static bearer token is read from the environment at startup. Rotation without a restart (re-reading a file) is not implemented.
+- ~~Token rotation~~ is handled: `bearer_token_file` is re-read every `bearer_token_reload_ms` (5 s by default), and a failed re-read keeps the previous token. A token from `bearer_token_env` is still fixed for the life of the process.
 - **Batch resolve.** The obvious first extension if per-request latency on cold assets matters; it would be a new `/v1` path.
 - ~~Signed-URL lifetime for in-flight streams~~ is handled: URLs are refreshed ahead of expiry, rotated in place, and re-fetched once if the origin rejects a read.
