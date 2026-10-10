@@ -354,6 +354,21 @@ In a [clips](#clips) answer, each clip may carry its own `encryption` object. A 
 - **Limitation.** A clip cannot opt out of the answer's own `encryption`: absent and `null` both mean "use the answer's". To mix clear and encrypted clips, leave the answer's `encryption` out and set it on the encrypted clips.
 - `/admin/status` lists the key IDs of every clip.
 
+## Encrypted source files
+
+A source file that is already CENC-encrypted (`encv` and `enca` sample entries) is refused unless the answer says how to read it. Give `source_encryption` with the keys to decrypt it:
+
+```json
+"source_encryption": { "keys": [ { "tracks": "all", "key_id": "…", "key": "…" } ] }
+```
+
+- `key_id` and `key` are 32 hex digits. A track is decrypted with the entry whose `key_id` equals the key ID in its `tenc`; if none does, the asset fails to load, naming the key ID. `tracks` is optional (`all`, `video`, or `audio`) and restricts an entry to that kind of track; an entry for the kind of track wins over one for `all`.
+- The sources read are progressive MP4 files protected with `cenc`, `cens`, `cbc1`, or `cbcs`, whose IVs and subsample maps are in a `senc` box. Fragmented encrypted files, and files that locate their IVs only with `saiz` and `saio`, fail at load.
+- The asset is then an ordinary one: served clear, or encrypted again under `encryption` (a new key) or `hls_aes128`. The URL version covers the keys, so a changed key gives new URLs.
+- **A wrong key is not always noticed.** Decrypting with a wrong key gives garbage without any error. Segmentor can tell only when the file encrypts its NAL unit lengths, which real encoders do not; otherwise it trusts the key that goes with the key ID, and a CDN would keep what a wrong key produced. Give the right key, and change `version` when you correct one.
+- **Limits.** One file only: `source_encryption` on `renditions` or `clips` is rejected, as is `{"passthrough": true}` (not built yet). A decrypted asset has no I-frame playlists and no muxed HLS audio. Keys are secrets like the others in an answer: use `https` and a bearer token, and no message or log line contains them.
+- `/admin/status` lists `source_key_ids` for such an asset. Design: [TDD 0014](technical-design/0014-encrypted-source-files.md).
+
 ## HLS AES-128
 
 For protection without a DRM vendor, an answer may carry `hls_aes128` instead of `encryption`. segmentor then encrypts every HLS media segment whole with AES-128-CBC (RFC 8216, `METHOD=AES-128`), and the media playlists name the key. Design: [TDD 0012](technical-design/0012-hls-aes-128.md).
