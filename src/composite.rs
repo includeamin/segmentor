@@ -633,6 +633,7 @@ pub(crate) fn assemble(
 ) -> Result<CompositeAsset> {
     let (video, audio_only) = classify_renditions(renditions)?;
     check_alignment(&video)?;
+    check_key_periods(&video)?;
     let audio = build_audio_group(&video, &audio_only);
     let version = version_of(&video, &audio_only, &subtitles, mapper_version);
     let iframe_source = pick_iframe_source(&video, &version);
@@ -701,6 +702,43 @@ fn check_alignment(video: &[VideoEntry]) -> Result<()> {
                     first.id, entry.id
                 )));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Every video rendition must begin each key period at the same segment (TDD 0013, stage 2), so a
+/// player switching renditions never finds the same segment under two keys. Renditions agree on
+/// boundaries only within a sample (see [`check_alignment`]), so a period asked for between two
+/// renditions' boundaries would begin a segment apart.
+fn check_key_periods(video: &[VideoEntry]) -> Result<()> {
+    let starts = video
+        .iter()
+        .map(|entry| {
+            let starts = entry
+                .asset
+                .presentation()
+                .key_schedule()
+                .iter()
+                .map(|period| period.first_segment)
+                .collect::<Vec<_>>();
+            (entry.id.as_str(), starts)
+        })
+        .collect::<Vec<_>>();
+    periods_agree(&starts)
+}
+
+/// The first segment of every key period, per rendition, must be the same list for all of them.
+fn periods_agree(starts: &[(&str, Vec<u32>)]) -> Result<()> {
+    let Some(((first_id, first), rest)) = starts.split_first() else {
+        return Ok(());
+    };
+    for (id, other) in rest {
+        if other != first {
+            return Err(Error::InvalidMedia(format!(
+                "renditions `{first_id}` and `{id}` begin their key periods at different \
+                 segments ({first:?} vs {other:?})"
+            )));
         }
     }
     Ok(())
@@ -949,4 +987,35 @@ fn render(
         hls_subtitle,
         dash,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renditions_that_start_every_period_together_agree() {
+        periods_agree(&[("a", vec![0, 1, 2]), ("b", vec![0, 1, 2])]).unwrap();
+        periods_agree(&[("a", Vec::new()), ("b", Vec::new())]).unwrap();
+        periods_agree(&[("only", vec![0, 3])]).unwrap();
+        periods_agree(&[]).unwrap();
+    }
+
+    #[test]
+    fn a_period_that_starts_a_segment_apart_is_refused_by_name() {
+        let error = periods_agree(&[("a", vec![0, 1, 2]), ("b", vec![0, 2, 3])])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`a`") && error.contains("`b`"), "{error}");
+        assert!(
+            error.contains("[0, 1, 2]") && error.contains("[0, 2, 3]"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_period_one_rendition_drops_is_refused() {
+        // One rendition's last segment starts before the final period; the other's does not.
+        assert!(periods_agree(&[("a", vec![0, 1]), ("b", vec![0, 1, 2])]).is_err());
+    }
 }
