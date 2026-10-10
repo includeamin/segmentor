@@ -523,7 +523,7 @@ impl HttpResolver {
     ) -> Result<Option<Arc<crate::cenc::Encryption>>, String> {
         let encryption = Self::interpret_encryption(wire)?;
         if encryption.as_ref().is_some_and(|e| e.is_rotating()) {
-            return Err("encryption periods are supported for a single file only".to_owned());
+            return Err("a clip's encryption cannot have periods".to_owned());
         }
         Ok(encryption)
     }
@@ -587,9 +587,10 @@ impl HttpResolver {
         }
         let encryption =
             Self::interpret_encryption(wire.encryption.as_ref()).map_err(ResolveError::Rejected)?;
-        if encryption.as_ref().is_some_and(|e| e.is_rotating()) && location.is_none() {
+        // Stage 2 of TDD 0013: a single file or every rendition of one; not yet clips.
+        if encryption.as_ref().is_some_and(|e| e.is_rotating()) && !clips.is_empty() {
             return Err(ResolveError::Rejected(
-                "encryption periods are supported for a single file only".to_owned(),
+                "encryption periods cannot be combined with clips".to_owned(),
             ));
         }
         let hls_aes128 = wire

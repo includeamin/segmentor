@@ -3998,14 +3998,6 @@ async fn clear_lead_is_the_same_asset_as_the_explicit_period_list() {
 async fn periods_are_refused_where_they_are_not_supported() {
     let h = harness().await;
     h.mapper.state.set(
-        "adaptive",
-        Answer::renditions(
-            "v1",
-            &[("720p", "rendition-720p.mp4"), ("360p", "h264-aac.mp4")],
-        )
-        .with_encryption(rotating_encryption()),
-    );
-    h.mapper.state.set(
         "seq",
         Answer::clips(
             "v1",
@@ -4016,11 +4008,257 @@ async fn periods_are_refused_where_they_are_not_supported() {
         )
         .with_encryption(rotating_encryption()),
     );
-    for id in ["adaptive", "seq"] {
+    h.mapper.state.set(
+        "clip-own",
+        Answer::clips_with_encryption(
+            "v1",
+            &[
+                clip_encrypted("h264-aac.mp4", None, None, Some(rotating_encryption())),
+                clip_encrypted("h264-aac.mp4", None, None, None),
+            ],
+        ),
+    );
+    for id in ["seq", "clip-own"] {
         assert_eq!(
             status(&h.app, &format!("/hls/{id}/master.m3u8")).await,
             StatusCode::BAD_GATEWAY,
             "{id}"
+        );
+    }
+}
+
+/// The URIs of every media playlist a master names: video variants and `EXT-X-MEDIA` renditions.
+fn media_playlists_of(master: &str) -> Vec<String> {
+    master
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("#EXT-X-MEDIA:")
+                .and_then(|rest| rest.split("URI=\"").nth(1))
+                .and_then(|rest| rest.split('"').next())
+                .or_else(|| (!line.starts_with('#') && !line.is_empty()).then_some(line))
+        })
+        .map(|uri| uri.split('?').next().unwrap().to_owned())
+        .collect()
+}
+
+/// Stage 2 of TDD 0013: one period list, applied to every rendition, each with one init segment.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one asset, every playlist and fragment checked in turn"
+)]
+async fn an_adaptive_asset_rotates_keys_in_every_rendition() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "abr",
+        Answer::renditions(
+            "v1",
+            &[
+                ("a", "rendition-480p.mp4"),
+                ("b", "rendition-720p.mp4"),
+                ("audio-en", "rendition-audio-en.m4a"),
+            ],
+        )
+        .with_encryption(rotating_encryption()),
+    );
+    h.mapper.state.set(
+        "single",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(rotating_encryption()),
+    );
+
+    let (code, _, body) = fetch(&h.app, "/hls/abr/master.m3u8").await;
+    assert_eq!(code, StatusCode::OK);
+    let master = text(&body);
+    let version = version_in(&body);
+    assert!(!master.contains("I-FRAME"), "{master}");
+    // The session keys are the same union a single file with this period list gets.
+    let session_keys = |m: &str| {
+        m.lines()
+            .filter(|l| l.starts_with("#EXT-X-SESSION-KEY"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let single_master = text(&fetch(&h.app, "/hls/single/master.m3u8").await.2);
+    assert!(!session_keys(&master).is_empty(), "{master}");
+    assert_eq!(session_keys(&master), session_keys(&single_master));
+
+    let playlists = media_playlists_of(&master);
+    assert_eq!(
+        playlists.len(),
+        3,
+        "two video variants and one audio\n{master}"
+    );
+    for playlist in &playlists {
+        let body = text(&fetch(&h.app, &format!("/hls/abr/{playlist}")).await.2);
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(
+            lines.iter().filter(|l| l.starts_with("#EXT-X-MAP")).count(),
+            1,
+            "{playlist}\n{body}"
+        );
+        assert!(!body.contains("DISCONTINUITY"), "{playlist}\n{body}");
+        let keys: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.starts_with("#EXT-X-KEY"))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(keys.len(), 2, "{playlist}\n{body}");
+        assert!(
+            lines[keys[0]].contains(&format!("KEYID=0x{KEY_ID}")),
+            "{playlist}: first key\n{body}"
+        );
+        assert!(
+            lines[keys[1]].contains(&format!("KEYID=0x{KEY_ID_B}")),
+            "{playlist}: second key\n{body}"
+        );
+        // A clear lead: no key before the first segment.
+        let first_segment = lines
+            .iter()
+            .position(|l| !l.starts_with('#') && !l.is_empty())
+            .unwrap();
+        assert!(keys[0] > first_segment, "{playlist}\n{body}");
+        if playlist.starts_with("video-") {
+            // Video renditions share boundaries: 1000 ms is segment 1, 2000 ms segment 2.
+            let at = |n: u32| {
+                lines
+                    .iter()
+                    .position(|l| l.contains(&format!("segments/{n}/")))
+                    .unwrap()
+            };
+            assert_eq!(keys[0] + 2, at(1), "{playlist}\n{body}");
+            assert_eq!(keys[1] + 2, at(2), "{playlist}\n{body}");
+        }
+    }
+
+    // Each video rendition: segment 0 is declared clear, segment 2 names KEY_ID_B in `seig` and
+    // carries period two's `pssh`.
+    for rendition in ["video-a", "video-b"] {
+        let segment = |n: u32| {
+            let h = &h;
+            let version = version.clone();
+            async move {
+                let (code, _, bytes) = fetch(
+                    &h.app,
+                    &format!("/hls/abr/{rendition}/segments/{n}/media.m4s?v={version}"),
+                )
+                .await;
+                assert_eq!(code, StatusCode::OK, "{rendition} {n}");
+                bytes
+            }
+        };
+        let clear = segment(0).await;
+        let second = segment(2).await;
+        assert_eq!(
+            box_names(&child_boxes(&clear, &[b"moof", b"traf"])),
+            ["tfhd", "tfdt", "trun", "sgpd", "sbgp"],
+            "{rendition}"
+        );
+        let traf = child_boxes(&second, &[b"moof", b"traf"]);
+        assert_eq!(
+            box_names(&traf),
+            [
+                "tfhd", "tfdt", "trun", "senc", "saiz", "saio", "sgpd", "sbgp"
+            ],
+            "{rendition}"
+        );
+        let sgpd = traf.iter().find(|(k, _)| *k == b"sgpd").unwrap().1;
+        assert_eq!(
+            &sgpd[16 + 4..16 + 20],
+            hex_bytes(KEY_ID_B).as_slice(),
+            "{rendition}"
+        );
+        let moof = child_boxes(&second, &[b"moof"]);
+        let pssh = moof.iter().find(|(k, _)| *k == b"pssh").unwrap().1;
+        assert_eq!(&pssh[4 + 16 + 4..], b"period-two", "{rendition}");
+    }
+
+    // No I-frame playlist; DASH has one Period declaring the first encrypted period.
+    assert_eq!(
+        status(&h.app, "/hls/abr/video/iframes.m3u8").await,
+        StatusCode::NOT_FOUND
+    );
+    let manifest = text(&fetch(&h.app, "/dash/abr/manifest.mpd").await.2);
+    assert_eq!(manifest.matches("<Period").count(), 1, "{manifest}");
+    assert!(
+        manifest.contains("cenc:default_KID=\"01234567-89ab-cdef-0123-456789abcdef\""),
+        "{manifest}"
+    );
+    assert!(!manifest.contains("fedcba98-7654"), "{manifest}");
+}
+
+#[tokio::test]
+async fn re_keying_a_period_of_an_adaptive_asset_gives_new_urls() {
+    let h = harness().await;
+    let renditions = [("a", "rendition-480p.mp4"), ("b", "rendition-720p.mp4")];
+    let mut rekeyed = rotating_encryption();
+    rekeyed["periods"][2] = period(2000, KEY_ID_B, KEY, "period-two");
+    h.mapper.state.set(
+        "base",
+        Answer::renditions("v1", &renditions).with_encryption(rotating_encryption()),
+    );
+    h.mapper.state.set(
+        "rekeyed",
+        Answer::renditions("v1", &renditions).with_encryption(rekeyed),
+    );
+    let base = version_in(&fetch(&h.app, "/hls/base/master.m3u8").await.2);
+    let other = version_in(&fetch(&h.app, "/hls/rekeyed/master.m3u8").await.2);
+    assert_ne!(base, other);
+}
+
+/// `FFmpeg` decodes a rendition's period-one segment with that period's key and not with period
+/// two's, so the rendition is encrypted under the schedule, not only signalled.
+#[tokio::test]
+async fn ffmpeg_decrypts_a_renditions_period_under_its_own_key() {
+    if std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: ffmpeg is not installed");
+        return;
+    }
+    let h = harness().await;
+    h.mapper.state.set(
+        "abr",
+        Answer::renditions(
+            "v1",
+            &[("a", "rendition-480p.mp4"), ("b", "rendition-720p.mp4")],
+        )
+        .with_encryption(rotating_encryption()),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/abr/master.m3u8").await.2);
+    let directory =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/key-rotation-abr");
+    std::fs::create_dir_all(&directory).unwrap();
+    for rendition in ["video-a", "video-b"] {
+        // The init segment's `tenc` names period one, so period one's segment is judged against it.
+        let mut bytes = fetch(
+            &h.app,
+            &format!("/hls/abr/{rendition}/init.mp4?v={version}"),
+        )
+        .await
+        .2
+        .to_vec();
+        bytes.extend_from_slice(
+            &fetch(
+                &h.app,
+                &format!("/hls/abr/{rendition}/segments/1/media.m4s?v={version}"),
+            )
+            .await
+            .2,
+        );
+        let path = directory.join(format!("{rendition}-segment-1.mp4"));
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            decode_errors(&path, Some(KEY)),
+            "",
+            "{rendition} under its own key"
+        );
+        assert_ne!(
+            decode_errors(&path, Some(KEY_B)),
+            "",
+            "{rendition} under period two's key"
         );
     }
 }

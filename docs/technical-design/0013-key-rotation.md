@@ -1,8 +1,8 @@
 # TDD 0013: Key rotation within an asset
 
-- Status: Accepted; implemented for single-file assets
+- Status: Accepted; implemented for single-file and adaptive assets
 - Created: 2026-10-07
-- Updated: 2026-10-07
+- Updated: 2026-10-10
 - Related ADRs: [ADR 0001](../adr/0001-use-fragmented-mp4-for-media-segments.md)
 - Related designs: [TDD 0009](0009-common-encryption-and-drm.md) (the `cbcs` encryption this extends), [TDD 0012](0012-hls-aes-128.md) (rotation there is a separate, later step)
 
@@ -117,13 +117,14 @@ Additive. An answer with `keys` and no `periods` is unchanged. Staged:
 
 ## Implementation status
 
-Stage 1 (single-file assets, HLS and DASH) is implemented. What differs from, or settles, the design above:
+Stages 1 and 2 (single-file and adaptive assets, HLS and DASH) are implemented. What differs from, or settles, the design above:
 
 - **`clear_lead_ms`** exists, as sugar for a clear first period. It was an open question and the answer was yes.
 - **Boundaries** are segment-aligned, rounded up. Two periods that land on one segment make the asset fail to load (`500`, like any load failure), and a period past the last segment is dropped.
 - **Every encrypted fragment** of a rotating asset carries its period's `pssh` boxes, including the first period's, not only later ones. A `seig` group appears only where the key differs from `tenc`.
 - **Clear periods** go through the encrypted-segment path (read into memory, header rebuilt), because their fragments must say they are clear. They are not zero-copy.
-- **Not offered:** I-frame playlists for assets with periods; periods on adaptive assets and sequences (the answer is rejected). Both remain Stage 2 and 3.
+- **Not offered:** I-frame playlists for assets with periods; periods on sequences or on a clip's own `encryption` (the answer is rejected). Sequences remain Stage 3.
+- **Adaptive assets** apply the one period list to every rendition. Video renditions must begin every period at the same segment, or the asset fails to load (`500`) naming the two renditions. Dedicated audio-only renditions are cut on the audio clock, so each places the periods on its own segments.
 - **`/admin/status`** reports every period's key IDs, not their segment boundaries.
 - **Checked with FFmpeg.** FFmpeg takes a fragment's key and IV from `tenc` and ignores a `seig` group's IV, so the test judges each later period against an init segment whose `tenc` names that period's key and IV, and checks the `seig` entry byte for byte separately. FFmpeg decodes a clear fragment without a key. Real-device playback of `seig`-signalled rotation is not verified here.
 
