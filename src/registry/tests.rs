@@ -4715,3 +4715,42 @@ async fn ffmpeg_plays_an_adaptive_aes128_asset() {
     assert_ne!(garbage, expected, "a wrong key does not decrypt");
     server.abort();
 }
+
+// ---- Encrypted source files (TDD 0014) ----
+
+/// The key all the protected fixtures are encrypted under.
+fn source_keys() -> serde_json::Value {
+    serde_json::json!({ "keys": [{ "key_id": KEY_ID, "key": KEY }] })
+}
+
+#[tokio::test]
+async fn source_encryption_is_refused_where_it_is_not_supported_yet() {
+    let h = harness().await;
+    let renditions = Answer::renditions(
+        "v1",
+        &[("a", "h264-aac-cenc.mp4"), ("b", "h264-aac-cenc.mp4")],
+    )
+    .with_source_encryption(source_keys());
+    h.mapper.state.set("renditions", renditions);
+    h.mapper.state.set(
+        "clips",
+        Answer::clips("v1", &[clip("h264-aac-cenc.mp4", None, None)])
+            .with_source_encryption(source_keys()),
+    );
+    h.mapper.state.set(
+        "passthrough",
+        Answer::file("v1", "h264-aac-cenc.mp4")
+            .with_source_encryption(serde_json::json!({ "passthrough": true })),
+    );
+    h.mapper.state.set(
+        "empty",
+        Answer::file("v1", "h264-aac.mp4").with_source_encryption(serde_json::json!({})),
+    );
+    for id in ["renditions", "clips", "passthrough", "empty"] {
+        assert_eq!(
+            status(&h.app, &format!("/hls/{id}/master.m3u8")).await,
+            StatusCode::BAD_GATEWAY,
+            "{id}"
+        );
+    }
+}

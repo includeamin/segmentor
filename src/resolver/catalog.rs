@@ -37,6 +37,7 @@ impl StaticResolver {
             hard_expiry: None,
             encryption: None,
             hls_aes128: None,
+            source_encryption: None,
         }))
     }
 }

@@ -66,12 +66,20 @@ pub(crate) struct Answer {
     pub(crate) encryption: Option<Value>,
     /// Whole-segment HLS `AES-128` (TDD 0012).
     pub(crate) hls_aes128: Option<Value>,
+    /// Keys for an encrypted source file (TDD 0014).
+    pub(crate) source_encryption: Option<Value>,
 }
 
 impl Answer {
     /// Adds an `encryption` object to the answer.
     pub(crate) fn with_encryption(mut self, encryption: Value) -> Self {
         self.encryption = Some(encryption);
+        self
+    }
+
+    /// Adds a `source_encryption` object to the answer.
+    pub(crate) fn with_source_encryption(mut self, source_encryption: Value) -> Self {
+        self.source_encryption = Some(source_encryption);
         self
     }
 
@@ -102,6 +110,7 @@ impl Answer {
             subtitles: Vec::new(),
             encryption: None,
             hls_aes128: None,
+            source_encryption: None,
         }
     }
 
@@ -116,6 +125,7 @@ impl Answer {
             subtitles: Vec::new(),
             encryption: None,
             hls_aes128: None,
+            source_encryption: None,
         }
     }
 
@@ -134,6 +144,7 @@ impl Answer {
             subtitles: Vec::new(),
             encryption: None,
             hls_aes128: None,
+            source_encryption: None,
         }
     }
 
@@ -177,6 +188,7 @@ impl Answer {
             subtitles: Vec::new(),
             encryption: None,
             hls_aes128: None,
+            source_encryption: None,
         }
     }
 }
@@ -329,6 +341,9 @@ async fn mapper_asset(
     }
     if let Some(encryption) = answer.encryption {
         body["encryption"] = encryption;
+    }
+    if let Some(source_encryption) = answer.source_encryption {
+        body["source_encryption"] = source_encryption;
     }
     if let Some(ttl) = answer.ttl_seconds {
         body["ttl_seconds"] = json!(ttl);
