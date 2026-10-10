@@ -1,6 +1,6 @@
 # TDD 0014: Encrypted source files
 
-- Status: Draft
+- Status: Accepted; stage 1 implemented (decrypt, one progressive file)
 - Created: 2026-10-11
 - Updated: 2026-10-11
 - Related ADRs: [ADR 0001](../adr/0001-use-fragmented-mp4-for-media-segments.md)
@@ -29,7 +29,7 @@ Two facts about the code shape the design:
 - Decrypt `cenc`, `cens`, `cbc1` and `cbcs` sources, progressive and fragmented, on single files, adaptive assets and sequences.
 - Pass an encrypted source through on single files and adaptive assets, keeping its protection exactly.
 - The mapper chooses per asset. An encrypted source with no instruction keeps failing, as today.
-- A wrong key fails the asset at load instead of serving garbage that a CDN would cache.
+- A wrong key is noticed at load wherever it can be (see [Decrypting](#decrypting)), instead of serving garbage that a CDN would cache.
 - Output stays a pure function of the source bytes and the answer.
 
 ## Non-goals
@@ -95,7 +95,7 @@ The four schemes follow ISO/IEC 23001-7:
 
 The exact chain and reset rule of each scheme is fixed by a published test vector in the implementation, and recorded under Implementation status.
 
-**A wrong key must not become silent garbage.** CTR and CBC turn any key into random bytes without complaint. At load, the first sample of every video track is decrypted and its NAL unit length prefixes must tile the sample exactly; if they do not, the asset fails naming the track, not the key. Audio has no equally cheap check, so audio relies on the key ID matching `tenc`.
+**A wrong key is noticed only where it can be.** CTR and CBC turn any key into random bytes without complaint, and a CDN would keep them. The first sample of every video track is decrypted at load, and if its NAL unit length prefixes do not tile the sample exactly the asset fails, naming the track and never the key. That works only when the length prefixes are themselves encrypted, which is rare: real encoders leave each NAL unit's length and header clear and protect the rest, and decrypted slice data looks like random bytes whether or not the key was right. So for those files, and for audio and codecs without NAL units, the only check is that the key ID matches `tenc`, and a wrong key that carries the right key ID decrypts to garbage that segmentor cannot tell from video. The mapper is trusted to give the key that belongs to the key ID; changing a key gives new URLs, so a corrected key replaces cached output.
 
 The URL version hashes a fingerprint of the source keys (SHA-256, as `encryption` does). Changing a source key gives new URLs, so a CDN never mixes output decrypted under two keys.
 
@@ -119,7 +119,7 @@ The version covers the mode, each track's scheme and key ID, and for decrypt the
 
 - Source keys are held in the redacting key type, in memory only. They are not logged, not in `/admin/status` and not in any error body.
 - A new limit, `limits.max_source_aux_bytes` (default 64 MiB), caps the memory of a per-sample table, so a hostile file cannot make it large. Counts in `senc`, `saiz` and `saio` are checked against the sample count before anything is allocated.
-- The wrong-key check bounds how long an asset serves garbage to zero: a video asset with a wrong key never loads.
+- A wrong key is caught only for the rare file whose NAL unit lengths are encrypted. For any other file the mapper's key is trusted, and the test suite pins that limit so it is not mistaken for a guarantee.
 - Decryption is bounded work per segment, in proportion to the segment's bytes, on the blocking pool like other segment preparation.
 - A decrypted asset is as sensitive as its clear twin. Operators who decrypt should keep it behind the same authorization (TDD 0007) as any other protected title.
 
@@ -131,7 +131,7 @@ The version covers the mode, each track's scheme and key ID, and for decrypt the
 
 - **Decrypt, with a clear twin as the oracle.** Fixtures are encrypted by an independent test encryptor built on OpenSSL, never by the code under test, for all four schemes, progressive and fragmented, with and without subsamples and with per-sample and constant IVs. The decrypted segment must equal the clear file's segment byte for byte, and FFmpeg must decode every frame of it.
 - **Decrypt then encrypt.** Decrypting a `cenc` source and serving it under `cbcs` plays back in FFmpeg with the new key; the same under whole-segment `AES-128`.
-- **Wrong keys.** A wrong key on a video track, a missing key ID and a key for another track each fail the asset with the right message, and no message contains a key.
+- **Wrong keys.** A missing key ID and a key for another track each fail the asset with the right message, and a wrong key fails a file whose NAL unit lengths are encrypted. No message contains a key. For a file that leaves the lengths clear, a test pins that a wrong key loads, as the limit above says.
 - **Passthrough.** FFmpeg decrypts the served segments with the source key and decodes every frame; the served `senc` entries equal the source's for the same samples; segments cut differently from the source still decrypt; the DASH-only rule holds for `cenc`, `cens` and `cbc1`; `cbcs` is served over HLS only when a system can name a key.
 - **Parsers.** `sinf`, `tenc`, `senc`, `saiz` and `saio` get unit tests with malformed and truncated boxes, and a fuzz target in `fuzz/`.
 - **Mutations.** A skipped subsample, a crypt/skip pattern off by one, an IV off by one, `cens` treated as `cenc` and a wrong constant IV must each be caught.
@@ -150,8 +150,22 @@ Additive: an answer without `source_encryption` behaves as today. Built in four 
 
 Rollback is removing `source_encryption` from the answers.
 
+## Implementation status
+
+Stage 1 is implemented: decrypt, on a single progressive file, for all four schemes. What differs from the design above, or settles it:
+
+- **Aux data** is read from `senc` under `stbl` only. A file that locates its IVs with `saiz` and `saio` and has no `senc` fails with a message naming sample auxiliary information, as does a `seig` sample group. Reading outside `moov` (and the `limits.max_source_aux_bytes` limit that goes with it) arrives with the first stage that needs it: `moov` is already bounded by `limits.max_metadata_bytes`.
+- **Mapper answer.** `source_encryption` takes `keys` for a single file. `passthrough`, renditions and clips are refused with a `502`, and a key entry may name `tracks` (`all`, `video`, `audio`) to restrict it to that kind of track. Fragmented encrypted sources fail at load, naming the track.
+- **Not offered for a decrypted source:** I-frame playlists and fragments, and muxed HLS audio (`packaging.hls_mux_audio` is ignored for it). Both come back when a stage needs them.
+- **The wrong-key check** is the best-effort one described under [Decrypting](#decrypting).
+- **`/admin/status`** lists `source_key_ids` for a decrypted asset; the mode and the scheme are not reported yet, since decrypt is the only mode.
+- **Checked against independent decoders.** FFmpeg decrypts the `cenc`, `cbc1` and `cbcs` fixtures to frames bit-identical to the clear file's, and decrypts its own `cenc` output, which the tests then compare with the clear twin. `cens` has no second opinion (see Open questions).
+- **Decrypt then encrypt** gives, byte for byte, the output of encrypting the clear file under the new key, and so does decrypt then whole-segment `AES-128`.
+- **Metrics.** Decrypting a segment is counted with the encrypted segments, since it takes the same route.
+
 ## Open questions
 
-- **Wrong-key check for audio.** Is the key-ID match enough, or should audio get a codec-specific plausibility check (for example, an AAC frame header)? It stays out of the first stage unless a real case needs it.
+- **Telling a wrong key from a right one.** No structural check works for the usual layout. Is trusting the mapper enough, or should the mapper be able to give something to check against (for example, a hash of the first decrypted sample, or the PlayReady key checksum when the file carries a PlayReady header)?
+- **The trailing partial block of a `cens` range.** Segmentor leaves it clear, as the pattern schemes do for `cbcs` (checked against FFmpeg for `cbcs`) and as Shaka Packager's pattern encryptor does. No independent decoder reads `cens` (FFmpeg does not apply its pattern), so this rests on the reference encryptor and on that reading of ISO/IEC 23001-7; confirm it against a real `cens` file before relying on it.
 - **Zero-copy passthrough.** Worth building once the in-memory version has numbers?
 - **A key ID shared by audio and video.** Some files protect both tracks under one key ID. A key entry with `tracks: all` covers both; confirm that is how the target catalogs' files and mappers describe them.

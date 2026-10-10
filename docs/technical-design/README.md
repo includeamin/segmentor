@@ -19,7 +19,7 @@ Technical design documents explain a proposed subsystem before or during impleme
 | [0011](0011-muxed-hls-audio.md) | Muxed audio and video for HLS | Accepted; implemented for clear single-file assets |
 | [0012](0012-hls-aes-128.md) | Whole-segment HLS AES-128 | Accepted; implemented for single-file, adaptive, and sequence assets |
 | [0013](0013-key-rotation.md) | Key rotation within an asset | Accepted; implemented for single-file and adaptive assets |
-| [0014](0014-encrypted-source-files.md) | Encrypted source files | Draft |
+| [0014](0014-encrypted-source-files.md) | Encrypted source files | Accepted; stage 1 implemented (decrypt, one progressive file) |
 
 ## Workflow
 
