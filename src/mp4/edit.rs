@@ -478,6 +478,7 @@ mod tests {
                 object_type: 2,
             },
             samples: samples.into(),
+            source_protection: None,
         }
     }
 

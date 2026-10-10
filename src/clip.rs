@@ -289,6 +289,7 @@ fn moved_track(track: &Track, range: (usize, usize), origin: u64, base: u64) -> 
         duration,
         codec: track.codec.clone(),
         samples,
+        source_protection: track.source_protection.clone(),
     })
 }
 

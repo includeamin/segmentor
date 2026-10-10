@@ -26,6 +26,20 @@ pub(crate) fn visual_entry(entry: &[u8]) -> Result<(u16, u16, &[u8])> {
     Ok((width, height, reader.rest()))
 }
 
+/// The child boxes of a protected sample entry (`encv` is a visual entry, `enca` an audio one),
+/// where `sinf` is found.
+pub(crate) fn protected_entry_children(
+    name: [u8; 4],
+    entry: &[u8],
+    track_id: u32,
+) -> Result<&[u8]> {
+    if name == *b"encv" {
+        Ok(visual_entry(entry)?.2)
+    } else {
+        Ok(audio_entry(entry, track_id)?.children)
+    }
+}
+
 /// Reads an `avc1` sample entry payload.
 pub(crate) fn parse_avc(entry: &[u8]) -> Result<CodecConfig> {
     let (width, height, children) = visual_entry(entry)?;

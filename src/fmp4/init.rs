@@ -7,7 +7,7 @@
 
 use crate::error::{Error, Result};
 use crate::mp4::boxes::{RawBox, Reader, box_payload, child_boxes, required_child};
-use crate::mp4::codec::iso_audio_entry;
+use crate::mp4::codec::{iso_audio_entry, protected_entry_children};
 use crate::source::Metadata;
 
 /// Major brand `iso6` (fragmented MP4 with default-base-is-moof), with `iso6` and `mp41`
@@ -214,6 +214,10 @@ fn sample_description(
     track_id: u32,
     protection: Option<&InitProtection<'_>>,
 ) -> Result<Vec<u8>> {
+    // A source protected under `sinf` is announced as the codec it was, whether or not it is
+    // protected again below (TDD 0014).
+    let unprotected = unprotected_description(description, track_id)?;
+    let description = unprotected.as_deref().unwrap_or(description);
     let mut reader = Reader::new(description);
     reader.full_box()?;
     reader.skip(4)?;
@@ -231,6 +235,40 @@ fn sample_description(
     let mut rewritten = description[..8].to_vec();
     write_box(&mut rewritten, *b"mp4a", &iso)?;
     protect(rewritten, protection)
+}
+
+/// The `stsd` payload of a source whose entry is `encv` or `enca`, rewritten as the entry it was
+/// before protection: its `frma` type, and every child box but `sinf`. `None` for any other entry.
+fn unprotected_description(description: &[u8], track_id: u32) -> Result<Option<Vec<u8>>> {
+    let mut reader = Reader::new(description);
+    reader.full_box()?;
+    reader.skip(4)?;
+    let entry = child_boxes(reader.rest())?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::InvalidMedia("stsd entry is missing".to_owned()))?;
+    if entry.name != *b"encv" && entry.name != *b"enca" {
+        return Ok(None);
+    }
+    let children = protected_entry_children(entry.name, entry.payload, track_id)?;
+    let sinf = required_child(children, *b"sinf")?;
+    let original: [u8; 4] = required_child(sinf.payload, *b"frma")?
+        .payload
+        .get(..4)
+        .ok_or_else(|| Error::InvalidMedia("frma is truncated".to_owned()))?
+        .try_into()
+        .expect("four bytes");
+    // The fixed fields before the children are kept as they are.
+    let mut payload = entry.payload[..entry.payload.len() - children.len()].to_vec();
+    for child in child_boxes(children)? {
+        if child.name != *b"sinf" {
+            write_box(&mut payload, child.name, child.payload)?;
+        }
+    }
+    // The version, flags, and entry count of the source's `stsd`, then the rewritten entry.
+    let mut rewritten = description[..8].to_vec();
+    write_box(&mut rewritten, original, &payload)?;
+    Ok(Some(rewritten))
 }
 
 fn protect(description: Vec<u8>, protection: Option<&InitProtection<'_>>) -> Result<Vec<u8>> {
@@ -543,6 +581,65 @@ mod tests {
             audio_entry(&init[FTYP.len() + 8..], 0),
             audio_entry(source_moov, 1)
         );
+    }
+
+    /// The sample entry of a protected source, in the init segment, is the entry the clear file
+    /// has: the `frma` type, the same fixed fields and children, and no `sinf` (TDD 0014).
+    #[test]
+    fn a_protected_source_is_announced_as_the_codec_it_was() {
+        let stsd = |name: &str, track_id: u32| {
+            let (init, _) = init_for(name, track_id);
+            at(
+                &init,
+                &[b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd"],
+            )
+            .to_vec()
+        };
+        for track_id in [1, 2] {
+            let clear = stsd("h264-aac.mp4", track_id);
+            for protected in [
+                "h264-aac-cenc.mp4",
+                "h264-aac-cens.mp4",
+                "h264-aac-cbc1.mp4",
+                "h264-aac-cbcs.mp4",
+            ] {
+                let init = stsd(protected, track_id);
+                assert_eq!(init, clear, "{protected} track {track_id}");
+                assert!(
+                    !contains(&init, b"sinf") && !contains(&init, b"tenc"),
+                    "{protected}"
+                );
+                assert!(
+                    !contains(&init, b"encv") && !contains(&init, b"enca"),
+                    "{protected}"
+                );
+            }
+        }
+        // FFmpeg's own protected file keeps its other children, such as `btrt`, but not `sinf`.
+        let ffmpeg = stsd("h264-aac-cenc-ffmpeg.mp4", 1);
+        assert!(contains(&ffmpeg, b"avc1") && contains(&ffmpeg, b"avcC"));
+        assert!(!contains(&ffmpeg, b"sinf") && !contains(&ffmpeg, b"encv"));
+    }
+
+    #[test]
+    fn a_decrypted_source_can_be_protected_again_under_cbcs() {
+        let (_, media) = init_for("h264-aac-cenc.mp4", 1);
+        let protection = InitProtection {
+            key_id: [7; 16],
+            constant_iv: [9; 16],
+            crypt_byte_block: 1,
+            skip_byte_block: 9,
+            pssh: &[],
+        };
+        let init = write_protected_init_segment(&media.metadata, 1, &protection).unwrap();
+        let stsd = at(
+            &init,
+            &[b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd"],
+        );
+        // One `sinf`, naming `cbcs` and the new key: the source's own is gone.
+        assert_eq!(stsd.windows(4).filter(|w| *w == b"sinf").count(), 1);
+        assert!(contains(stsd, b"cbcs") && !contains(stsd, b"cenc"));
+        assert!(contains(stsd, &[7; 16]) && !contains(stsd, &[0x01, 0x23, 0x45, 0x67]));
     }
 
     fn init_for(name: &str, track_id: u32) -> (Vec<u8>, mp4::ParsedMedia) {

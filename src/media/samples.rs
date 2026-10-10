@@ -192,6 +192,12 @@ impl SampleIndex {
         self.end - self.start
     }
 
+    /// Where this window begins in the tables it was cut from: the position of its first sample
+    /// among all the samples of the file, which per-sample data of the source is indexed by.
+    pub(crate) const fn window_start(&self) -> usize {
+        self.start
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.start == self.end
     }

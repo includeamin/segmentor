@@ -148,6 +148,18 @@ impl PackagedAsset {
             hls_mux_audio,
             hls_aes128,
         } = extras;
+        // A protected source can only be read once the mapper gives the keys for it (TDD 0014).
+        // Until then it is refused, as it always was, rather than served as if it were clear.
+        if let Some(track) = index
+            .tracks
+            .iter()
+            .find(|track| track.source_protection.is_some())
+        {
+            return Err(Error::Unsupported(format!(
+                "track {}: encrypted media is not supported",
+                track.id
+            )));
+        }
         let plan = segment::plan(&index, segment_duration_ms, limits)?;
         let subtitles = prepare_subtitles(&index, subtitles)?;
         let protection = encryption
@@ -727,6 +739,29 @@ mod tests {
     use std::fmt::Write;
 
     use super::*;
+
+    #[tokio::test]
+    async fn an_encrypted_source_is_refused_until_it_can_be_decrypted() {
+        for name in [
+            "h264-aac-cenc.mp4",
+            "h264-aac-cens.mp4",
+            "h264-aac-cbc1.mp4",
+            "h264-aac-cbcs.mp4",
+            "h264-aac-cenc-ffmpeg.mp4",
+            "h264-aac-cenc-whole-video.mp4",
+        ] {
+            let error =
+                PackagedAsset::load_local(fixture_path(name), 1000, &LimitsConfig::default())
+                    .await
+                    .err()
+                    .unwrap_or_else(|| panic!("{name} must not be served as if it were clear"))
+                    .to_string();
+            assert!(
+                error.contains("encrypted media is not supported"),
+                "{name}: {error}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn the_version_depends_on_the_format_revision_and_not_only_on_the_file() {

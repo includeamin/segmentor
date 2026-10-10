@@ -3,6 +3,7 @@ pub(crate) mod codec;
 mod edit;
 mod fragments;
 mod parser;
+mod protection;
 mod tables;
 
 pub(crate) use parser::{ParsedMedia, parse};

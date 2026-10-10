@@ -53,6 +53,9 @@ pub(crate) struct Track {
     pub(crate) codec: CodecConfig,
     /// Compact: see [`SampleIndex`] and TDD 0010.
     pub(crate) samples: SampleIndex,
+    /// How the source protects this track, when it does (TDD 0014). Its per-sample data is
+    /// indexed from the first sample of the file's tables: see `SampleIndex::window_start`.
+    pub(crate) source_protection: Option<std::sync::Arc<super::SourceProtection>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
