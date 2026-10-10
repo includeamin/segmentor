@@ -10,6 +10,7 @@ mod keys;
 mod schedule;
 mod segment;
 mod signal;
+mod source;
 
 pub(crate) use aes128::{Aes128, WireAes128};
 pub(crate) use keys::{Encryption, WireEncryption};
