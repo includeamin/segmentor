@@ -230,4 +230,28 @@ ffmpeg_quiet \
     -use_editlist 0 -movflags +faststart -f mp4 \
     "$fixture_dir/h264-mp3.mp4"
 
+
+# Encrypted sources (TDD 0014). First FFmpeg's own cenc-aes-ctr output, with the senc, saio, and
+# saiz boxes a real encoder writes under stbl. FFmpeg picks random IVs, so regenerating this
+# file changes its bytes; the tests check what it must look like, not those bytes.
+ffmpeg_quiet \
+    -i "$fixture_dir/h264-aac.mp4" -c copy -movflags +faststart \
+    -encryption_scheme cenc-aes-ctr \
+    -encryption_key 00112233445566778899aabbccddeeff \
+    -encryption_kid 0123456789abcdef0123456789abcdef \
+    "$fixture_dir/h264-aac-cenc-ffmpeg.mp4"
+
+# The same clear file protected under each of the four schemes by the openssl-based reference
+# encryptor, which shares no code with segmentor. FFmpeg decrypts cenc, cbc1, and cbcs to the
+# clear file's exact frames; it has no cens pattern support, so cens has no second opinion.
+for scheme in cenc cens cbc1 cbcs; do
+    python3 "$fixture_dir/protect-fixture.py" "$scheme" \
+        "$fixture_dir/h264-aac.mp4" "$fixture_dir/h264-aac-$scheme.mp4"
+done
+
+# Video protected whole, with no subsample map, so even the NAL unit length prefixes are
+# encrypted: the one layout in which a wrong key can be noticed when the asset loads.
+python3 "$fixture_dir/protect-fixture.py" cenc \
+    "$fixture_dir/h264-aac.mp4" "$fixture_dir/h264-aac-cenc-whole-video.mp4" --whole-video
+
 printf 'Generated variant MP4 fixtures in %s\n' "$fixture_dir"

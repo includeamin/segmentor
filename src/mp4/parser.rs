@@ -6,6 +6,7 @@ use super::boxes::{
 use super::codec;
 use super::edit::{self, ElstEntry, TrackEdit};
 use super::fragments::{self, TrackDefaults};
+use super::protection;
 use super::tables::{parse_sample_tables, sample_index};
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
@@ -290,7 +291,18 @@ fn parse_track(
     let header = parse_media_header(required_child(media.payload, *b"mdhd")?.payload, raw.id)?;
     let stbl = required_child(required_child(media.payload, *b"minf")?.payload, *b"stbl")?;
     let entry = sample_entry(stbl.payload)?;
-    let codec = match (&entry.name, kind) {
+    // A protected entry is read as the codec it was before protection (`frma`).
+    let sinf = if matches!(&entry.name, b"encv" | b"enca") {
+        let children = codec::protected_entry_children(entry.name, entry.payload, raw.id)?;
+        let sinf = required_child(children, *b"sinf")?;
+        Some(protection::parse_sinf(raw.id, sinf.payload)?)
+    } else {
+        None
+    };
+    let format = sinf
+        .as_ref()
+        .map_or(entry.name, |sinf| sinf.original_format);
+    let codec = match (&format, kind) {
         (b"avc1", TrackKind::Video) => codec::parse_avc(entry.payload)?,
         (b"hvc1" | b"hev1", TrackKind::Video) => codec::parse_hevc(entry.payload, entry.name)?,
         (b"vp09", TrackKind::Video) => codec::parse_vp9(entry.payload)?,
@@ -331,6 +343,16 @@ fn parse_track(
     if samples.is_empty() {
         return Err(invalid_media(&format!("track {} has no samples", raw.id)));
     }
+    let source_protection = match sinf {
+        Some(_) if matches!(source, TrackSource::Fragmented { .. }) => {
+            return Err(Error::Unsupported(format!(
+                "track {}: encrypted fragmented files are not supported yet",
+                raw.id
+            )));
+        }
+        Some(sinf) => protection::read_protection(raw.id, &sinf, stbl.payload, samples.len())?,
+        None => None,
+    };
     let edit = track_edit(raw, movie_timescale, header.timescale)?;
 
     Ok((
@@ -345,6 +367,7 @@ fn parse_track(
             duration: header.duration,
             codec,
             samples,
+            source_protection,
         },
         edit,
     ))
@@ -579,9 +602,17 @@ fn classify_sample_description(
     match &entry.name {
         b"avc1" | b"hvc1" | b"hev1" | b"vp09" | b"av01" | b"mp4a" | b"ac-3" | b"ec-3" | b"Opus"
         | b"fLaC" => Ok(Disposition::Package),
-        b"encv" | b"enca" => Err(Error::Unsupported(format!(
-            "track {track_id}: encrypted media is not supported"
-        ))),
+        b"encv" | b"enca" => {
+            // Whether the file can be read is decided when it is assembled, by whether the
+            // mapper gave a key (TDD 0014); here the entry only has to say how it is protected.
+            let children = codec::protected_entry_children(entry.name, entry.payload, track_id)?;
+            if optional_child(children, *b"sinf")?.is_none() {
+                return Err(Error::Unsupported(format!(
+                    "track {track_id}: encrypted media without protection information is not supported"
+                )));
+            }
+            Ok(Disposition::Package)
+        }
         _ if handler == *b"vide" && sample_count(sample_table)? <= 1 => {
             // A single still picture, such as cover art stored as a track.
             Ok(Disposition::Skip("single still image"))
@@ -1277,6 +1308,165 @@ mod tests {
         let error = validate_raw_moov(&moov).expect_err("encrypted media should fail");
 
         assert!(error.to_string().contains("encrypted media"));
+    }
+
+    /// The video and audio protection of a protected fixture, with the codecs they were.
+    fn protected_tracks(name: &str) -> (Track, Track) {
+        let source = open_kind(fixture(name)).expect("fixture should open");
+        let index = parse_index(&source, &LimitsConfig::default()).expect("fixture should parse");
+        let mut tracks = index.tracks.into_iter();
+        let video = tracks.next().expect("a video track");
+        let audio = tracks.next().expect("an audio track");
+        assert!(matches!(video.codec, CodecConfig::Avc { .. }), "{name}");
+        assert!(matches!(audio.codec, CodecConfig::Aac { .. }), "{name}");
+        (video, audio)
+    }
+
+    fn protection(track: &Track) -> &crate::media::SourceProtection {
+        track
+            .source_protection
+            .as_deref()
+            .expect("a protected track")
+    }
+
+    const FIXTURE_KEY_ID: [u8; 16] = [
+        0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd,
+        0xef,
+    ];
+
+    /// The IV `tests/fixtures/protect-fixture.py` gives sample `index` of track `track`.
+    fn fixture_iv(track: usize, index: usize, size: usize) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(format!("iv {track} {index}").as_bytes())[..size].to_vec()
+    }
+
+    /// `FFmpeg` picks fresh random IVs each time the fixture is generated, so this checks what
+    /// `senc` must look like, not the bytes: the end-to-end test against the clear twin checks
+    /// that the IVs are the right ones.
+    #[test]
+    fn a_real_encoders_cenc_file_is_read_with_its_ivs_and_subsamples() {
+        let (video_track, audio_track) = protected_tracks("h264-aac-cenc-ffmpeg.mp4");
+        let (video, audio) = (protection(&video_track), protection(&audio_track));
+        assert_eq!(video.scheme, crate::media::SourceScheme::Cenc);
+        assert_eq!(video.original_format, *b"avc1");
+        assert_eq!(audio.original_format, *b"mp4a");
+        assert_eq!(video.key_id, FIXTURE_KEY_ID);
+        assert_eq!(video.constant_iv, None);
+        for (track, protection) in [(&video_track, video), (&audio_track, audio)] {
+            let count = track.samples.len();
+            assert_eq!(protection.aux.iv(0).map(<[u8]>::len), Some(8));
+            assert_eq!(protection.aux.iv(count - 1).map(<[u8]>::len), Some(8));
+            assert!(protection.aux.iv(count).is_none());
+        }
+        // Video is protected NAL by NAL, each after a clear length prefix and NAL header;
+        // audio is protected whole, so has no subsample map. The `roll` group is not `seig`.
+        for index in 0..video_track.samples.len() {
+            let subsamples = video.aux.subsamples(index);
+            assert!(!subsamples.is_empty(), "video sample {index}");
+            assert!(subsamples.iter().all(|s| s.clear == 5 && s.protected > 0));
+            let total: u64 = subsamples
+                .iter()
+                .map(|s| u64::from(s.clear) + u64::from(s.protected))
+                .sum();
+            assert_eq!(
+                total,
+                u64::from(video_track.samples.size(index)),
+                "video sample {index}"
+            );
+        }
+        assert!(audio.aux.subsamples(0).is_empty());
+    }
+
+    #[test]
+    fn each_scheme_is_read_with_its_pattern_and_iv_layout() {
+        // (fixture, scheme, IV size, video pattern, audio pattern)
+        let cases = [
+            (
+                "h264-aac-cenc.mp4",
+                crate::media::SourceScheme::Cenc,
+                8,
+                (0, 0),
+                (0, 0),
+            ),
+            (
+                "h264-aac-cens.mp4",
+                crate::media::SourceScheme::Cens,
+                8,
+                (1, 9),
+                (1, 9),
+            ),
+            (
+                "h264-aac-cbc1.mp4",
+                crate::media::SourceScheme::Cbc1,
+                16,
+                (0, 0),
+                (0, 0),
+            ),
+        ];
+        for (name, scheme, iv_size, video_pattern, audio_pattern) in cases {
+            let (video_track, audio_track) = protected_tracks(name);
+            let (video, audio) = (protection(&video_track), protection(&audio_track));
+            assert_eq!(video.scheme, scheme, "{name}");
+            assert_eq!(audio.scheme, scheme, "{name}");
+            assert_eq!(video.key_id, FIXTURE_KEY_ID, "{name}");
+            assert_eq!(
+                (video.crypt_blocks, video.skip_blocks),
+                video_pattern,
+                "{name}"
+            );
+            assert_eq!(
+                (audio.crypt_blocks, audio.skip_blocks),
+                audio_pattern,
+                "{name}"
+            );
+            // Sample 7 of each track has the IV the generator derived for it.
+            assert_eq!(
+                video.aux.iv(7),
+                Some(&fixture_iv(0, 7, iv_size)[..]),
+                "{name}"
+            );
+            assert_eq!(
+                audio.aux.iv(7),
+                Some(&fixture_iv(1, 7, iv_size)[..]),
+                "{name}"
+            );
+            let subsamples = video.aux.subsamples(0);
+            assert!(
+                !subsamples.is_empty(),
+                "{name}: video is protected NAL by NAL"
+            );
+            assert!(
+                audio.aux.subsamples(0).is_empty(),
+                "{name}: audio is protected whole"
+            );
+            if scheme == crate::media::SourceScheme::Cbc1 {
+                assert!(
+                    subsamples
+                        .iter()
+                        .all(|subsample| subsample.protected % 16 == 0),
+                    "{name}: cbc1 protects whole blocks"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cbcs_has_a_constant_iv_and_no_per_sample_ivs() {
+        let (video_track, audio_track) = protected_tracks("h264-aac-cbcs.mp4");
+        let (video, audio) = (protection(&video_track), protection(&audio_track));
+        assert_eq!(video.scheme, crate::media::SourceScheme::Cbcs);
+        let constant = [
+            0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd,
+            0xce, 0xcf,
+        ];
+        assert_eq!(video.constant_iv, Some(constant));
+        assert_eq!(audio.constant_iv, Some(constant));
+        assert_eq!((video.crypt_blocks, video.skip_blocks), (1, 9));
+        assert_eq!((audio.crypt_blocks, audio.skip_blocks), (0, 0));
+        assert!(video.aux.iv(0).is_none());
+        assert!(!video.aux.subsamples(0).is_empty());
+        // Audio has no `senc` at all: a constant IV and whole-sample protection need none.
+        assert_eq!(audio.aux.bytes(), 0);
     }
 
     #[test]
