@@ -1,0 +1,157 @@
+# TDD 0014: Encrypted source files
+
+- Status: Draft
+- Created: 2026-10-11
+- Updated: 2026-10-11
+- Related ADRs: [ADR 0001](../adr/0001-use-fragmented-mp4-for-media-segments.md)
+- Related designs: [TDD 0009](0009-common-encryption-and-drm.md) (the encryption this follows and reverses), [TDD 0010](0010-compact-sample-index.md) (the index this extends), [TDD 0005](0005-fragmented-mp4-input.md) (fragmented input), [TDD 0013](0013-key-rotation.md) (the rotation that decrypted content can then use)
+
+## Summary
+
+The mapper can tell segmentor that a source file is already CENC-encrypted, and what to do about it:
+
+- **Decrypt.** The answer carries the source key. Segmentor decrypts the samples in memory and serves the result clear, or encrypted again under the answer's own `encryption` or `hls_aes128`.
+- **Passthrough.** The answer carries no key. Segmentor re-segments the file and keeps its original encryption, key ID and IVs, so the key never reaches segmentor.
+
+All four common protection schemes (`cenc`, `cens`, `cbc1`, `cbcs`) are read, from progressive and fragmented files. Today an `encv` or `enca` track fails the asset at load.
+
+## Context
+
+[TDD 0009](0009-common-encryption-and-drm.md) protects clear sources and left "encrypted source passthrough" as deferred. Catalogs stored encrypted at rest, and catalogs delivered by a vendor already protected, cannot move to segmentor until the source can be read. nginx-vod-module repackages encrypted MP4s when given the key; this is the matching capability, plus a passthrough mode it does not have.
+
+Two facts about the code shape the design:
+
+- A clear segment is served from source byte ranges. A protected segment is not: its payload is read into memory and its header is built around it (`PendingEncryption` in `src/cenc/segment.rs`). Decryption fits that route.
+- The sample index (TDD 0010) knows sizes and offsets and nothing about IVs. Both modes need a per-sample table beside it.
+
+## Goals
+
+- Decrypt `cenc`, `cens`, `cbc1` and `cbcs` sources, progressive and fragmented, on single files, adaptive assets and sequences.
+- Pass an encrypted source through on single files and adaptive assets, keeping its protection exactly.
+- The mapper chooses per asset. An encrypted source with no instruction keeps failing, as today.
+- A wrong key fails the asset at load instead of serving garbage that a CDN would cache.
+- Output stays a pure function of the source bytes and the answer.
+
+## Non-goals
+
+- Deriving or fetching keys. The mapper supplies them; segmentor never talks to a licence server.
+- Sources with more than one key inside a track (`seig` sample groups), or encryption of a codec segmentor cannot already encrypt (TDD 0009).
+- Passthrough on sequences, for I-frame playlists, and for muxed HLS audio. Decrypted I-frame playlists work, since their samples are decrypted by the same path.
+- Codecs outside TDD 0004. The original codec (`frma`) goes through the usual classification, so an encrypted track of an unsupported codec fails as a clear one does.
+- Changing a passthrough asset's protection. Combining it with `encryption` or `hls_aes128` is a rejected answer.
+
+## Design
+
+### Wire format
+
+The answer gains an optional `source_encryption` object. It is an opt-in: without it, an encrypted source fails at load with the message it has today.
+
+```json
+"source_encryption": { "keys": [ { "tracks": "all", "key_id": "…", "key": "…" } ] }
+"source_encryption": { "passthrough": true, "systems": [ … ] }
+```
+
+- **Decrypt** has `keys`, in the shape of TDD 0009 (`tracks` is `all`, `video` or `audio`; `key_id` and `key` are 16 bytes in hex). A track is decrypted with the key whose `key_id` equals the `default_KID` of its `tenc`. A track whose key ID has no entry fails the asset, naming the key ID and never the key.
+- **Passthrough** is `"passthrough": true` with no `keys`. It may carry `systems` in the shape of TDD 0009, used only for signalling (see [Passthrough](#passthrough)).
+- `keys` and `passthrough` are exclusive; an object with neither is rejected.
+- **Where it applies.** At the top level it covers a single file and every rendition of an adaptive asset. A clip of a sequence may carry its own `source_encryption`, which overrides the top-level one, as a clip's `encryption` does. Passthrough on `clips` is rejected.
+- **Combinations.** Decrypt works with `encryption` (decrypt, then encrypt under the new key), with `hls_aes128`, and with neither. Passthrough excludes `encryption`, `hls_aes128` and muxed HLS audio.
+- Keys use the redacting key type, travel in the answer's body only, and obey the existing rules for secrets in answers: https and a bearer token, no logging, no echo in errors, no appearance in `/admin/status`.
+- A rejected `source_encryption` names the field and never a key.
+
+### Reading the source
+
+The parser stops rejecting `encv` and `enca` outright. For a protected track it reads `sinf`:
+
+- `frma` gives the original sample entry type, which is classified as for a clear track;
+- `schm` gives the scheme, one of `cenc`, `cens`, `cbc1`, `cbcs`; anything else fails the asset naming it;
+- `schi/tenc` gives `default_isProtected`, the per-sample IV size, `default_KID`, the constant IV and the crypt and skip block counts.
+
+The refusal moves to assembly: a protected track with no `source_encryption` fails with today's message. A track with `default_isProtected = 0` is clear, since mixed files exist.
+
+For each protected sample the table holds its IV (8 or 16 bytes, or none when `tenc` has a constant IV) and its subsample list (clear bytes, protected bytes). They come from `senc`, or from `saiz` and `saio` when the file locates them that way. A progressive file keeps them under the track's sample table; a fragmented file keeps them in each `traf`, read as part of the fragment parsing of TDD 0005. When the offsets point outside `moov`, one extra read at load fetches the bytes.
+
+The table sits beside the compact sample index, one per protected track, shared by every window cut from a clip, as the sample tables are. A one-hour 24 fps title has about 86,000 video samples, so the table is about 1 to 2 MB. It counts toward `index_bytes`.
+
+Checked at load, each failing the asset with its own message:
+
+- subsample sizes that do not add up to the sample's size;
+- a `seig` group, or more than one key, in a track;
+- a protected track with neither per-sample IVs nor a constant IV;
+- `senc`, `saiz` or `saio` data that is truncated, overlapping or out of the file.
+
+### Decrypting
+
+A decrypt-mode asset never takes the zero-copy path. A segment's samples are read into memory as an encrypted segment's are, with the same coalesced reads. Each protected sample is decrypted with its IV and subsample list, then the fragment is finished. Decryption never changes a sample's size, so the header is built as for a clear asset. If the answer also has `encryption` or `hls_aes128`, the decrypted payload goes into that step.
+
+The four schemes follow ISO/IEC 23001-7:
+
+| Scheme | Cipher | Protected ranges |
+| --- | --- | --- |
+| `cenc` | AES-128-CTR | every byte of each protected range; the keystream runs on across a sample's subsamples; an 8-byte IV is padded with zeros to 16 |
+| `cens` | AES-128-CTR | the crypt blocks of each crypt/skip pattern; the keystream runs on across encrypted blocks only |
+| `cbc1` | AES-128-CBC | whole 16-byte blocks of each protected range; a trailing partial block stays clear |
+| `cbcs` | AES-128-CBC | the crypt/skip pattern (typically 1:9) over each protected range, with the constant IV |
+
+The exact chain and reset rule of each scheme is fixed by a published test vector in the implementation, and recorded under Implementation status.
+
+**A wrong key must not become silent garbage.** CTR and CBC turn any key into random bytes without complaint. At load, the first sample of every video track is decrypted and its NAL unit length prefixes must tile the sample exactly; if they do not, the asset fails naming the track, not the key. Audio has no equally cheap check, so audio relies on the key ID matching `tenc`.
+
+The URL version hashes a fingerprint of the source keys (SHA-256, as `encryption` does). Changing a source key gives new URLs, so a CDN never mixes output decrypted under two keys.
+
+Throughput is lower than for clear assets because zero-copy is off. The implementation adds a decrypt benchmark to `make bench-compare`, so the cost is a measured number.
+
+### Passthrough
+
+The source's protection is kept, not rebuilt:
+
+- **Init segment.** The track keeps its protected sample entry (`encv` or `enca` with `sinf`, `schm` and `tenc`), so key ID, scheme, pattern and constant IV are the source's. The source's `pssh` boxes are copied into `moov`.
+- **Fragments.** The payload is the source's ciphertext. The fragment's `senc`, `saiz` and `saio` are built from the stored table for exactly the samples in the segment, using the box writers encryption already has. Cutting segments differently from the source is therefore safe. The first version uses the same in-memory route as other protected segments; because the ciphertext is never modified and the header depends only on sample sizes, serving it zero-copy is a later optimisation.
+- **Signalling.** `systems` (licence URLs, `pssh` data, and for HLS a key URI) is for the manifests only. DASH always gets the `mp4protection` descriptor with the source scheme and the key ID from `tenc`, plus any `systems`. HLS is offered only for `cbcs` sources that have a system able to name an HLS key, since HLS fMP4 can carry nothing else. Any other passthrough asset is DASH-only, as an `AES-128` asset is HLS-only: its HLS endpoints answer 404.
+- **Adaptive assets.** Each rendition keeps its own key ID and IVs; the shared audio group works as it does today.
+- **Not offered:** I-frame playlists and muxed HLS audio, and sequences.
+
+### Versioning
+
+The version covers the mode, each track's scheme and key ID, and for decrypt the fingerprint of the source keys. Passthrough output depends on the source bytes alone, so its version needs nothing more.
+
+## Security and limits
+
+- Source keys are held in the redacting key type, in memory only. They are not logged, not in `/admin/status` and not in any error body.
+- A new limit, `limits.max_source_aux_bytes` (default 64 MiB), caps the memory of a per-sample table, so a hostile file cannot make it large. Counts in `senc`, `saiz` and `saio` are checked against the sample count before anything is allocated.
+- The wrong-key check bounds how long an asset serves garbage to zero: a video asset with a wrong key never loads.
+- Decryption is bounded work per segment, in proportion to the segment's bytes, on the blocking pool like other segment preparation.
+- A decrypted asset is as sensitive as its clear twin. Operators who decrypt should keep it behind the same authorization (TDD 0007) as any other protected title.
+
+## Observability
+
+`/admin/status` reports, per asset, the source mode (`decrypt` or `passthrough`), the scheme and the source key IDs. It never reports a key. The load log line names the mode. No new metrics.
+
+## Testing
+
+- **Decrypt, with a clear twin as the oracle.** Fixtures are encrypted by an independent test encryptor built on OpenSSL, never by the code under test, for all four schemes, progressive and fragmented, with and without subsamples and with per-sample and constant IVs. The decrypted segment must equal the clear file's segment byte for byte, and FFmpeg must decode every frame of it.
+- **Decrypt then encrypt.** Decrypting a `cenc` source and serving it under `cbcs` plays back in FFmpeg with the new key; the same under whole-segment `AES-128`.
+- **Wrong keys.** A wrong key on a video track, a missing key ID and a key for another track each fail the asset with the right message, and no message contains a key.
+- **Passthrough.** FFmpeg decrypts the served segments with the source key and decodes every frame; the served `senc` entries equal the source's for the same samples; segments cut differently from the source still decrypt; the DASH-only rule holds for `cenc`, `cens` and `cbc1`; `cbcs` is served over HLS only when a system can name a key.
+- **Parsers.** `sinf`, `tenc`, `senc`, `saiz` and `saio` get unit tests with malformed and truncated boxes, and a fuzz target in `fuzz/`.
+- **Mutations.** A skipped subsample, a crypt/skip pattern off by one, an IV off by one, `cens` treated as `cenc` and a wrong constant IV must each be caught.
+- **Edges.** `HEAD`, byte ranges and ETags on decrypted segments; a clip window starting mid-file; a mixed file with a clear audio track.
+- **Performance.** A decrypt benchmark in `make bench-compare`.
+- **Not testable here:** real DRM devices, as for TDD 0009 and 0013.
+
+## Rollout
+
+Additive: an answer without `source_encryption` behaves as today. Built in four stages, each releasable:
+
+1. Parse `sinf`, `tenc` and `senc`/`saiz`/`saio`; decrypt on a single progressive file, all four schemes, with the wrong-key check.
+2. Fragmented sources.
+3. Decrypt for adaptive assets and sequences, including a clip's own `source_encryption`.
+4. Passthrough.
+
+Rollback is removing `source_encryption` from the answers.
+
+## Open questions
+
+- **Wrong-key check for audio.** Is the key-ID match enough, or should audio get a codec-specific plausibility check (for example, an AAC frame header)? It stays out of the first stage unless a real case needs it.
+- **Zero-copy passthrough.** Worth building once the in-memory version has numbers?
+- **A key ID shared by audio and video.** Some files protect both tracks under one key ID. A key entry with `tracks: all` covers both; confirm that is how the target catalogs' files and mappers describe them.
