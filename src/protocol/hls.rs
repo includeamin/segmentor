@@ -513,7 +513,8 @@ pub(crate) fn iframe_playlist(presentation: Presentation<'_>) -> Result<Option<S
         return Ok(None);
     };
     // The fragments of an I-frame playlist are not encrypted whole, so an `AES-128` asset has none.
-    if presentation.aes128().is_some() {
+    // Nor does a rotating asset: a keyframe's fragment would need its period's key (TDD 0013).
+    if presentation.aes128().is_some() || presentation.rotating() {
         return Ok(None);
     }
     let version = presentation.version();
@@ -725,6 +726,16 @@ mod tests {
         );
         let clear = media_playlist(loaded.presentation(), TrackKey::VIDEO).unwrap();
         assert!(!clear.contains("EXT-X-KEY"), "{clear}");
+    }
+
+    #[test]
+    fn a_rotating_asset_has_no_iframe_playlist() {
+        let loaded = Loaded::h264_aac();
+        let encryption = crate::cenc::tests_support::rotating_encryption();
+        let rotating = loaded.presentation().with_encryption(Some(&encryption));
+
+        assert_eq!(iframe_playlist(rotating).unwrap(), None);
+        assert!(iframe_playlist(loaded.presentation()).unwrap().is_some());
     }
 
     #[test]

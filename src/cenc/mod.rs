@@ -79,4 +79,16 @@ pub(crate) mod tests_support {
         .validate()
         .unwrap()
     }
+
+    /// A clear first second, then [`sample_encryption`]'s key under Clear Key (TDD 0013).
+    pub(crate) fn rotating_encryption() -> Encryption {
+        serde_json::from_str::<WireEncryption>(
+            r#"{"scheme":"cbcs","periods":[{"start_ms":0,"clear":true},
+            {"start_ms":1000,"keys":[{"key_id":"0123456789abcdef0123456789abcdef","key":"00112233445566778899aabbccddeeff"}],
+             "systems":[{"system_id":"e2719d58-a985-b3c9-781a-b030af78d30e","license_url":"https://l.example.net/ck"}]}]}"#,
+        )
+        .unwrap()
+        .validate()
+        .unwrap()
+    }
 }
