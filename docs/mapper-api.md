@@ -307,7 +307,7 @@ Any other system ID is accepted and signalled in DASH only (its `pssh` and `lice
 
 ### Key rotation and clear lead
 
-For a single file, the keys can change over the timeline. Give `periods` in place of `keys` and `systems`; each period has its own `keys` and `systems`, or is `"clear": true`:
+For a single file or an adaptive asset, the keys can change over the timeline. Give `periods` in place of `keys` and `systems`; each period has its own `keys` and `systems`, or is `"clear": true`:
 
 ```json
 "encryption": {
@@ -325,7 +325,7 @@ For a single file, the keys can change over the timeline. Give `periods` in plac
 - `"clear_lead_ms": 12000` next to `keys` is shorthand for a clear first period of that length followed by those keys, which is what nginx-vod-module's clear-lead setting does.
 - The init segment declares the first encrypted period's key. A fragment under another key says so with a `seig` sample group, a clear fragment says it is clear, and every encrypted fragment carries its period's `pssh` boxes, so DASH players learn each key from the media. HLS gets an `#EXT-X-KEY` line set before the first segment of each period (`METHOD=NONE` for a clear one), no discontinuity, and `#EXT-X-SESSION-KEY` lines for every period's licence. The DASH manifest stays one Period and describes the first encrypted period.
 - Every period's keys are hashed into the URL version.
-- **Limits.** Single-file and adaptive assets: periods on `clips` (or on a clip's own `encryption`) are rejected. In an adaptive asset every video rendition must begin each period at the same segment, or the asset fails to load. An asset with periods has no I-frame playlist. A clear period is served through the encrypted-segment path, so it is read into memory like an encrypted one. Design: [TDD 0013](technical-design/0013-key-rotation.md).
+- **Limits.** Single-file and adaptive assets: periods on `clips` (or on a clip's own `encryption`) are rejected. In an adaptive asset every video rendition must begin each period at the same segment, or the asset fails to load. A dedicated audio-only rendition places each period on its own segments, so its audio can switch up to one segment after the video does, and a period that starts after that rendition's last segment never starts there. An asset with periods has no I-frame playlist. A clear period is served through the encrypted-segment path, so it is read into memory like an encrypted one. Design: [TDD 0013](technical-design/0013-key-rotation.md).
 
 ### Different keys per clip
 
