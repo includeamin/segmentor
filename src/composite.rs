@@ -43,6 +43,14 @@ impl ServedAsset {
         }
     }
 
+    /// The key IDs (as UUIDs) of a source file that is decrypted while serving, if it is.
+    pub(crate) fn source_key_ids(&self) -> Vec<String> {
+        match self {
+            Self::Single(asset) => asset.source_key_ids(),
+            Self::Composite(_) | Self::Sequence(_) => Vec::new(),
+        }
+    }
+
     pub(crate) fn version(&self) -> &str {
         match self {
             Self::Single(asset) => asset.version(),

@@ -11,6 +11,7 @@ use super::avc::AvcParameters;
 use super::cipher::{Cipher, Pattern};
 use super::hevc::HevcParameters;
 use super::keys::{ContentKey, Encryption};
+use super::source::TrackDecryption;
 use crate::error::{Error, Result};
 use crate::fmp4::{self, FragmentRotation, InitProtection, MAX_SUBSAMPLES, SampleGroup};
 use crate::media::{CodecConfig, Sample, Track, TrackKind};
@@ -234,6 +235,9 @@ fn system_pssh(encryption: &Encryption) -> Vec<Vec<u8>> {
 /// path"): a `cbcs` track's samples, or a whole `AES-128` segment.
 #[derive(Debug, Clone)]
 pub(crate) enum PendingEncryption {
+    /// The samples are decrypted first, then go through `then`, if the asset is encrypted again
+    /// (TDD 0014).
+    Decrypt(PendingDecrypt),
     Cbcs(PendingCbcs),
     /// A clear segment of a rotating asset, which still needs its header rebuilt (TDD 0013).
     Clear(PendingClear),
@@ -251,6 +255,7 @@ impl PendingEncryption {
     /// same buffer the payload was read into.
     pub(crate) fn header_room(&self) -> usize {
         match self {
+            Self::Decrypt(pending) => pending.header_room(),
             Self::Cbcs(pending) => pending.header_room(),
             Self::Clear(pending) => pending.header_room(),
             // The header, and up to a block of padding.
@@ -261,6 +266,7 @@ impl PendingEncryption {
     /// Encrypts `payload` (the samples' bytes, in order) and returns the finished fragment.
     pub(crate) fn finish(&self, payload: Vec<u8>) -> Result<Bytes> {
         match self {
+            Self::Decrypt(pending) => pending.finish(payload),
             Self::Cbcs(pending) => pending.finish(payload),
             Self::Clear(pending) => pending.finish(payload),
             Self::WholeSegment {
@@ -275,6 +281,49 @@ impl PendingEncryption {
                 Ok(Bytes::from(message))
             }
         }
+    }
+}
+
+/// A segment of a protected source, prepared up to the point where its bytes are needed: they are
+/// decrypted, then either finish the clear fragment or go on to be encrypted again.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingDecrypt {
+    /// The clear fragment's header, used when nothing encrypts the samples again.
+    pub(crate) header: Bytes,
+    /// The position of the segment's first sample among all the samples of the file's tables.
+    pub(crate) first_sample: usize,
+    /// The size of each of the segment's samples, in order.
+    pub(crate) sizes: Vec<u32>,
+    pub(crate) decryption: Arc<TrackDecryption>,
+    pub(crate) then: Option<Box<PendingEncryption>>,
+}
+
+impl PendingDecrypt {
+    fn header_room(&self) -> usize {
+        self.then
+            .as_ref()
+            .map_or(self.header.len(), |then| then.header_room())
+    }
+
+    fn finish(&self, mut payload: Vec<u8>) -> Result<Bytes> {
+        let mut at = 0usize;
+        for (offset, size) in self.sizes.iter().enumerate() {
+            let end = at
+                .checked_add(*size as usize)
+                .filter(|end| *end <= payload.len())
+                .ok_or_else(|| {
+                    Error::InvalidMedia("segment payload is shorter than its samples".to_owned())
+                })?;
+            self.decryption
+                .decrypt_sample(self.first_sample + offset, &mut payload[at..end])?;
+            at = end;
+        }
+        if let Some(then) = &self.then {
+            return then.finish(payload);
+        }
+        payload.reserve_exact(self.header.len());
+        payload.splice(0..0, self.header.iter().copied());
+        Ok(Bytes::from(payload))
     }
 }
 

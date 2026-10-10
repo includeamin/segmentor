@@ -43,6 +43,8 @@ pub(crate) struct PackagedAsset {
     /// HLS `AES-128`: every media segment is encrypted whole, and the playlists name the key
     /// (TDD 0012). DASH has no such mode, so the asset is HLS only.
     aes128: Option<Arc<crate::cenc::Aes128>>,
+    /// The tracks of a source that is already encrypted, decrypted while serving (TDD 0014).
+    decryption: Option<crate::cenc::AssetDecryption>,
     /// The HLS stream that carries the default audio inside the video segments, when the load
     /// asked for one and the asset can have it (TDD 0011).
     muxed: Option<Muxed>,
@@ -116,6 +118,14 @@ impl PackagedAsset {
         limits: &LimitsConfig,
     ) -> Result<Self> {
         let parsed = mp4::parse(&source, limits).await?;
+        // A key that does not fit fails here, where the file can still be read (TDD 0014).
+        if let Some(decryption) =
+            crate::cenc::AssetDecryption::new(&parsed.index.tracks, extras.source_keys.as_deref())?
+        {
+            decryption
+                .check_keys(&source, &parsed.metadata, &parsed.index.tracks)
+                .await?;
+        }
         let limits = limits.clone();
         tokio::task::spawn_blocking(move || {
             let ParsedMedia { index, metadata } = parsed;
@@ -149,21 +159,9 @@ impl PackagedAsset {
             encryption,
             hls_mux_audio,
             hls_aes128,
-            // Read by the step that decrypts, which comes next.
-            source_keys: _,
+            source_keys,
         } = extras;
-        // A protected source can only be read once the mapper gives the keys for it (TDD 0014).
-        // Until then it is refused, as it always was, rather than served as if it were clear.
-        if let Some(track) = index
-            .tracks
-            .iter()
-            .find(|track| track.source_protection.is_some())
-        {
-            return Err(Error::Unsupported(format!(
-                "track {}: encrypted media is not supported",
-                track.id
-            )));
-        }
+        let decryption = crate::cenc::AssetDecryption::new(&index.tracks, source_keys.as_deref())?;
         let plan = segment::plan(&index, segment_duration_ms, limits)?;
         let subtitles = prepare_subtitles(&index, subtitles)?;
         let protection = encryption
@@ -191,7 +189,7 @@ impl PackagedAsset {
             .collect::<Result<HashMap<_, _>>>()?;
         // Muxing needs a video and an audio track, and is not offered for encrypted content
         // yet: a fragment would need encryption boxes per track (TDD 0011).
-        let muxed = if hls_mux_audio && protection.is_none() {
+        let muxed = if hls_mux_audio && protection.is_none() && decryption.is_none() {
             let video = index
                 .tracks
                 .iter()
@@ -217,15 +215,23 @@ impl PackagedAsset {
             None
         };
         let encryption_ref = protection.as_ref().map(|p| p.encryption.as_ref());
+        let source_keys_ref = source_keys.as_deref().filter(|_| decryption.is_some());
         let version = version.unwrap_or_else(|| {
-            version_of(&index, &subtitles, encryption_ref, hls_aes128.as_deref())
+            version_of(
+                &index,
+                &subtitles,
+                encryption_ref,
+                hls_aes128.as_deref(),
+                source_keys_ref,
+            )
         });
         let rendered = RenderedManifests::render(
             Presentation::new(&index.tracks, &plan, &version)
                 .with_subtitles(&subtitles)
                 .with_encryption(encryption_ref)
                 .with_aes128(hls_aes128.as_deref())
-                .with_muxed_audio(muxed.is_some()),
+                .with_muxed_audio(muxed.is_some())
+                .with_iframes(decryption.is_none()),
         )?;
         Ok(Self {
             source,
@@ -238,6 +244,7 @@ impl PackagedAsset {
             subtitles,
             protection,
             aes128: hls_aes128,
+            decryption,
             muxed,
         })
     }
@@ -253,6 +260,14 @@ impl PackagedAsset {
             .with_encryption(self.encryption())
             .with_aes128(self.aes128.as_deref())
             .with_muxed_audio(self.muxed.is_some())
+            .with_iframes(self.decryption.is_none())
+    }
+
+    /// The key IDs (as UUIDs) of the protected tracks of the source, never the keys.
+    pub(crate) fn source_key_ids(&self) -> Vec<String> {
+        self.decryption
+            .as_ref()
+            .map_or_else(Vec::new, |decryption| decryption.key_ids().to_vec())
     }
 
     /// Whether every HLS media segment is encrypted whole, which leaves the asset HLS only
@@ -390,6 +405,24 @@ impl PackagedAsset {
                 sequence_number.saturating_sub(1),
             )));
         }
+        // A protected source is decrypted before anything else is done to its samples, so
+        // whatever encryption was chosen above takes the decrypted samples next (TDD 0014).
+        if let Some(decryption) = self.decryption.as_ref().and_then(|d| d.track(track.id)) {
+            let sizes = track
+                .samples
+                .range(segment.first_sample..segment.end_sample)
+                .map(|sample| sample.size)
+                .collect();
+            prepared.encryption = Some(Box::new(crate::cenc::PendingEncryption::Decrypt(
+                crate::cenc::PendingDecrypt {
+                    header: prepared.header.clone(),
+                    first_sample: track.samples.window_start() + segment.first_sample,
+                    sizes,
+                    decryption: Arc::clone(decryption),
+                    then: prepared.encryption.take(),
+                },
+            )));
+        }
         prepared
     }
 
@@ -439,6 +472,11 @@ impl PackagedAsset {
                 "an asset with key periods has no I-frame playlist",
             ));
         }
+        if self.decryption.is_some() {
+            return Err(Error::NotFound(
+                "a decrypted source has no I-frame playlist yet",
+            ));
+        }
         cached(&self.rendered.hls_iframes, || {
             Ok(hls::iframe_playlist(self.presentation())?.map(Manifest::from))
         })?
@@ -453,6 +491,11 @@ impl PackagedAsset {
         if self.presentation().rotating() {
             return Err(Error::NotFound(
                 "an asset with key periods has no I-frame playlist",
+            ));
+        }
+        if self.decryption.is_some() {
+            return Err(Error::NotFound(
+                "a decrypted source has no I-frame playlist yet",
             ));
         }
         let presentation = self.presentation();
@@ -621,7 +664,12 @@ impl PackagedAsset {
         let init = self.init_segments.values().map(Bytes::len).sum::<usize>()
             + self.muxed.as_ref().map_or(0, |muxed| muxed.init.len());
         let rendered = self.rendered.len();
+        let decryption = self
+            .decryption
+            .as_ref()
+            .map_or(0, crate::cenc::AssetDecryption::bytes);
         (samples as u64)
+            .saturating_add(decryption as u64)
             .saturating_add(init as u64)
             .saturating_add(rendered as u64)
             .saturating_add(
@@ -695,6 +743,7 @@ fn version_of(
     subtitles: &[Subtitle],
     encryption: Option<&crate::cenc::Encryption>,
     aes128: Option<&crate::cenc::Aes128>,
+    source_keys: Option<&crate::cenc::SourceKeys>,
 ) -> String {
     use std::fmt::Write;
 
@@ -728,6 +777,10 @@ fn version_of(
     if let Some(aes128) = aes128 {
         hasher.update(aes128.fingerprint());
     }
+    // Output decrypted under one key is not the output of another.
+    if let Some(source_keys) = source_keys {
+        hasher.update(source_keys.fingerprint());
+    }
     hasher
         .finalize()
         .iter()
@@ -744,27 +797,150 @@ mod tests {
 
     use super::*;
 
+    async fn load_protected(name: &str, keys: Option<serde_json::Value>) -> Result<PackagedAsset> {
+        let source = MediaSourceKind::Local(Arc::new(
+            LocalMediaSource::open(fixture_path(name)).unwrap(),
+        ));
+        let source_keys = keys.map(|keys| {
+            Arc::new(
+                serde_json::from_value::<crate::cenc::WireSourceEncryption>(keys)
+                    .unwrap()
+                    .validate()
+                    .unwrap(),
+            )
+        });
+        PackagedAsset::load_with(
+            source,
+            Extras {
+                source_keys,
+                ..Extras::default()
+            },
+            1000,
+            &LimitsConfig::default(),
+        )
+        .await
+    }
+
+    const SOURCE_KEY: &str = "00112233445566778899aabbccddeeff";
+
+    fn keys_for(key_id: &str, key: &str) -> serde_json::Value {
+        serde_json::json!({ "keys": [{ "key_id": key_id, "key": key }] })
+    }
+
     #[tokio::test]
-    async fn an_encrypted_source_is_refused_until_it_can_be_decrypted() {
-        for name in [
-            "h264-aac-cenc.mp4",
-            "h264-aac-cens.mp4",
-            "h264-aac-cbc1.mp4",
-            "h264-aac-cbcs.mp4",
-            "h264-aac-cenc-ffmpeg.mp4",
-            "h264-aac-cenc-whole-video.mp4",
-        ] {
-            let error =
-                PackagedAsset::load_local(fixture_path(name), 1000, &LimitsConfig::default())
-                    .await
-                    .err()
-                    .unwrap_or_else(|| panic!("{name} must not be served as if it were clear"))
-                    .to_string();
+    async fn what_cannot_be_decrypted_fails_the_asset_with_a_message_that_names_no_key() {
+        let flipped = SOURCE_KEY.replacen("00", "01", 1);
+        let id = "0123456789abcdef0123456789abcdef";
+        let cases = [
+            (
+                "h264-aac-cenc.mp4",
+                None,
+                "track 1: encrypted media is not supported",
+            ),
+            (
+                "h264-aac-cenc.mp4",
+                Some(keys_for("fedcba9876543210fedcba9876543210", SOURCE_KEY)),
+                "track 1: source_encryption has no key for key ID 01234567-89ab-cdef-0123-456789abcdef",
+            ),
+            // A wrong key is noticed when the NAL unit lengths are encrypted, so decrypting
+            // gives something that cannot be a sequence of NAL units.
+            (
+                "h264-aac-cenc-whole-video.mp4",
+                Some(keys_for(id, &flipped)),
+                "track 1: the source_encryption key does not decrypt it",
+            ),
+        ];
+        for (file, keys, expected) in cases {
+            let error = load_protected(file, keys)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{file} should not load"))
+                .to_string();
+            assert!(error.contains(expected), "{file}: {error}");
             assert!(
-                error.contains("encrypted media is not supported"),
-                "{name}: {error}"
+                !error.contains(SOURCE_KEY) && !error.contains(&flipped),
+                "{error}"
             );
         }
+    }
+
+    /// An edit list drops the leading audio samples that end before it starts, and the per-sample
+    /// IVs of the source are indexed from the first sample of the file's tables, not of the
+    /// trimmed track.
+    #[tokio::test]
+    async fn an_edit_list_that_drops_audio_samples_leaves_the_track_after_them_in_the_tables() {
+        let asset = load_protected(
+            "h264-aac-default-edits-cenc.mp4",
+            Some(keys_for("0123456789abcdef0123456789abcdef", SOURCE_KEY)),
+        )
+        .await
+        .unwrap();
+        let audio = asset
+            .index
+            .tracks
+            .iter()
+            .find(|track| track.kind == TrackKind::Audio)
+            .unwrap();
+        assert!(
+            audio.samples.window_start() > 0,
+            "priming samples were dropped"
+        );
+    }
+
+    /// The limit of the check above, pinned so that nobody takes it for more than it is: a wrong
+    /// key that matches the key ID decrypts a file that leaves its NAL lengths clear into
+    /// garbage, and nothing here can tell.
+    #[tokio::test]
+    async fn a_wrong_key_is_not_noticed_when_the_nal_lengths_are_clear() {
+        let flipped = SOURCE_KEY.replacen("00", "01", 1);
+        let keys = Some(keys_for("0123456789abcdef0123456789abcdef", &flipped));
+        for file in ["h264-aac-cenc.mp4", "h264-aac-cbcs.mp4"] {
+            let loaded = load_protected(file, keys.clone()).await;
+            assert!(loaded.is_ok(), "{file}");
+        }
+    }
+
+    #[tokio::test]
+    async fn keys_for_a_clear_file_change_nothing() {
+        let plain = load_protected("h264-aac.mp4", None).await.unwrap();
+        let keyed = load_protected(
+            "h264-aac.mp4",
+            Some(keys_for("0123456789abcdef0123456789abcdef", SOURCE_KEY)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(plain.version(), keyed.version());
+        assert!(keyed.source_key_ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_decrypted_source_has_no_muxed_audio_and_no_iframes() {
+        let source = MediaSourceKind::Local(Arc::new(
+            LocalMediaSource::open(fixture_path("h264-aac-cbcs.mp4")).unwrap(),
+        ));
+        let keys = serde_json::json!({ "keys": [{ "key_id": "0123456789abcdef0123456789abcdef", "key": SOURCE_KEY }] });
+        let asset = PackagedAsset::load_with(
+            source,
+            Extras {
+                hls_mux_audio: true,
+                source_keys: Some(Arc::new(
+                    serde_json::from_value::<crate::cenc::WireSourceEncryption>(keys)
+                        .unwrap()
+                        .validate()
+                        .unwrap(),
+                )),
+                ..Extras::default()
+            },
+            1000,
+            &LimitsConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!asset.is_muxed());
+        assert!(asset.hls_iframe_playlist().is_err());
+        assert!(asset.prepare_iframe(0).is_err());
+        let master = asset.hls_master_playlist();
+        assert!(!String::from_utf8_lossy(&master).contains("I-FRAME"));
     }
 
     #[tokio::test]
@@ -788,7 +964,7 @@ mod tests {
         assert!(asset.version().bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_ne!(asset.version(), moov_only);
         assert_eq!(
-            version_of(&asset.index, &[], None, None),
+            version_of(&asset.index, &[], None, None, None),
             asset.version(),
             "and it is stable"
         );

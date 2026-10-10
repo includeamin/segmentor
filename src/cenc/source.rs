@@ -4,11 +4,20 @@
 //! Block ciphers are used raw, as in `cipher`, because a library mode would chain or count
 //! through the bytes a pattern skips.
 
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
+
 use aes::Aes128;
 use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 
+use super::keys::uuid_string;
+use super::source_keys::SourceKeys;
 use crate::error::{Error, Result};
-use crate::media::{SourceScheme, Subsample};
+use crate::media::{
+    CodecConfig, SourceProtection, SourceScheme, Subsample, Track, TrackKind, iv16,
+};
+use crate::source::{ByteRange, MediaSourceKind, Metadata};
 
 /// Decrypts samples of one scheme under one key.
 pub(crate) struct SampleDecryptor {
@@ -164,10 +173,194 @@ impl<'a> CtrStream<'a> {
     }
 }
 
+/// Undoes the protection of one track: its per-sample data, and the cipher for its key.
+pub(crate) struct TrackDecryption {
+    decryptor: SampleDecryptor,
+    protection: Arc<SourceProtection>,
+}
+
+impl fmt::Debug for TrackDecryption {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TrackDecryption")
+            .field("scheme", &self.protection.scheme)
+            .field("key", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+impl TrackDecryption {
+    /// Decrypts `data`, the bytes of the track's sample `index` counted from the first sample of
+    /// the file's tables (see `SampleIndex::window_start`), in place.
+    pub(crate) fn decrypt_sample(&self, index: usize, data: &mut [u8]) -> Result<()> {
+        let aux = &self.protection.aux;
+        let iv = match aux.iv(index) {
+            Some(iv) => iv16(iv),
+            None => self.protection.constant_iv,
+        }
+        .ok_or_else(|| Error::InvalidMedia(format!("sample {index} has no IV")))?;
+        self.decryptor.decrypt(&iv, data, aux.subsamples(index))
+    }
+}
+
+impl TrackDecryption {
+    /// Whether the NAL unit length prefix at the start of sample `index` is left clear, so that
+    /// decrypting the sample cannot show whether the key was right.
+    fn leaves_prefix_clear(&self, index: usize, length_size: usize) -> bool {
+        self.protection
+            .aux
+            .subsamples(index)
+            .first()
+            .is_some_and(|first| usize::from(first.clear) >= length_size)
+    }
+}
+
+/// The tracks of an asset whose source protection is undone while serving (TDD 0014).
+#[derive(Debug)]
+pub(crate) struct AssetDecryption {
+    tracks: HashMap<u32, Arc<TrackDecryption>>,
+    /// Key IDs of the protected tracks, in UUID form, for status reporting.
+    key_ids: Vec<String>,
+}
+
+impl AssetDecryption {
+    /// `None` when no track is protected. A protected track the mapper gave no key for fails the
+    /// asset with the message an encrypted source has always had when nothing can read it.
+    pub(crate) fn new(tracks: &[Track], keys: Option<&SourceKeys>) -> Result<Option<Self>> {
+        let mut decryptions = HashMap::new();
+        let mut key_ids: Vec<String> = Vec::new();
+        for track in tracks {
+            let Some(protection) = &track.source_protection else {
+                continue;
+            };
+            let Some(keys) = keys else {
+                return Err(Error::Unsupported(format!(
+                    "track {}: encrypted media is not supported",
+                    track.id
+                )));
+            };
+            let key_id = uuid_string(&protection.key_id);
+            let key = keys
+                .key_for(&protection.key_id, track.kind)
+                .ok_or_else(|| {
+                    Error::Unsupported(format!(
+                        "track {}: source_encryption has no key for key ID {key_id}",
+                        track.id
+                    ))
+                })?;
+            decryptions.insert(
+                track.id,
+                Arc::new(TrackDecryption {
+                    decryptor: SampleDecryptor::new(
+                        key.bytes(),
+                        protection.scheme,
+                        protection.crypt_blocks,
+                        protection.skip_blocks,
+                    ),
+                    protection: Arc::clone(protection),
+                }),
+            );
+            if !key_ids.contains(&key_id) {
+                key_ids.push(key_id);
+            }
+        }
+        Ok((!decryptions.is_empty()).then_some(Self {
+            tracks: decryptions,
+            key_ids,
+        }))
+    }
+
+    pub(crate) fn track(&self, id: u32) -> Option<&Arc<TrackDecryption>> {
+        self.tracks.get(&id)
+    }
+
+    pub(crate) fn key_ids(&self) -> &[String] {
+        &self.key_ids
+    }
+
+    /// Memory held by the per-sample tables, for the index budget.
+    pub(crate) fn bytes(&self) -> usize {
+        self.tracks
+            .values()
+            .map(|track| track.protection.aux.bytes())
+            .sum()
+    }
+
+    /// A key decrypts to garbage without complaint, and a CDN would keep the garbage. Where it
+    /// can, this notices: the first sample of a video track is decrypted now, and its NAL unit
+    /// lengths must tile it exactly, which random bytes will not do.
+    ///
+    /// That only works when the length prefixes are themselves encrypted. Real encoders leave
+    /// each NAL unit's length and header clear and protect the rest, and decrypted slice data
+    /// looks like random bytes whether or not the key is right, so for those files (and for
+    /// codecs without NAL units) a wrong key cannot be told from a right one here.
+    pub(crate) async fn check_keys(
+        &self,
+        source: &MediaSourceKind,
+        metadata: &Metadata,
+        tracks: &[Track],
+    ) -> Result<()> {
+        for track in tracks.iter().filter(|track| track.kind == TrackKind::Video) {
+            let Some(decryption) = self.tracks.get(&track.id) else {
+                continue;
+            };
+            let (_, entry) = crate::fmp4::sample_entry(metadata, track.id)?;
+            let Some(length_size) = nal_length_size(&entry, &track.codec) else {
+                continue;
+            };
+            let first = track.samples.get(0);
+            if decryption.leaves_prefix_clear(track.samples.window_start(), length_size) {
+                continue;
+            }
+            let mut sample = source
+                .read_range(ByteRange::new(first.offset, u64::from(first.size)))
+                .await?
+                .to_vec();
+            decryption.decrypt_sample(track.samples.window_start(), &mut sample)?;
+            if !nal_units_tile(&sample, length_size) {
+                return Err(Error::InvalidMedia(format!(
+                    "track {}: the source_encryption key does not decrypt it",
+                    track.id
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The size of the length prefix of a NAL unit, from the codec's configuration box.
+fn nal_length_size(entry: &[u8], codec: &CodecConfig) -> Option<usize> {
+    let (name, offset) = match codec {
+        CodecConfig::Avc { .. } => (*b"avcC", 4),
+        CodecConfig::Hevc { .. } => (*b"hvcC", 21),
+        _ => return None,
+    };
+    let (_, _, children) = crate::mp4::codec::visual_entry(entry).ok()?;
+    let config = crate::mp4::boxes::optional_child(children, name).ok()??;
+    Some(usize::from(config.payload.get(offset)? & 3) + 1)
+}
+
+/// Whether length-prefixed NAL units cover `sample` exactly, with none empty.
+fn nal_units_tile(sample: &[u8], length_size: usize) -> bool {
+    let mut at = 0;
+    while at < sample.len() {
+        let Some(prefix) = sample.get(at..at + length_size) else {
+            return false;
+        };
+        let size = prefix
+            .iter()
+            .fold(0usize, |size, byte| (size << 8) | usize::from(*byte));
+        if size == 0 {
+            return false;
+        }
+        at += length_size + size;
+    }
+    at == sample.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::iv16;
 
     const KEY: [u8; 16] = [
         0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
@@ -282,6 +475,30 @@ mod tests {
                 .unwrap_err();
             assert!(error.to_string().contains("subsample"), "{error}");
         }
+    }
+
+    #[test]
+    fn nal_units_must_tile_the_sample_exactly() {
+        // Two NAL units of 3 and 2 bytes after 4-byte lengths.
+        let good = [0, 0, 0, 3, 1, 2, 3, 0, 0, 0, 2, 9, 9];
+        assert!(nal_units_tile(&good, 4));
+        assert!(
+            !nal_units_tile(&good[..12], 4),
+            "the last NAL unit is cut short"
+        );
+        assert!(
+            !nal_units_tile(&[0, 0, 0, 3, 1, 2, 3, 0, 0], 4),
+            "a prefix cut short"
+        );
+        assert!(
+            !nal_units_tile(&[0, 0, 0, 0, 0, 0, 0, 1, 1], 4),
+            "an empty NAL unit"
+        );
+        assert!(
+            !nal_units_tile(&[0xff; 12], 4),
+            "random bytes claim sizes far past the end"
+        );
+        assert!(nal_units_tile(&[0, 2, 1, 1], 2));
     }
 
     #[test]

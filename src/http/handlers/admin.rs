@@ -52,6 +52,8 @@ struct CachedAssetJson {
     encrypted: bool,
     /// Key IDs only; content keys never leave the process.
     key_ids: Vec<String>,
+    /// Key IDs of a source file that is already encrypted and is decrypted here (TDD 0014).
+    source_key_ids: Vec<String>,
 }
 
 impl From<RegistryStatus> for StatusResponse {
@@ -81,6 +83,7 @@ impl From<RegistryStatus> for StatusResponse {
                         duration_seconds: asset.duration_seconds,
                         encrypted: asset.key_ids.is_some(),
                         key_ids: asset.key_ids.unwrap_or_default(),
+                        source_key_ids: asset.source_key_ids,
                     })
                     .collect(),
             },
@@ -129,6 +132,7 @@ mod tests {
                     duration_seconds: 120.5,
                     encrypted: false,
                     key_ids: Vec::new(),
+                    source_key_ids: Vec::new(),
                 }],
             },
         };
