@@ -4718,9 +4718,345 @@ async fn ffmpeg_plays_an_adaptive_aes128_asset() {
 
 // ---- Encrypted source files (TDD 0014) ----
 
+/// The progressive fixtures protected by `tests/fixtures/protect-fixture.py`, one per scheme.
+const PROTECTED_SOURCES: [(&str, &str); 4] = [
+    ("cenc", "h264-aac-cenc.mp4"),
+    ("cens", "h264-aac-cens.mp4"),
+    ("cbc1", "h264-aac-cbc1.mp4"),
+    ("cbcs", "h264-aac-cbcs.mp4"),
+];
+
 /// The key all the protected fixtures are encrypted under.
 fn source_keys() -> serde_json::Value {
     serde_json::json!({ "keys": [{ "key_id": KEY_ID, "key": KEY }] })
+}
+
+/// `playlist` with every `?v=` URL version removed, so two assets' playlists can be compared.
+fn without_version(playlist: &str) -> String {
+    let mut out = String::new();
+    let mut rest = playlist;
+    while let Some(at) = rest.find("?v=") {
+        out.push_str(&rest[..at]);
+        rest = rest[at + 3..].trim_start_matches(|c: char| c.is_ascii_hexdigit());
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The media data of a fragment: what follows its `moof` and the header of its `mdat`.
+fn mdat_payload(segment: &[u8]) -> Vec<u8> {
+    let moof = u32::from_be_bytes(segment[..4].try_into().unwrap()) as usize;
+    assert_eq!(&segment[4..8], b"moof");
+    assert_eq!(&segment[moof + 4..moof + 8], b"mdat");
+    segment[moof + 8..].to_vec()
+}
+
+/// Every init and media segment of `track`, in order, of the HLS asset `id` at `version`.
+async fn track_segments(h: &Harness, id: &str, track: &str, version: &str) -> Vec<Bytes> {
+    let mut segments = Vec::new();
+    for uri in [format!("/hls/{id}/{track}/init.mp4?v={version}")] {
+        segments.push(fetch(&h.app, &uri).await.2);
+    }
+    let playlist = text(
+        &fetch(&h.app, &format!("/hls/{id}/{track}/index.m3u8"))
+            .await
+            .2,
+    );
+    for line in playlist
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        let path = line.split('?').next().unwrap();
+        let (code, _, bytes) =
+            fetch(&h.app, &format!("/hls/{id}/{track}/{path}?v={version}")).await;
+        assert_eq!(code, StatusCode::OK, "{id} {track} {path}");
+        segments.push(bytes);
+    }
+    segments
+}
+
+/// For each of the four schemes, the protected file is served exactly as the clear file it was
+/// made from: the same playlists, the same init segments, and the same bytes in every segment.
+#[tokio::test]
+async fn a_protected_source_is_served_exactly_as_its_clear_twin() {
+    // A decrypted source is not muxed yet, so the clear twin is served without muxed audio too.
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper
+        .state
+        .set("clear", Answer::file("v1", "h264-aac.mp4"));
+    for (scheme, file) in PROTECTED_SOURCES {
+        h.mapper.state.set(
+            &format!("src-{scheme}"),
+            Answer::file("v1", file).with_source_encryption(source_keys()),
+        );
+    }
+    let clear_master = fetch(&h.app, "/hls/clear/master.m3u8").await.2;
+    let clear_version = version_in(&clear_master);
+    let clear_dash = text(&fetch(&h.app, "/dash/clear/manifest.mpd").await.2);
+
+    for (scheme, _) in PROTECTED_SOURCES {
+        let id = format!("src-{scheme}");
+        let master = fetch(&h.app, &format!("/hls/{id}/master.m3u8")).await.2;
+        let version = version_in(&master);
+        assert_ne!(
+            version, clear_version,
+            "{scheme}: a key is part of the version"
+        );
+        // The one thing the clear twin has more: an I-frame stream.
+        let streams = |master: &Bytes| {
+            without_version(&text(master))
+                .lines()
+                .filter(|line| !line.starts_with("#EXT-X-I-FRAME-STREAM-INF"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            streams(&master),
+            streams(&clear_master),
+            "{scheme}: master playlist"
+        );
+        let master_text = text(&master);
+        assert!(!master_text.contains("EXT-X-KEY") && !master_text.contains("SESSION-KEY"));
+        assert!(
+            !master_text.contains("I-FRAME"),
+            "{scheme}: no I-frame stream yet"
+        );
+        let dash = text(&fetch(&h.app, &format!("/dash/{id}/manifest.mpd")).await.2);
+        assert_eq!(
+            without_version(&dash),
+            without_version(&clear_dash),
+            "{scheme}: DASH"
+        );
+        assert!(!dash.contains("ContentProtection"), "{scheme}");
+
+        for track in ["video", "audio-1"] {
+            let playlist = |id: &str| {
+                let h = &h;
+                let uri = format!("/hls/{id}/{track}/index.m3u8");
+                async move { without_version(&text(&fetch(&h.app, &uri).await.2)) }
+            };
+            assert_eq!(
+                playlist(&id).await,
+                playlist("clear").await,
+                "{scheme} {track}: playlist"
+            );
+            let served = track_segments(&h, &id, track, &version).await;
+            let clear = track_segments(&h, "clear", track, &clear_version).await;
+            assert_eq!(served.len(), clear.len(), "{scheme} {track}");
+            assert!(
+                served.len() >= 4,
+                "{scheme} {track}: an init segment and three segments"
+            );
+            for (index, (served, clear)) in served.iter().zip(&clear).enumerate() {
+                assert_eq!(served, clear, "{scheme} {track} part {index}");
+            }
+        }
+        assert_eq!(
+            status(&h.app, &format!("/hls/{id}/video/iframes.m3u8")).await,
+            StatusCode::NOT_FOUND,
+            "{scheme}"
+        );
+    }
+}
+
+/// A file with edit lists drops its leading audio samples and shifts its timeline, and the
+/// per-sample IVs and subsample maps must follow the samples that remain.
+#[tokio::test]
+async fn edit_lists_do_not_misalign_the_ivs_of_the_samples_that_remain() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper
+        .state
+        .set("clear", Answer::file("v1", "h264-aac-default-edits.mp4"));
+    h.mapper.state.set(
+        "edits",
+        Answer::file("v1", "h264-aac-default-edits-cenc.mp4").with_source_encryption(source_keys()),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/edits/master.m3u8").await.2);
+    let clear_version = version_in(&fetch(&h.app, "/hls/clear/master.m3u8").await.2);
+    for track in ["video", "audio-1"] {
+        let served = track_segments(&h, "edits", track, &version).await;
+        let clear = track_segments(&h, "clear", track, &clear_version).await;
+        assert_eq!(served, clear, "{track}");
+    }
+}
+
+/// A real encoder's file: its `senc`, `saio`, and `saiz`, its own timeline and edit lists. Its
+/// samples are the clear file's, so the media data served is the clear twin's, and `FFmpeg`
+/// decodes a segment with no key.
+#[tokio::test]
+async fn a_real_encoders_cenc_file_is_decrypted() {
+    let h = harness().await;
+    h.mapper
+        .state
+        .set("clear", Answer::file("v1", "h264-aac.mp4"));
+    h.mapper.state.set(
+        "real",
+        Answer::file("v1", "h264-aac-cenc-ffmpeg.mp4").with_source_encryption(source_keys()),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/real/master.m3u8").await.2);
+    let clear_version = version_in(&fetch(&h.app, "/hls/clear/master.m3u8").await.2);
+    for track in ["video", "audio-1"] {
+        let served = track_segments(&h, "real", track, &version).await;
+        let clear = track_segments(&h, "clear", track, &clear_version).await;
+        let payload = |parts: &[Bytes]| -> Vec<u8> {
+            parts[1..]
+                .iter()
+                .flat_map(|part| mdat_payload(part))
+                .collect()
+        };
+        assert_eq!(
+            payload(&served),
+            payload(&clear),
+            "{track}: every sample, decrypted"
+        );
+    }
+    if std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping the FFmpeg decode: ffmpeg is not installed");
+        return;
+    }
+    let directory =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/encrypted-source");
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut bytes = fetch(&h.app, &format!("/hls/real/video/init.mp4?v={version}"))
+        .await
+        .2
+        .to_vec();
+    bytes.extend_from_slice(
+        &fetch(
+            &h.app,
+            &format!("/hls/real/video/segments/1/media.m4s?v={version}"),
+        )
+        .await
+        .2,
+    );
+    let path = directory.join("real-video-segment-1.mp4");
+    std::fs::write(&path, bytes).unwrap();
+    assert_eq!(decode_errors(&path, None), "", "decodes with no key");
+}
+
+/// Decrypting and then encrypting under a new key is what encrypting the clear file under that
+/// key gives, byte for byte: so the decrypted samples are right and the new init segment replaces
+/// the source's `sinf`.
+#[tokio::test]
+async fn a_decrypted_source_can_be_encrypted_again() {
+    let h = harness().await;
+    let output =
+        serde_json::json!({ "scheme": "cbcs", "keys": [{ "key_id": KEY_ID_B, "key": KEY_B }] });
+    h.mapper.state.set(
+        "twin",
+        Answer::file("v1", "h264-aac.mp4").with_encryption(output.clone()),
+    );
+    h.mapper.state.set(
+        "aes-twin",
+        Answer::file("v1", "h264-aac.mp4").with_hls_aes128(AES_KEY, AES_KEY_URI),
+    );
+    let twin_version = version_in(&fetch(&h.app, "/hls/twin/master.m3u8").await.2);
+    let aes_version = version_in(&fetch(&h.app, "/hls/aes-twin/master.m3u8").await.2);
+    for (scheme, file) in PROTECTED_SOURCES {
+        let id = format!("again-{scheme}");
+        h.mapper.state.set(
+            &id,
+            Answer::file("v1", file)
+                .with_source_encryption(source_keys())
+                .with_encryption(output.clone()),
+        );
+        let aes_id = format!("aes-{scheme}");
+        h.mapper.state.set(
+            &aes_id,
+            Answer::file("v1", file)
+                .with_source_encryption(source_keys())
+                .with_hls_aes128(AES_KEY, AES_KEY_URI),
+        );
+        let version = version_in(&fetch(&h.app, &format!("/hls/{id}/master.m3u8")).await.2);
+        let aes = version_in(&fetch(&h.app, &format!("/hls/{aes_id}/master.m3u8")).await.2);
+        for track in ["video", "audio-1"] {
+            let served = track_segments(&h, &id, track, &version).await;
+            let twin = track_segments(&h, "twin", track, &twin_version).await;
+            assert_eq!(served, twin, "{scheme} {track}: cbcs under a new key");
+            if track == "video" {
+                // The source's own `sinf` is replaced, not kept beside the new one.
+                let sinf = served[0].windows(4).filter(|w| *w == b"sinf").count();
+                assert_eq!(sinf, 1, "{scheme}");
+                assert!(
+                    !served[0]
+                        .windows(4)
+                        .any(|w| w == b"cenc" || w == b"cens" || w == b"cbc1")
+                );
+            }
+            let served = track_segments(&h, &aes_id, track, &aes).await;
+            let twin = track_segments(&h, "aes-twin", track, &aes_version).await;
+            assert_eq!(served, twin, "{scheme} {track}: whole-segment AES-128");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_protected_source_that_cannot_be_decrypted_fails_to_load_without_naming_a_key() {
+    let h = harness().await;
+    let flipped = KEY.replacen("00", "01", 1);
+    let cases = [
+        ("no-keys", Answer::file("v1", "h264-aac-cenc.mp4")),
+        (
+            "other-key-id",
+            Answer::file("v1", "h264-aac-cenc.mp4").with_source_encryption(
+                serde_json::json!({ "keys": [{ "key_id": KEY_ID_B, "key": KEY }] }),
+            ),
+        ),
+        (
+            "wrong-key",
+            Answer::file("v1", "h264-aac-cenc-whole-video.mp4").with_source_encryption(
+                serde_json::json!({ "keys": [{ "key_id": KEY_ID, "key": flipped }] }),
+            ),
+        ),
+    ];
+    for (id, answer) in cases {
+        h.mapper.state.set(id, answer);
+        for uri in [
+            format!("/hls/{id}/master.m3u8"),
+            format!("/dash/{id}/manifest.mpd"),
+        ] {
+            let (code, _, body) = fetch(&h.app, &uri).await;
+            assert_eq!(code, StatusCode::INTERNAL_SERVER_ERROR, "{uri}");
+            let body = text(&body);
+            assert!(
+                !body.contains(KEY) && !body.contains(&flipped),
+                "{uri}: {body}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn admin_status_reports_source_key_ids_never_keys() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "src",
+        Answer::file("v1", "h264-aac-cenc.mp4").with_source_encryption(source_keys()),
+    );
+    h.mapper
+        .state
+        .set("plain", Answer::file("v1", "h264-aac.mp4"));
+    assert_eq!(status(&h.app, "/hls/src/master.m3u8").await, StatusCode::OK);
+    assert_eq!(
+        status(&h.app, "/hls/plain/master.m3u8").await,
+        StatusCode::OK
+    );
+
+    let body = fetch(&h.app, "/admin/status").await.2;
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let assets = json["cache"]["assets"].as_array().unwrap();
+    let find = |id: &str| assets.iter().find(|asset| asset["asset_id"] == id).unwrap();
+    assert_eq!(
+        find("src")["source_key_ids"],
+        serde_json::json!(["01234567-89ab-cdef-0123-456789abcdef"])
+    );
+    assert_eq!(find("src")["encrypted"], false, "it is served clear");
+    assert_eq!(find("plain")["source_key_ids"], serde_json::json!([]));
+    assert!(!String::from_utf8_lossy(&body).contains(KEY));
 }
 
 #[tokio::test]
@@ -4753,4 +5089,85 @@ async fn source_encryption_is_refused_where_it_is_not_supported_yet() {
             "{id}"
         );
     }
+}
+
+#[tokio::test]
+async fn re_keying_the_source_gives_new_urls_and_the_order_of_keys_does_not() {
+    let h = harness().await;
+    let other = serde_json::json!({ "key_id": KEY_ID_B, "key": KEY_B });
+    let right = serde_json::json!({ "key_id": KEY_ID, "key": KEY });
+    let answers = [
+        ("one", vec![right.clone()]),
+        ("two", vec![right.clone(), other.clone()]),
+        ("two-reordered", vec![other, right]),
+    ];
+    let mut versions = Vec::new();
+    for (id, keys) in answers {
+        h.mapper.state.set(
+            id,
+            Answer::file("v1", "h264-aac-cenc.mp4")
+                .with_source_encryption(serde_json::json!({ "keys": keys })),
+        );
+        versions.push(version_in(
+            &fetch(&h.app, &format!("/hls/{id}/master.m3u8")).await.2,
+        ));
+    }
+    assert_ne!(
+        versions[0], versions[1],
+        "another key entry is a different answer"
+    );
+    assert_eq!(versions[1], versions[2], "the order of the entries is not");
+}
+
+/// `HEAD`, a byte range, and the `ETag` on a decrypted segment: it is read and decrypted to learn
+/// its length, then answered like any other segment.
+#[tokio::test]
+async fn a_decrypted_segment_answers_head_ranges_and_etags() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "src",
+        Answer::file("v1", "h264-aac-cbcs.mp4").with_source_encryption(source_keys()),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/src/master.m3u8").await.2);
+    let uri = format!("/hls/src/video/segments/1/media.m4s?v={version}");
+    let (code, headers, whole) = fetch(&h.app, &uri).await;
+    assert_eq!(code, StatusCode::OK);
+    let etag = headers.get("etag").expect("an ETag").clone();
+
+    let head = h
+        .app
+        .clone()
+        .oneshot(Request::head(&uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(head.headers()["content-length"], whole.len().to_string());
+
+    let ranged = h
+        .app
+        .clone()
+        .oneshot(
+            Request::get(&uri)
+                .header("range", "bytes=100-299")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+    let ranged = to_bytes(ranged.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(ranged[..], whole[100..300]);
+
+    let conditional = h
+        .app
+        .clone()
+        .oneshot(
+            Request::get(&uri)
+                .header("if-none-match", etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(conditional.status(), StatusCode::NOT_MODIFIED);
 }

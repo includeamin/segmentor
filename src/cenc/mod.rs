@@ -17,12 +17,14 @@ pub(crate) use aes128::{Aes128, WireAes128};
 pub(crate) use keys::{Encryption, WireEncryption};
 pub(crate) use schedule::{ScheduledPeriod, schedule};
 pub(crate) use segment::{
-    AssetProtection, PendingCbcs, PendingClear, PendingEncryption, SegmentProtection,
+    AssetProtection, PendingCbcs, PendingClear, PendingDecrypt, PendingEncryption,
+    SegmentProtection,
 };
 pub(crate) use signal::{
     dash_content_protection, hls_key_lines, hls_key_none, hls_session_keys,
     hls_session_keys_for_sequence,
 };
+pub(crate) use source::AssetDecryption;
 pub(crate) use source_keys::{SourceKeys, WireSourceEncryption};
 
 /// See `fuzzing::exercise_avc_slice_header`.

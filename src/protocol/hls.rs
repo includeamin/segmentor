@@ -514,7 +514,7 @@ pub(crate) fn iframe_playlist(presentation: Presentation<'_>) -> Result<Option<S
     };
     // The fragments of an I-frame playlist are not encrypted whole, so an `AES-128` asset has none.
     // Nor does a rotating asset: a keyframe's fragment would need its period's key (TDD 0013).
-    if presentation.aes128().is_some() || presentation.rotating() {
+    if presentation.aes128().is_some() || presentation.rotating() || !presentation.iframes() {
         return Ok(None);
     }
     let version = presentation.version();
@@ -559,7 +559,7 @@ pub(crate) fn iframe_stream(
     };
     // The I-frame fragments are not encrypted whole, so an AES-128 asset does not offer them.
     // Nor does a rotating asset: a keyframe's fragment would need its period's key (TDD 0013).
-    if presentation.aes128().is_some() || presentation.rotating() {
+    if presentation.aes128().is_some() || presentation.rotating() || !presentation.iframes() {
         return Ok(None);
     }
     let frames = keyframes(track)?;

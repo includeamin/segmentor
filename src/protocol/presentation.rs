@@ -25,6 +25,9 @@ pub(crate) struct Presentation<'a> {
     encryption: Option<&'a crate::cenc::Encryption>,
     aes128: Option<&'a crate::cenc::Aes128>,
     muxed: bool,
+    /// Whether HLS offers I-frame playlists. Off for a decrypted source, whose keyframes would
+    /// need decrypting too (TDD 0014).
+    iframes: bool,
 }
 
 impl<'a> Presentation<'a> {
@@ -37,7 +40,17 @@ impl<'a> Presentation<'a> {
             encryption: None,
             aes128: None,
             muxed: false,
+            iframes: true,
         }
+    }
+
+    /// The same view, with I-frame playlists offered or not.
+    pub(crate) const fn with_iframes(self, iframes: bool) -> Self {
+        Self { iframes, ..self }
+    }
+
+    pub(crate) const fn iframes(&self) -> bool {
+        self.iframes
     }
 
     /// The same view, with every HLS media segment encrypted whole under `aes128` (TDD 0012).

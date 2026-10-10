@@ -249,6 +249,12 @@ for scheme in cenc cens cbc1 cbcs; do
         "$fixture_dir/h264-aac.mp4" "$fixture_dir/h264-aac-$scheme.mp4"
 done
 
+# A file with edit lists (FFmpeg's default output), protected: the audio track's leading priming
+# samples are dropped by the edit list, which must not shift which IV and subsample map each
+# remaining sample gets.
+python3 "$fixture_dir/protect-fixture.py" cenc \
+    "$fixture_dir/h264-aac-default-edits.mp4" "$fixture_dir/h264-aac-default-edits-cenc.mp4"
+
 # Video protected whole, with no subsample map, so even the NAL unit length prefixes are
 # encrypted: the one layout in which a wrong key can be noticed when the asset loads.
 python3 "$fixture_dir/protect-fixture.py" cenc \
