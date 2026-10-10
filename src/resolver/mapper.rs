@@ -121,6 +121,9 @@ struct Wire {
     /// Whole-segment HLS `AES-128` for a single file (TDD 0012).
     #[serde(default)]
     hls_aes128: Option<crate::cenc::WireAes128>,
+    /// Keys for a source that is already encrypted (TDD 0014). Validated before use.
+    #[serde(default)]
+    source_encryption: Option<crate::cenc::WireSourceEncryption>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -612,6 +615,18 @@ impl HttpResolver {
                 ));
             }
         }
+        let source_encryption = wire
+            .source_encryption
+            .as_ref()
+            .map(|source| source.validate().map(Arc::new))
+            .transpose()
+            .map_err(ResolveError::Rejected)?;
+        // Stage 1 of TDD 0014 reads one encrypted file; renditions and clips come later.
+        if source_encryption.is_some() && location.is_none() {
+            return Err(ResolveError::Rejected(
+                "source_encryption is supported for a single file only".to_owned(),
+            ));
+        }
         Ok(ResolvedAsset {
             location,
             renditions,
@@ -622,6 +637,7 @@ impl HttpResolver {
             hard_expiry,
             encryption,
             hls_aes128,
+            source_encryption,
         })
     }
 }

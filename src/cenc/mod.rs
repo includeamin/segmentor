@@ -11,6 +11,7 @@ mod schedule;
 mod segment;
 mod signal;
 mod source;
+mod source_keys;
 
 pub(crate) use aes128::{Aes128, WireAes128};
 pub(crate) use keys::{Encryption, WireEncryption};
@@ -22,6 +23,7 @@ pub(crate) use signal::{
     dash_content_protection, hls_key_lines, hls_key_none, hls_session_keys,
     hls_session_keys_for_sequence,
 };
+pub(crate) use source_keys::{SourceKeys, WireSourceEncryption};
 
 /// See `fuzzing::exercise_avc_slice_header`.
 pub(crate) fn fuzz_avc(data: &[u8]) {

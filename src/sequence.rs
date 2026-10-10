@@ -113,6 +113,7 @@ pub(crate) fn build(
                 // A sequence serves its own playlists; clips are never muxed (TDD 0011).
                 hls_mux_audio: false,
                 hls_aes128: aes128.cloned(),
+                source_keys: None,
             },
         )
         .map_err(named(position))?;

@@ -25,6 +25,8 @@ pub(crate) struct Extras {
     pub(crate) hls_mux_audio: bool,
     /// Whole-segment HLS `AES-128` (TDD 0012). Mutually exclusive with `encryption`.
     pub(crate) hls_aes128: Option<Arc<crate::cenc::Aes128>>,
+    /// Keys that undo the protection of a source that is already encrypted (TDD 0014).
+    pub(crate) source_keys: Option<Arc<crate::cenc::SourceKeys>>,
 }
 
 #[derive(Debug)]
@@ -147,6 +149,8 @@ impl PackagedAsset {
             encryption,
             hls_mux_audio,
             hls_aes128,
+            // Read by the step that decrypts, which comes next.
+            source_keys: _,
         } = extras;
         // A protected source can only be read once the mapper gives the keys for it (TDD 0014).
         // Until then it is refused, as it always was, rather than served as if it were clear.

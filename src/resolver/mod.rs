@@ -123,6 +123,8 @@ pub(crate) struct ResolvedAsset {
     /// Whole-segment HLS `AES-128` for a single file (TDD 0012); mutually exclusive with
     /// `encryption`.
     pub(crate) hls_aes128: Option<std::sync::Arc<crate::cenc::Aes128>>,
+    /// Keys that undo the protection of a source file that is already encrypted (TDD 0014).
+    pub(crate) source_encryption: Option<std::sync::Arc<crate::cenc::SourceKeys>>,
 }
 
 impl ResolvedAsset {
