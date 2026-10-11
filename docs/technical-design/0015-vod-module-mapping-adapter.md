@@ -161,7 +161,7 @@ Every refusal is the `502` an invalid native answer gets, with a message that na
 - **`tracks` and overrides in the native answer:** a two-audio file served with `a2`, `v1-a1`, `a0`; a selector that matches nothing; an empty selection; the renumbering; the URL version changing with the selection; language, label and default in the HLS and DASH output.
 - **Versions:** a re-signed URL does not change the version; a replaced file does; a changed `tracks` does; the order of sequences does.
 - **Mutations:** the window arithmetic, the `file_root` check, the `tracks` default and the refusal of an unknown clip type each get a mutation that a test must catch.
-- **Not testable here:** a real nginx-vod-module. It is AGPL-3.0 and not installed, so the translator is verified against the documented format only. Real, sanitized mapping responses and the `nginx.conf` `vod_*` directives from a deployment are the best possible fixtures and should be added when available; the shadow comparison of the migration guide is the end-to-end check.
+- **Not testable here:** a real nginx-vod-module. It is AGPL-3.0 and not installed, and **no real mapping response or `nginx.conf` was available when this was written**, so the translator is verified against the documented format only. Real services can differ from the README in small ways (field order, optional fields, path conventions). The strict policy turns such a difference into an error naming the JSON path, not into wrong output. The first real, sanitized mapping responses and `vod_*` directives from a deployment become fixtures, and the shadow comparison of the migration guide is the end-to-end check.
 
 ## Rollout
 
