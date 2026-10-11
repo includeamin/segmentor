@@ -307,6 +307,7 @@ pub(crate) fn version_of<'a>(
             &'a SourceIdentity,
             ClipWindow,
             Option<&'a crate::cenc::Encryption>,
+            Option<crate::media::TrackSelection>,
         ),
     >,
 ) -> String {
@@ -325,7 +326,7 @@ pub(crate) fn version_of<'a>(
         hasher.update(b"aes128");
         hasher.update(aes128.fingerprint());
     }
-    for (source, window, encryption) in clips {
+    for (source, window, encryption, tracks) in clips {
         hasher.update(
             source
                 .metadata_hash
@@ -345,6 +346,11 @@ pub(crate) fn version_of<'a>(
                 hasher.update(encryption.fingerprint());
             }
             None => hasher.update(b"clear"),
+        }
+        // Only when set, so a clip that serves every track keeps the version it always had.
+        if let Some(tracks) = tracks {
+            hasher.update(b"tracks");
+            hasher.update(tracks.canonical());
         }
     }
     hasher
@@ -737,32 +743,36 @@ mod tests {
         let index = parse("h264-aac.mp4");
         let other = parse("hevc-aac.mp4");
         let source = &index.source;
-        let base = version_of("v1", None, [(source, window(0, Some(2000)), None)]);
+        let base = version_of("v1", None, [(source, window(0, Some(2000)), None, None)]);
 
         assert_eq!(base.len(), 16);
         assert_eq!(
             base,
-            version_of("v1", None, [(source, window(0, Some(2000)), None)]),
+            version_of("v1", None, [(source, window(0, Some(2000)), None, None)]),
             "stable"
         );
         assert_ne!(
             base,
-            version_of("v1", None, [(source, window(0, Some(3000)), None)]),
+            version_of("v1", None, [(source, window(0, Some(3000)), None, None)]),
             "the window"
         );
         assert_ne!(
             base,
-            version_of("v1", None, [(source, window(0, None), None)]),
+            version_of("v1", None, [(source, window(0, None), None, None)]),
             "an open end"
         );
         assert_ne!(
             base,
-            version_of("v2", None, [(source, window(0, Some(2000)), None)]),
+            version_of("v2", None, [(source, window(0, Some(2000)), None, None)]),
             "the mapper version"
         );
         assert_ne!(
             base,
-            version_of("v1", None, [(&other.source, window(0, Some(2000)), None)]),
+            version_of(
+                "v1",
+                None,
+                [(&other.source, window(0, Some(2000)), None, None)]
+            ),
             "the content"
         );
         assert_ne!(
@@ -771,12 +781,43 @@ mod tests {
                 "v1",
                 None,
                 [
-                    (source, window(0, Some(2000)), None),
-                    (source, window(0, Some(2000)), None)
+                    (source, window(0, Some(2000)), None, None),
+                    (source, window(0, Some(2000)), None, None)
                 ],
             ),
             "the clip count"
         );
+    }
+
+    #[test]
+    fn the_version_covers_each_clips_track_selection_and_only_when_it_is_set() {
+        let index = parse("h264-aac.mp4");
+        let source = &index.source;
+        let pick = |text: &str| crate::media::TrackSelection::parse(text).ok();
+        let version = |tracks| version_of("v1", None, [(source, window(0, None), None, tracks)]);
+        let all = version(None);
+        let first = version(pick("v1-a1"));
+        let second = version(pick("v1-a2"));
+        assert_ne!(all, first, "serving fewer tracks is other media");
+        assert_ne!(first, second, "so is serving other tracks");
+        assert_eq!(
+            first,
+            version(pick("a1-v1")),
+            "however the selector is spelled"
+        );
+
+        // Two clips: changing only the second's selection changes the whole sequence's version.
+        let two = |second_tracks| {
+            version_of(
+                "v1",
+                None,
+                [
+                    (source, window(0, Some(1000)), None, None),
+                    (source, window(1000, None), None, second_tracks),
+                ],
+            )
+        };
+        assert_ne!(two(None), two(pick("v1")));
     }
 
     #[test]
@@ -785,9 +826,9 @@ mod tests {
         let source = &index.source;
         let one = crate::cenc::tests_support::sample_encryption();
         let other = crate::cenc::tests_support::rekeyed_encryption();
-        let clear = version_of("v1", None, [(source, window(0, None), None)]);
-        let encrypted = version_of("v1", None, [(source, window(0, None), Some(&one))]);
-        let rekeyed = version_of("v1", None, [(source, window(0, None), Some(&other))]);
+        let clear = version_of("v1", None, [(source, window(0, None), None, None)]);
+        let encrypted = version_of("v1", None, [(source, window(0, None), Some(&one), None)]);
+        let rekeyed = version_of("v1", None, [(source, window(0, None), Some(&other), None)]);
 
         assert_ne!(
             clear, encrypted,
@@ -801,16 +842,16 @@ mod tests {
             "v1",
             None,
             [
-                (source, window(0, Some(1000)), None),
-                (source, window(1000, None), Some(&one)),
+                (source, window(0, Some(1000)), None, None),
+                (source, window(1000, None), Some(&one), None),
             ],
         );
         let rekeyed_second = version_of(
             "v1",
             None,
             [
-                (source, window(0, Some(1000)), None),
-                (source, window(1000, None), Some(&other)),
+                (source, window(0, Some(1000)), None, None),
+                (source, window(1000, None), Some(&other), None),
             ],
         );
         assert_ne!(

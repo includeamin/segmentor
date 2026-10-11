@@ -5506,3 +5506,179 @@ async fn a_selection_is_applied_before_a_protected_source_is_decrypted() {
         track_segments(&h, "clear", "video", &clear_version).await
     );
 }
+
+/// A rendition can serve only some tracks of its file, as the answer as a whole can.
+#[tokio::test]
+async fn a_rendition_can_serve_only_some_tracks_of_its_file() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper
+        .state
+        .set("full", Answer::file("v1", "h264-aac-two-audio.mp4"));
+    h.mapper.state.set(
+        "ladder",
+        Answer::renditions("v1", &[("main", "h264-aac-two-audio.mp4")]).with_rendition_field(
+            "main",
+            "tracks",
+            serde_json::json!("v1-a2"),
+        ),
+    );
+    let full_version = version_in(&fetch(&h.app, "/hls/full/master.m3u8").await.2);
+    let master = text(&fetch(&h.app, "/hls/ladder/master.m3u8").await.2);
+    let version = version_in(&master.clone().into());
+    let lines = audio_lines(&master);
+    assert_eq!(lines.len(), 1, "{master}");
+    assert!(lines[0].contains("LANGUAGE=\"spa\""), "{lines:?}");
+
+    assert_eq!(
+        track_segments(&h, "ladder", "video-main", &version).await,
+        track_segments(&h, "full", "video", &full_version).await
+    );
+    assert_eq!(
+        track_segments(&h, "ladder", "audio-1", &version).await,
+        track_segments(&h, "full", "audio-2", &full_version).await,
+        "the Spanish track of the file, now the group's only audio"
+    );
+}
+
+/// The usual ladder: video from one file, and the audio, alone, from a track of another.
+#[tokio::test]
+async fn one_audio_track_of_a_file_can_be_a_renditions_whole_contribution() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper.state.set(
+        "movie",
+        Answer::renditions(
+            "v1",
+            &[
+                ("hi", "rendition-720p.mp4"),
+                ("es", "h264-aac-two-audio.mp4"),
+            ],
+        )
+        .with_rendition_field("hi", "tracks", serde_json::json!("v1"))
+        .with_rendition_field("es", "tracks", serde_json::json!("a2")),
+    );
+    let master = text(&fetch(&h.app, "/hls/movie/master.m3u8").await.2);
+    let lines = audio_lines(&master);
+    assert_eq!(lines.len(), 1, "{master}");
+    assert!(lines[0].contains("LANGUAGE=\"spa\""), "{lines:?}");
+    let version = version_in(&master.into());
+    assert_eq!(
+        status(
+            &h.app,
+            &format!("/hls/movie/audio-1/segments/0/media.m4s?v={version}")
+        )
+        .await,
+        StatusCode::OK
+    );
+    let dash = text(&fetch(&h.app, "/dash/movie/manifest.mpd").await.2);
+    assert!(
+        dash.contains("lang=\"spa\"") && !dash.contains("lang=\"eng\""),
+        "{dash}"
+    );
+}
+
+#[tokio::test]
+async fn a_renditions_bad_selection_names_the_rendition() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "nothing",
+        Answer::renditions(
+            "v1",
+            &[("a", "rendition-480p.mp4"), ("b", "rendition-720p.mp4")],
+        )
+        .with_rendition_field("b", "tracks", serde_json::json!("a9")),
+    );
+    assert_eq!(
+        status(&h.app, "/hls/nothing/master.m3u8").await,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    h.mapper.state.set(
+        "malformed",
+        Answer::renditions("v1", &[("a", "rendition-480p.mp4")]).with_rendition_field(
+            "a",
+            "tracks",
+            serde_json::json!("x1"),
+        ),
+    );
+    assert_eq!(
+        status(&h.app, "/hls/malformed/master.m3u8").await,
+        StatusCode::BAD_GATEWAY
+    );
+}
+
+/// A clip can pick tracks too. One clip of the whole file is the file served alone.
+#[tokio::test]
+async fn a_clip_can_serve_only_some_tracks_of_its_file() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper.state.set(
+        "second",
+        Answer::file("v1", "h264-aac-two-audio.mp4").with_tracks("v1-a2"),
+    );
+    h.mapper.state.set(
+        "one",
+        Answer::clips("v1", &[clip("h264-aac-two-audio.mp4", None, None)]).with_clip_field(
+            0,
+            "tracks",
+            serde_json::json!("v1-a2"),
+        ),
+    );
+    h.mapper.state.set(
+        "two",
+        Answer::clips(
+            "v1",
+            &[
+                clip("h264-aac-two-audio.mp4", Some(0), Some(1000)),
+                clip("h264-aac-two-audio.mp4", Some(1000), Some(2000)),
+            ],
+        )
+        .with_clip_field(0, "tracks", serde_json::json!("v1-a2"))
+        .with_clip_field(1, "tracks", serde_json::json!("v1-a2")),
+    );
+    let second_version = version_in(&fetch(&h.app, "/hls/second/master.m3u8").await.2);
+    let one_version = version_in(&fetch(&h.app, "/hls/one/master.m3u8").await.2);
+    for track in ["video", "audio-1"] {
+        assert_eq!(
+            track_segments(&h, "one", track, &one_version).await[1..],
+            track_segments(&h, "second", track, &second_version).await[1..],
+            "{track}: the same media segments"
+        );
+    }
+    let master = text(&fetch(&h.app, "/hls/two/master.m3u8").await.2);
+    let lines = audio_lines(&master);
+    assert_eq!(lines.len(), 1, "{master}");
+    assert!(lines[0].contains("LANGUAGE=\"spa\""), "{lines:?}");
+}
+
+#[tokio::test]
+async fn changing_a_members_selection_under_the_same_version_reloads_the_asset() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper.state.always_full.store(true, Ordering::SeqCst);
+    let ladder = |tracks: &str| {
+        let mut answer = Answer::renditions("v1", &[("main", "h264-aac-two-audio.mp4")])
+            .with_rendition_field("main", "tracks", serde_json::json!(tracks));
+        answer.ttl_seconds = Some(0);
+        answer
+    };
+    h.mapper.state.set("ladder", ladder("v1-a1"));
+    let before = text(&fetch(&h.app, "/hls/ladder/master.m3u8").await.2);
+    assert!(before.contains("LANGUAGE=\"eng\""), "{before}");
+    h.mapper.state.set("ladder", ladder("v1-a2"));
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let after = text(&fetch(&h.app, "/hls/ladder/master.m3u8").await.2);
+    assert!(
+        after.contains("LANGUAGE=\"spa\"") && !after.contains("LANGUAGE=\"eng\""),
+        "{after}"
+    );
+
+    let sequence = |tracks: &str| {
+        let mut answer = Answer::clips("v1", &[clip("h264-aac-two-audio.mp4", None, None)])
+            .with_clip_field(0, "tracks", serde_json::json!(tracks));
+        answer.ttl_seconds = Some(0);
+        answer
+    };
+    h.mapper.state.set("seq", sequence("v1-a1"));
+    let before = version_in(&fetch(&h.app, "/hls/seq/master.m3u8").await.2);
+    h.mapper.state.set("seq", sequence("v1-a2"));
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let after = version_in(&fetch(&h.app, "/hls/seq/master.m3u8").await.2);
+    assert_ne!(before, after, "another selection, other URLs");
+}
