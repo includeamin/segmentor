@@ -563,6 +563,7 @@ impl AssetRegistry {
                 && old.encryption == new.encryption
                 && old.hls_aes128 == new.hls_aes128
                 && old.source_encryption == new.source_encryption
+                && old.tracks == new.tracks
                 // Each clip's own window and encryption override (TDD 0009, "Different keys per
                 // clip"); empty for non-clip assets, so this is a no-op there. Deliberately not a
                 // location comparison: that is `old_locations`/`new_locations` below, compared
@@ -778,6 +779,7 @@ impl AssetRegistry {
                 hls_mux_audio: self.settings.hls_mux_audio,
                 hls_aes128: resolved.hls_aes128.clone(),
                 source_keys: resolved.source_encryption.clone(),
+                tracks: resolved.tracks,
             },
             self.settings.segment_duration_ms,
             &self.limits,

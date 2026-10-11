@@ -125,6 +125,8 @@ pub(crate) struct ResolvedAsset {
     pub(crate) hls_aes128: Option<std::sync::Arc<crate::cenc::Aes128>>,
     /// Keys that undo the protection of a source file that is already encrypted (TDD 0014).
     pub(crate) source_encryption: Option<std::sync::Arc<crate::cenc::SourceKeys>>,
+    /// Which tracks of a single file to serve; all of them when absent (TDD 0015).
+    pub(crate) tracks: Option<crate::media::TrackSelection>,
 }
 
 impl ResolvedAsset {
