@@ -4880,6 +4880,45 @@ async fn edit_lists_do_not_misalign_the_ivs_of_the_samples_that_remain() {
     }
 }
 
+/// HEVC hides its codec string in the `hvcC` of an entry that `sinf` renamed: the playlists must
+/// still say `hvc1`/`hev1` with the profile and level, as the clear file's do, and the segments
+/// must be the clear file's.
+#[tokio::test]
+async fn a_protected_hevc_source_is_served_as_the_clear_twin_with_the_same_codec_string() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper
+        .state
+        .set("clear", Answer::file("v1", "hevc-aac.mp4"));
+    h.mapper.state.set(
+        "src",
+        Answer::file("v1", "hevc-aac-cenc.mp4").with_source_encryption(source_keys()),
+    );
+    let master = text(&fetch(&h.app, "/hls/src/master.m3u8").await.2);
+    let clear_master = text(&fetch(&h.app, "/hls/clear/master.m3u8").await.2);
+    assert!(!master.contains("encv"), "{master}");
+    let codecs = |master: &str| {
+        master
+            .lines()
+            // The clear twin has an I-frame stream too; a decrypted source does not yet.
+            .filter(|line| !line.starts_with("#EXT-X-I-FRAME-STREAM-INF"))
+            .filter_map(|line| line.split("CODECS=\"").nth(1))
+            .map(|rest| rest.split('"').next().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(codecs(&master), codecs(&clear_master));
+    assert!(!codecs(&master).is_empty());
+    let dash = text(&fetch(&h.app, "/dash/src/manifest.mpd").await.2);
+    assert!(!dash.contains("encv"), "{dash}");
+
+    let version = version_in(&fetch(&h.app, "/hls/src/master.m3u8").await.2);
+    let clear_version = version_in(&fetch(&h.app, "/hls/clear/master.m3u8").await.2);
+    for track in ["video", "audio-1"] {
+        let served = track_segments(&h, "src", track, &version).await;
+        let clear = track_segments(&h, "clear", track, &clear_version).await;
+        assert_eq!(served, clear, "{track}");
+    }
+}
+
 /// A real encoder's file: its `senc`, `saio`, and `saiz`, its own timeline and edit lists. Its
 /// samples are the clear file's, so the media data served is the clear twin's, and `FFmpeg`
 /// decodes a segment with no key.

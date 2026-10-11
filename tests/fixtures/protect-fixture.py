@@ -87,8 +87,9 @@ def sample_table(stbl):
     return sizes, result
 
 
-def nal_subsamples(sample, length_size, whole_blocks):
+def nal_subsamples(sample, length_size, header_size, whole_blocks):
     """One subsample per NAL unit: the length prefix and NAL header clear, the rest protected.
+    The NAL header is 1 byte in H.264 and 2 in HEVC.
 
     With `whole_blocks` (cbc1, which cannot leave a partial block inside a protected range) the
     remainder after the last whole 16-byte block joins the clear bytes at the front instead.
@@ -97,10 +98,10 @@ def nal_subsamples(sample, length_size, whole_blocks):
     at = 0
     while at < len(sample):
         size = int.from_bytes(sample[at:at + length_size], "big")
-        assert size >= 1 and at + length_size + size <= len(sample), "malformed NAL unit"
-        rest = size - 1
+        assert size >= header_size and at + length_size + size <= len(sample), "malformed NAL unit"
+        rest = size - header_size
         extra = rest % 16 if whole_blocks else 0
-        subsamples.append((length_size + 1 + extra, rest - extra))
+        subsamples.append((length_size + header_size + extra, rest - extra))
         at += length_size + size
     return subsamples
 
@@ -142,9 +143,13 @@ def protect_track(trak, track_index, scheme, config, data, whole_video):
     entry_size, entry_name = struct.unpack(">I4s", stsd.payload[8:16])
     entry = stsd.payload[16:8 + entry_size]
     length_size = 4
-    if video:
-        avcc = entry.index(b"avcC")
-        length_size = (entry[avcc + 4 + 4] & 3) + 1
+    header_size = 1
+    if video and b"hvcC" in entry:
+        # HEVC: lengthSizeMinusOne is in byte 21 of the configuration, and NAL headers are 2 bytes.
+        length_size = (entry[entry.index(b"hvcC") + 4 + 21] & 3) + 1
+        header_size = 2
+    elif video:
+        length_size = (entry[entry.index(b"avcC") + 4 + 4] & 3) + 1
     sizes, offsets = sample_table(stbl)
 
     rows = []
@@ -152,7 +157,7 @@ def protect_track(trak, track_index, scheme, config, data, whole_video):
         plain = bytes(data[offset:offset + size])
         subsamples = []
         if video and not whole_video:
-            subsamples = nal_subsamples(plain, length_size, scheme == "cbc1")
+            subsamples = nal_subsamples(plain, length_size, header_size, scheme == "cbc1")
         digest = hashlib.sha256(b"iv %d %d" % (track_index, index)).digest()
         iv = digest[:16] if config["iv_size"] != 8 else digest[:8] + bytes(8)
         if config["iv_size"] == 0:

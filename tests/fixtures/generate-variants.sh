@@ -255,6 +255,10 @@ done
 python3 "$fixture_dir/protect-fixture.py" cenc \
     "$fixture_dir/h264-aac-default-edits.mp4" "$fixture_dir/h264-aac-default-edits-cenc.mp4"
 
+# HEVC, protected: its codec string comes from the `hvcC` of the entry the protection hides.
+python3 "$fixture_dir/protect-fixture.py" cenc \
+    "$fixture_dir/hevc-aac.mp4" "$fixture_dir/hevc-aac-cenc.mp4"
+
 # Video protected whole, with no subsample map, so even the NAL unit length prefixes are
 # encrypted: the one layout in which a wrong key can be noticed when the asset loads.
 python3 "$fixture_dir/protect-fixture.py" cenc \

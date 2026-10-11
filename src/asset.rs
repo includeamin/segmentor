@@ -123,7 +123,12 @@ impl PackagedAsset {
             crate::cenc::AssetDecryption::new(&parsed.index.tracks, extras.source_keys.as_deref())?
         {
             decryption
-                .check_keys(&source, &parsed.metadata, &parsed.index.tracks)
+                .check_keys(
+                    &source,
+                    &parsed.metadata,
+                    &parsed.index.tracks,
+                    limits.max_segment_bytes,
+                )
                 .await?;
         }
         let limits = limits.clone();
@@ -885,6 +890,45 @@ mod tests {
             audio.samples.window_start() > 0,
             "priming samples were dropped"
         );
+    }
+
+    /// The check reads a whole sample, so it reads none a segment could not hold (that sample's
+    /// segment would be refused when asked for): a file cannot make the load allocate whatever
+    /// size its first sample claims.
+    #[tokio::test]
+    async fn the_key_check_does_not_read_a_sample_larger_than_a_segment_may_be() {
+        let flipped = SOURCE_KEY.replacen("00", "01", 1);
+        let keys = serde_json::from_value::<crate::cenc::WireSourceEncryption>(keys_for(
+            "0123456789abcdef0123456789abcdef",
+            &flipped,
+        ))
+        .unwrap()
+        .validate()
+        .unwrap();
+        let load = |max_segment_bytes: u64| {
+            let keys = keys.clone();
+            async move {
+                let source = MediaSourceKind::Local(Arc::new(
+                    LocalMediaSource::open(fixture_path("h264-aac-cenc-whole-video.mp4")).unwrap(),
+                ));
+                PackagedAsset::load_with(
+                    source,
+                    Extras {
+                        source_keys: Some(Arc::new(keys)),
+                        ..Extras::default()
+                    },
+                    1000,
+                    &LimitsConfig {
+                        max_segment_bytes,
+                        ..LimitsConfig::default()
+                    },
+                )
+                .await
+            }
+        };
+        // With room for the sample the wrong key is noticed; with none, the sample is not read.
+        assert!(load(64 * 1024 * 1024).await.is_err());
+        assert!(load(2000).await.is_ok());
     }
 
     /// The limit of the check above, pinned so that nobody takes it for more than it is: a wrong
