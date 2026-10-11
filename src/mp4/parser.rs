@@ -343,15 +343,20 @@ fn parse_track(
     if samples.is_empty() {
         return Err(invalid_media(&format!("track {} has no samples", raw.id)));
     }
-    let source_protection = match sinf {
-        Some(_) if matches!(source, TrackSource::Fragmented { .. }) => {
-            return Err(Error::Unsupported(format!(
-                "track {}: encrypted fragmented files are not supported yet",
-                raw.id
-            )));
+    let source_protection = match (sinf, source) {
+        (Some(sinf), TrackSource::Tables) => {
+            protection::read_protection(raw.id, &sinf, stbl.payload, samples.len())?
         }
-        Some(sinf) => protection::read_protection(raw.id, &sinf, stbl.payload, samples.len())?,
-        None => None,
+        (Some(sinf), TrackSource::Fragmented { fragments, .. }) => {
+            protection::read_fragmented_protection(
+                raw.id,
+                &sinf,
+                stbl.payload,
+                fragments,
+                samples.len(),
+            )?
+        }
+        (None, _) => None,
     };
     let edit = track_edit(raw, movie_timescale, header.timescale)?;
 
@@ -1448,6 +1453,68 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A fragmented file keeps each sample's IV in the `senc` of its own `traf`: the samples of
+    /// every fragment, in order, are the ones the IVs were derived for.
+    #[test]
+    fn every_sample_of_every_fragment_has_the_iv_made_for_it() {
+        let cases = [
+            (
+                "h264-aac-fragmented-cmaf-cenc.mp4",
+                crate::media::SourceScheme::Cenc,
+                8,
+            ),
+            (
+                "h264-aac-fragmented-cmaf-cens.mp4",
+                crate::media::SourceScheme::Cens,
+                8,
+            ),
+            (
+                "h264-aac-fragmented-cmaf-cbc1.mp4",
+                crate::media::SourceScheme::Cbc1,
+                16,
+            ),
+        ];
+        for (name, scheme, iv_size) in cases {
+            let (video_track, audio_track) = protected_tracks(name);
+            for (number, track) in [&video_track, &audio_track].into_iter().enumerate() {
+                let protection = protection(track);
+                assert_eq!(protection.scheme, scheme, "{name}");
+                let count = track.samples.len();
+                assert!(count > 40, "{name}: the samples of several fragments");
+                for index in 0..count {
+                    assert_eq!(
+                        protection.aux.iv(index),
+                        Some(&fixture_iv(number, index, iv_size)[..]),
+                        "{name} track {number} sample {index}"
+                    );
+                }
+                assert!(protection.aux.iv(count).is_none(), "{name}");
+            }
+            // Video is protected NAL by NAL and each map covers its sample exactly.
+            let video = protection(&video_track);
+            for index in 0..video_track.samples.len() {
+                let total: u64 = video
+                    .aux
+                    .subsamples(index)
+                    .iter()
+                    .map(|s| u64::from(s.clear) + u64::from(s.protected))
+                    .sum();
+                assert_eq!(
+                    total,
+                    u64::from(video_track.samples.size(index)),
+                    "{name} {index}"
+                );
+            }
+        }
+        let (video, audio) = protected_tracks("h264-aac-fragmented-cmaf-cbcs.mp4");
+        for track in [&video, &audio] {
+            assert_eq!(protection(track).constant_iv.map(|iv| iv[0]), Some(0xc0));
+            assert!(protection(track).aux.iv(0).is_none());
+        }
+        assert!(!protection(&video).aux.subsamples(0).is_empty());
+        assert_eq!(protection(&audio).aux.bytes(), 0, "audio needs no senc");
     }
 
     #[test]

@@ -6,9 +6,12 @@
 
 use std::sync::Arc;
 
-use super::boxes::{Reader, fourcc, invalid_media, optional_child, required_child};
+use super::boxes::{
+    RawBox, Reader, box_payload, child_boxes, fourcc, invalid_media, optional_child, required_child,
+};
 use crate::error::{Error, Result};
 use crate::media::{AuxTable, SourceProtection, SourceScheme, Subsample, iv16};
+use crate::source::Fragment;
 
 /// What `sinf` says about a track.
 #[derive(Debug)]
@@ -105,19 +108,16 @@ pub(super) fn read_protection(
     // Checked before the default: a clear lead is a track whose default says unprotected and
     // whose later samples a `seig` group says are protected, and reading it as clear would serve
     // them as ciphertext.
-    for group in super::boxes::child_boxes(stbl)? {
-        // A `roll` group (AAC priming) is harmless; one that changes the key is not read.
-        if group.name == *b"sgpd" && group.payload.get(4..8) == Some(b"seig") {
-            return Err(unsupported(
-                "a sample group that changes the key (seig) is not supported",
-            ));
-        }
-    }
+    refuse_key_changes(track_id, &child_boxes(stbl)?)?;
     if !sinf.is_protected {
         return Ok(None);
     }
     let aux = match optional_child(stbl, *b"senc")? {
-        Some(senc) => read_senc(track_id, senc.payload, sinf.iv_size, sample_count)?,
+        Some(senc) => {
+            let mut builder = AuxBuilder::new(sinf.iv_size, sample_count);
+            builder.push_senc(track_id, senc.payload, sample_count, "the track")?;
+            builder.finish()
+        }
         None if optional_child(stbl, *b"saiz")?.is_some() => {
             return Err(unsupported(
                 "sample auxiliary information without a senc box is not supported",
@@ -130,7 +130,85 @@ pub(super) fn read_protection(
             ));
         }
     };
-    Ok(Some(Arc::new(SourceProtection {
+    Ok(Some(protection_of(sinf, aux)))
+}
+
+/// The protection of a track of a fragmented file: its `moov` sample table is empty, and each
+/// `traf` of the track carries a `senc` for the samples of its own `trun` boxes (TDD 0014).
+pub(super) fn read_fragmented_protection(
+    track_id: u32,
+    sinf: &Sinf,
+    stbl: &[u8],
+    fragments: &[Fragment],
+    sample_count: usize,
+) -> Result<Option<Arc<SourceProtection>>> {
+    let unsupported = |what: &str| Error::Unsupported(format!("track {track_id}: {what}"));
+    refuse_key_changes(track_id, &child_boxes(stbl)?)?;
+    let mut builder = AuxBuilder::new(sinf.iv_size, sample_count);
+    for fragment in fragments {
+        let moof = box_payload(&fragment.bytes, 0)?;
+        for traf in child_boxes(moof.payload)?
+            .into_iter()
+            .filter(|child| child.name == *b"traf")
+        {
+            // The track ID follows the version and flags of `tfhd`.
+            let tfhd = required_child(traf.payload, *b"tfhd")?;
+            if tfhd.payload.get(4..8) != Some(&track_id.to_be_bytes()[..]) {
+                continue;
+            }
+            let parts = child_boxes(traf.payload)?;
+            refuse_key_changes(track_id, &parts)?;
+            if !sinf.is_protected {
+                continue;
+            }
+            let samples = parts.iter().filter(|part| part.name == *b"trun").try_fold(
+                0usize,
+                |total, trun| {
+                    let count = trun
+                        .payload
+                        .get(4..8)
+                        .ok_or_else(|| invalid_media("trun is truncated"))?;
+                    let count =
+                        usize::try_from(u32::from_be_bytes(count.try_into().expect("four bytes")))
+                            .map_err(|_| {
+                                invalid_media("trun sample count does not fit in memory")
+                            })?;
+                    total
+                        .checked_add(count)
+                        .ok_or_else(|| invalid_media("trun sample counts overflow"))
+                },
+            )?;
+            match parts.iter().find(|part| part.name == *b"senc") {
+                Some(senc) => builder.push_senc(track_id, senc.payload, samples, "the fragment")?,
+                None if parts.iter().any(|part| part.name == *b"saiz") => {
+                    return Err(unsupported(
+                        "sample auxiliary information without a senc box is not supported",
+                    ));
+                }
+                None if sinf.constant_iv.is_some() => builder.push_unlisted(samples)?,
+                None => {
+                    return Err(unsupported(
+                        "a protected track needs a senc box in every fragment, or a constant IV",
+                    ));
+                }
+            }
+        }
+    }
+    if !sinf.is_protected {
+        return Ok(None);
+    }
+    if builder.samples() != sample_count {
+        return Err(Error::InvalidMedia(format!(
+            "track {track_id}: the fragments' senc boxes describe {} samples, the track has \
+             {sample_count}",
+            builder.samples()
+        )));
+    }
+    Ok(Some(protection_of(sinf, builder.finish())))
+}
+
+fn protection_of(sinf: &Sinf, aux: AuxTable) -> Arc<SourceProtection> {
+    Arc::new(SourceProtection {
         scheme: sinf.scheme,
         original_format: sinf.original_format,
         key_id: sinf.key_id,
@@ -138,60 +216,134 @@ pub(super) fn read_protection(
         crypt_blocks: sinf.crypt_blocks,
         skip_blocks: sinf.skip_blocks,
         aux,
-    })))
+    })
 }
 
-/// `senc`: a sample count, then for each sample an IV of `iv_size` bytes and, when the box says
-/// so (flag 2), a subsample map.
-fn read_senc(
-    track_id: u32,
-    payload: &[u8],
-    iv_size: usize,
-    sample_count: usize,
-) -> Result<AuxTable> {
-    let mut reader = Reader::new(payload);
-    let (_, flags) = reader.full_box_flags()?;
-    let count = usize::try_from(reader.u32()?)
-        .map_err(|_| invalid_media("senc sample count does not fit in memory"))?;
-    if count != sample_count {
-        return Err(Error::InvalidMedia(format!(
-            "track {track_id}: senc describes {count} samples, the track has {sample_count}"
+/// A `roll` group (AAC priming) is harmless; one that changes the key is not read.
+fn refuse_key_changes(track_id: u32, boxes: &[RawBox<'_>]) -> Result<()> {
+    if boxes
+        .iter()
+        .any(|group| group.name == *b"sgpd" && group.payload.get(4..8) == Some(b"seig"))
+    {
+        return Err(Error::Unsupported(format!(
+            "track {track_id}: a sample group that changes the key (seig) is not supported"
         )));
     }
-    let with_subsamples = flags & 2 != 0;
-    // Each sample takes at least this much, so the count can be trusted for allocation.
-    let least = iv_size + if with_subsamples { 2 } else { 0 };
-    if count
-        .checked_mul(least)
-        .is_none_or(|bytes| bytes > reader.remaining())
-    {
-        return Err(invalid_media("senc sample count exceeds its box"));
-    }
-    let mut ivs = Vec::with_capacity(count * iv_size);
-    let mut sub_first = Vec::with_capacity(if with_subsamples { count + 1 } else { 0 });
-    let mut subsamples = Vec::new();
-    for _ in 0..count {
-        ivs.extend_from_slice(reader.take(iv_size)?);
-        if with_subsamples {
-            sub_first.push(
-                u32::try_from(subsamples.len())
-                    .map_err(|_| invalid_media("senc has too many subsamples"))?,
-            );
-            for _ in 0..reader.u16()? {
-                subsamples.push(Subsample {
-                    clear: reader.u16()?,
-                    protected: reader.u32()?,
-                });
-            }
+    Ok(())
+}
+
+/// Builds a track's [`AuxTable`] from one `senc` (a progressive file) or from the `senc` of each
+/// `traf` in turn (a fragmented one). It never takes more samples than the track has, so a
+/// hostile count cannot make it allocate.
+struct AuxBuilder {
+    iv_size: usize,
+    limit: usize,
+    samples: usize,
+    ivs: Vec<u8>,
+    /// Where each sample's subsamples begin in `subsamples`, one entry per sample so far.
+    sub_first: Vec<u32>,
+    subsamples: Vec<Subsample>,
+}
+
+impl AuxBuilder {
+    const fn new(iv_size: usize, limit: usize) -> Self {
+        Self {
+            iv_size,
+            limit,
+            samples: 0,
+            ivs: Vec::new(),
+            sub_first: Vec::new(),
+            subsamples: Vec::new(),
         }
     }
-    if with_subsamples {
-        sub_first.push(
-            u32::try_from(subsamples.len())
-                .map_err(|_| invalid_media("senc has too many subsamples"))?,
-        );
+
+    const fn samples(&self) -> usize {
+        self.samples
     }
-    Ok(AuxTable::new(iv_size, ivs, sub_first, subsamples))
+
+    /// Takes room for `count` more samples, or refuses.
+    fn reserve(&mut self, count: usize) -> Result<()> {
+        if self
+            .samples
+            .checked_add(count)
+            .is_none_or(|total| total > self.limit)
+        {
+            return Err(invalid_media(
+                "senc describes more samples than the track has",
+            ));
+        }
+        Ok(())
+    }
+
+    /// `senc`: a sample count, which must be `expected` (`what` says what that counts, for the
+    /// message), then for each sample an IV of `iv_size` bytes and, when the box says so (flag 2),
+    /// a subsample map.
+    fn push_senc(
+        &mut self,
+        track_id: u32,
+        payload: &[u8],
+        expected: usize,
+        what: &str,
+    ) -> Result<()> {
+        let mut reader = Reader::new(payload);
+        let (_, flags) = reader.full_box_flags()?;
+        let count = usize::try_from(reader.u32()?)
+            .map_err(|_| invalid_media("senc sample count does not fit in memory"))?;
+        if count != expected {
+            return Err(Error::InvalidMedia(format!(
+                "track {track_id}: senc describes {count} samples, {what} has {expected}"
+            )));
+        }
+        let with_subsamples = flags & 2 != 0;
+        // Each sample takes at least this much, so the count can be trusted for allocation.
+        let least = self.iv_size + if with_subsamples { 2 } else { 0 };
+        if count
+            .checked_mul(least)
+            .is_none_or(|bytes| bytes > reader.remaining())
+        {
+            return Err(invalid_media("senc sample count exceeds its box"));
+        }
+        self.reserve(count)?;
+        for _ in 0..count {
+            self.ivs.extend_from_slice(reader.take(self.iv_size)?);
+            self.sub_first.push(
+                u32::try_from(self.subsamples.len())
+                    .map_err(|_| invalid_media("senc has too many subsamples"))?,
+            );
+            if with_subsamples {
+                for _ in 0..reader.u16()? {
+                    self.subsamples.push(Subsample {
+                        clear: reader.u16()?,
+                        protected: reader.u32()?,
+                    });
+                }
+            }
+        }
+        self.samples += count;
+        Ok(())
+    }
+
+    /// Samples with no entry anywhere because nothing varies per sample: a constant IV, and
+    /// every sample protected whole.
+    fn push_unlisted(&mut self, count: usize) -> Result<()> {
+        self.reserve(count)?;
+        let at = u32::try_from(self.subsamples.len())
+            .map_err(|_| invalid_media("senc has too many subsamples"))?;
+        self.sub_first.resize(self.sub_first.len() + count, at);
+        self.samples += count;
+        Ok(())
+    }
+
+    fn finish(mut self) -> AuxTable {
+        // A track with no subsample map at all keeps none, however many samples it has.
+        if self.subsamples.is_empty() {
+            return AuxTable::new(self.iv_size, self.ivs, Vec::new(), Vec::new());
+        }
+        self.sub_first.push(
+            u32::try_from(self.subsamples.len()).expect("each push above checked the count fits"),
+        );
+        AuxTable::new(self.iv_size, self.ivs, self.sub_first, self.subsamples)
+    }
 }
 
 #[cfg(test)]
@@ -299,6 +451,18 @@ mod tests {
         payload
     }
 
+    /// What `read_protection` makes of one `senc` for a track of `samples` samples.
+    fn read_senc(
+        track_id: u32,
+        payload: &[u8],
+        iv_size: usize,
+        samples: usize,
+    ) -> Result<AuxTable> {
+        let mut builder = AuxBuilder::new(iv_size, samples);
+        builder.push_senc(track_id, payload, samples, "the track")?;
+        Ok(builder.finish())
+    }
+
     #[test]
     fn senc_gives_each_sample_its_iv_and_subsamples() {
         // Two samples, 8-byte IVs: the first has two subsamples, the second none.
@@ -399,6 +563,180 @@ mod tests {
             error.contains("track 2") && error.contains("default_isProtected"),
             "{error}"
         );
+    }
+
+    // ---- fragmented files: a `senc` in every `traf` ----
+
+    fn tfhd(track: u32) -> Vec<u8> {
+        let mut payload = vec![0, 0, 0, 0];
+        payload.extend_from_slice(&track.to_be_bytes());
+        boxed(*b"tfhd", &payload)
+    }
+
+    fn trun(count: u32) -> Vec<u8> {
+        let mut payload = vec![0, 0, 0, 0];
+        payload.extend_from_slice(&count.to_be_bytes());
+        boxed(*b"trun", &payload)
+    }
+
+    fn traf(track: u32, parts: &[Vec<u8>]) -> Vec<u8> {
+        let mut payload = tfhd(track);
+        for part in parts {
+            payload.extend_from_slice(part);
+        }
+        boxed(*b"traf", &payload)
+    }
+
+    fn moof(trafs: &[Vec<u8>]) -> Fragment {
+        let mut payload = boxed(*b"mfhd", &[0; 8]);
+        for traf in trafs {
+            payload.extend_from_slice(traf);
+        }
+        Fragment {
+            offset: 0,
+            bytes: bytes::Bytes::from(boxed(*b"moof", &payload)),
+        }
+    }
+
+    fn senc_box(flags: u8, count: u32, rows: &[u8]) -> Vec<u8> {
+        boxed(*b"senc", &senc(flags, count, rows))
+    }
+
+    fn group(kind: [u8; 4]) -> Vec<u8> {
+        let mut payload = vec![1, 0, 0, 0];
+        payload.extend_from_slice(&kind);
+        boxed(*b"sgpd", &payload)
+    }
+
+    fn cenc() -> Sinf {
+        parse_sinf(1, &sinf(*b"cenc", 0, 0, 1, 8, &[])).unwrap()
+    }
+
+    fn read(
+        sinf: &Sinf,
+        fragments: &[Fragment],
+        samples: usize,
+    ) -> Result<Option<Arc<SourceProtection>>> {
+        read_fragmented_protection(1, sinf, &[], fragments, samples)
+    }
+
+    /// Two tracks share each `moof`, the first fragment's video has a subsample map for one of its
+    /// two samples and the second fragment's has none: every sample still gets its own IV, and
+    /// the map of the sample it belongs to.
+    #[test]
+    fn each_trafs_senc_gives_its_own_samples_their_ivs_and_subsamples() {
+        // Video (track 1): samples 0 and 1, then sample 2. Audio (track 2) is somebody else's.
+        let mut first = vec![1; 8];
+        first.extend_from_slice(&[0, 1, 0, 4, 0, 0, 0, 6]);
+        first.extend_from_slice(&[2; 8]);
+        first.extend_from_slice(&[0, 0]);
+        let fragments = [
+            moof(&[
+                traf(1, &[trun(2), senc_box(2, 2, &first)]),
+                traf(2, &[trun(1), senc_box(0, 1, &[9; 8])]),
+            ]),
+            moof(&[
+                traf(2, &[trun(1), senc_box(0, 1, &[8; 8])]),
+                traf(1, &[trun(1), senc_box(0, 1, &[3; 8])]),
+            ]),
+        ];
+        let protection = read(&cenc(), &fragments, 3).unwrap().unwrap();
+        let aux = &protection.aux;
+        assert_eq!(aux.iv(0), Some(&[1; 8][..]));
+        assert_eq!(aux.iv(1), Some(&[2; 8][..]));
+        assert_eq!(aux.iv(2), Some(&[3; 8][..]));
+        assert!(aux.iv(3).is_none());
+        assert_eq!(
+            aux.subsamples(0),
+            [Subsample {
+                clear: 4,
+                protected: 6
+            }]
+        );
+        assert!(aux.subsamples(1).is_empty());
+        assert!(
+            aux.subsamples(2).is_empty(),
+            "a fragment without maps has none"
+        );
+    }
+
+    #[test]
+    fn a_senc_that_does_not_match_its_trafs_runs_is_refused_naming_the_track() {
+        let rows = [1; 24];
+        let fragments = [moof(&[traf(1, &[trun(2), senc_box(0, 3, &rows)])])];
+        let error = read(&cenc(), &fragments, 2).unwrap_err().to_string();
+        assert!(
+            error.contains("track 1") && error.contains("3 samples, the fragment has 2"),
+            "{error}"
+        );
+        // FFmpeg's fragmented audio lists every sample so far in each fragment's senc.
+    }
+
+    #[test]
+    fn what_the_fragments_leave_out_or_add_is_refused() {
+        let one = |parts: Vec<u8>| [moof(&[traf(1, &[trun(1), parts])])];
+        let error = read(&cenc(), &one(Vec::new()), 1).unwrap_err().to_string();
+        assert!(error.contains("senc box in every fragment"), "{error}");
+        let error = read(&cenc(), &one(boxed(*b"saiz", &[0; 9])), 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("auxiliary information"), "{error}");
+        let error = read(&cenc(), &one(group(*b"seig")), 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("seig"), "{error}");
+        // The fragments hold fewer samples than the track has.
+        let fragments = [moof(&[traf(1, &[trun(1), senc_box(0, 1, &[1; 8])])])];
+        let error = read(&cenc(), &fragments, 2).unwrap_err().to_string();
+        assert!(
+            error.contains("describe 1 samples, the track has 2"),
+            "{error}"
+        );
+        // ... or more.
+        let fragments = [moof(&[traf(1, &[trun(2), senc_box(0, 2, &[1; 16])])])];
+        assert!(read(&cenc(), &fragments, 1).is_err());
+    }
+
+    #[test]
+    fn a_hostile_sample_count_cannot_make_a_fragment_allocate() {
+        let mut constant = vec![16];
+        constant.extend_from_slice(&[0xc0; 16]);
+        let cbcs = parse_sinf(1, &sinf(*b"cbcs", 1, 0x19, 1, 0, &constant)).unwrap();
+        // No senc and a constant IV: the trun's own count is all there is to go on.
+        let fragments = [moof(&[traf(1, &[trun(u32::MAX)])])];
+        let error = read(&cbcs, &fragments, 3).unwrap_err().to_string();
+        assert!(error.contains("more samples than the track has"), "{error}");
+        let fragments = [moof(&[traf(1, &[trun(2), senc_box(0, u32::MAX, &[])])])];
+        assert!(read(&cenc(), &fragments, 2).is_err());
+    }
+
+    #[test]
+    fn a_constant_iv_needs_no_senc_and_other_tracks_trafs_are_not_read() {
+        let mut constant = vec![16];
+        constant.extend_from_slice(&[0xc0; 16]);
+        let cbcs = parse_sinf(1, &sinf(*b"cbcs", 1, 0x19, 1, 0, &constant)).unwrap();
+        // Track 2's traf has a senc that would not fit; it is nobody's business here.
+        let fragments = [
+            moof(&[
+                traf(1, &[trun(2)]),
+                traf(2, &[trun(1), senc_box(0, 7, &[])]),
+            ]),
+            moof(&[traf(1, &[trun(1)])]),
+        ];
+        let protection = read(&cbcs, &fragments, 3).unwrap().unwrap();
+        assert_eq!(protection.constant_iv.map(|iv| iv[0]), Some(0xc0));
+        assert_eq!(protection.aux.bytes(), 0);
+    }
+
+    #[test]
+    fn a_clear_lead_is_refused_in_a_fragmented_file_too() {
+        let unprotected = parse_sinf(1, &sinf(*b"cenc", 0, 0, 0, 8, &[])).unwrap();
+        let fragments = [moof(&[traf(1, &[trun(1), group(*b"seig")])])];
+        let error = read(&unprotected, &fragments, 1).unwrap_err().to_string();
+        assert!(error.contains("seig"), "{error}");
+        // Without it, a track that says it is not protected is read as clear, whatever its trafs hold.
+        let fragments = [moof(&[traf(1, &[trun(1)])])];
+        assert!(read(&unprotected, &fragments, 1).unwrap().is_none());
     }
 
     #[test]
