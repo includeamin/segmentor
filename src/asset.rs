@@ -954,7 +954,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(plain.version(), keyed.version());
-        assert!(keyed.source_key_ids().is_empty());
+        assert_eq!(keyed.source_key_ids(), Vec::<String>::new());
     }
 
     #[tokio::test]

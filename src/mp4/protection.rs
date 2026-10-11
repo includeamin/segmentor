@@ -322,16 +322,16 @@ mod tests {
                 }
             ]
         );
-        assert!(table.subsamples(1).is_empty());
+        assert_eq!(table.subsamples(1), []);
         assert!(table.iv(2).is_none());
-        assert!(table.subsamples(2).is_empty());
+        assert_eq!(table.subsamples(2), []);
     }
 
     #[test]
     fn senc_without_subsamples_or_ivs_is_an_empty_table() {
         let table = read_senc(1, &senc(0, 3, &[]), 0, 3).unwrap();
         assert!(table.iv(0).is_none());
-        assert!(table.subsamples(0).is_empty());
+        assert_eq!(table.subsamples(0), []);
         assert_eq!(table.bytes(), 0);
     }
 

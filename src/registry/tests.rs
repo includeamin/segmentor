@@ -4906,7 +4906,7 @@ async fn a_protected_hevc_source_is_served_as_the_clear_twin_with_the_same_codec
             .collect::<Vec<_>>()
     };
     assert_eq!(codecs(&master), codecs(&clear_master));
-    assert!(!codecs(&master).is_empty());
+    assert_ne!(codecs(&master), Vec::<String>::new());
     let dash = text(&fetch(&h.app, "/dash/src/manifest.mpd").await.2);
     assert!(!dash.contains("encv"), "{dash}");
 

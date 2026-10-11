@@ -1374,7 +1374,7 @@ mod tests {
                 "video sample {index}"
             );
         }
-        assert!(audio.aux.subsamples(0).is_empty());
+        assert_eq!(audio.aux.subsamples(0), []);
     }
 
     #[test]
@@ -1464,7 +1464,7 @@ mod tests {
         assert_eq!((video.crypt_blocks, video.skip_blocks), (1, 9));
         assert_eq!((audio.crypt_blocks, audio.skip_blocks), (0, 0));
         assert!(video.aux.iv(0).is_none());
-        assert!(!video.aux.subsamples(0).is_empty());
+        assert_ne!(video.aux.subsamples(0), []);
         // Audio has no `senc` at all: a constant IV and whole-sample protection need none.
         assert_eq!(audio.aux.bytes(), 0);
     }
