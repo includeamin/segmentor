@@ -304,7 +304,7 @@ fn parse_track(
         .map_or(entry.name, |sinf| sinf.original_format);
     let codec = match (&format, kind) {
         (b"avc1", TrackKind::Video) => codec::parse_avc(entry.payload)?,
-        (b"hvc1" | b"hev1", TrackKind::Video) => codec::parse_hevc(entry.payload, entry.name)?,
+        (b"hvc1" | b"hev1", TrackKind::Video) => codec::parse_hevc(entry.payload, format)?,
         (b"vp09", TrackKind::Video) => codec::parse_vp9(entry.payload)?,
         (b"av01", TrackKind::Video) => codec::parse_av1(entry.payload)?,
         (b"mp4a", TrackKind::Audio) => codec::parse_aac(entry.payload, raw.id)?,

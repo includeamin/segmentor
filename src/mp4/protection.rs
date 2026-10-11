@@ -55,6 +55,11 @@ pub(super) fn parse_sinf(track_id: u32, sinf: &[u8]) -> Result<Sinf> {
     reader.skip(1)?;
     let pattern = reader.u8()?;
     let is_protected = reader.u8()?;
+    if is_protected > 1 {
+        return Err(unsupported(format!(
+            "default_isProtected of {is_protected} is not supported"
+        )));
+    }
     let iv_size = usize::from(reader.u8()?);
     let key_id: [u8; 16] = reader.take(16)?.try_into().expect("sixteen bytes");
     if !matches!(iv_size, 0 | 8 | 16) {
@@ -96,10 +101,10 @@ pub(super) fn read_protection(
     stbl: &[u8],
     sample_count: usize,
 ) -> Result<Option<Arc<SourceProtection>>> {
-    if !sinf.is_protected {
-        return Ok(None);
-    }
     let unsupported = |what: &str| Error::Unsupported(format!("track {track_id}: {what}"));
+    // Checked before the default: a clear lead is a track whose default says unprotected and
+    // whose later samples a `seig` group says are protected, and reading it as clear would serve
+    // them as ciphertext.
     for group in super::boxes::child_boxes(stbl)? {
         // A `roll` group (AAC priming) is harmless; one that changes the key is not read.
         if group.name == *b"sgpd" && group.payload.get(4..8) == Some(b"seig") {
@@ -107,6 +112,9 @@ pub(super) fn read_protection(
                 "a sample group that changes the key (seig) is not supported",
             ));
         }
+    }
+    if !sinf.is_protected {
+        return Ok(None);
     }
     let aux = match optional_child(stbl, *b"senc")? {
         Some(senc) => read_senc(track_id, senc.payload, sinf.iv_size, sample_count)?,
@@ -363,6 +371,34 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("seig"), "{error}");
+    }
+
+    /// A clear lead: the default says unprotected, and a `seig` group marks the samples after it
+    /// as protected. Reading such a track as clear would serve those samples as ciphertext.
+    #[test]
+    fn a_key_changing_group_is_refused_even_when_the_default_says_unprotected() {
+        let parsed = parse_sinf(1, &sinf(*b"cenc", 0, 0, 0, 8, &[])).unwrap();
+        let mut group = vec![1, 0, 0, 0];
+        group.extend_from_slice(b"seig");
+        let stbl = boxed(*b"sgpd", &group);
+        let error = read_protection(1, &parsed, &stbl, 0)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("seig"), "{error}");
+    }
+
+    #[test]
+    fn only_zero_and_one_are_values_of_default_is_protected() {
+        for protected in [0, 1] {
+            assert!(parse_sinf(1, &sinf(*b"cenc", 0, 0, protected, 8, &[])).is_ok());
+        }
+        let error = parse_sinf(2, &sinf(*b"cenc", 0, 0, 2, 8, &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("track 2") && error.contains("default_isProtected"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -40,6 +40,40 @@ fn packages_fixture_into_separate_fragmented_tracks() {
     fs::remove_dir_all(repeated_output).expect("repeated output should be removable");
 }
 
+/// A source that is already encrypted can only be served with the keys the mapper gives, and the
+/// development command has none: it must refuse, not write ciphertext as if it were clear.
+#[test]
+fn refuses_an_encrypted_source_instead_of_writing_ciphertext() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for name in [
+        "h264-aac-cenc.mp4",
+        "h264-aac-cbcs.mp4",
+        "h264-aac-cenc-ffmpeg.mp4",
+    ] {
+        let output = root.join(format!("target/package-encrypted-source-{name}"));
+        let _ = fs::remove_dir_all(&output);
+        let result = Command::new(env!("CARGO_BIN_EXE_segmentor"))
+            .args(["package", "--input"])
+            .arg(root.join("tests/fixtures").join(name))
+            .arg("--output")
+            .arg(&output)
+            .current_dir(&root)
+            .output()
+            .expect("application should start");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(!result.status.success(), "{name} was packaged");
+        assert!(
+            stderr.contains("encrypted media is not supported"),
+            "{name}: {stderr}"
+        );
+        assert!(
+            !output.join("video-0.m4s").exists(),
+            "{name}: no segment of an encrypted source is written"
+        );
+        let _ = fs::remove_dir_all(&output);
+    }
+}
+
 fn run_packager(root: &Path, output: &Path) {
     let result = Command::new(env!("CARGO_BIN_EXE_segmentor"))
         .args([

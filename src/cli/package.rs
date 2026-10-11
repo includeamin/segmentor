@@ -66,6 +66,9 @@ async fn package(options: &PackageOptions) -> Result<()> {
     let source = MediaSourceKind::Local(Arc::new(LocalMediaSource::open(&options.input)?));
     let limits = LimitsConfig::default();
     let ParsedMedia { index, metadata } = mp4::parse(&source, &limits).await?;
+    // This command has no keys, so a source that is already encrypted is refused, as it is when
+    // a mapper gives none (TDD 0014), rather than written out as ciphertext labelled clear.
+    crate::cenc::AssetDecryption::new(&index.tracks, None)?;
     let plan = segment::plan(&index, options.segment_duration_ms, &limits)?;
     std::fs::create_dir_all(&options.output)?;
 

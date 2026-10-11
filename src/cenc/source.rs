@@ -290,6 +290,8 @@ impl AssetDecryption {
     /// can, this notices: the first sample of a video track is decrypted now, and its NAL unit
     /// lengths must tile it exactly, which random bytes will not do.
     ///
+    /// Samples larger than `max_sample_bytes` are not read.
+    ///
     /// That only works when the length prefixes are themselves encrypted. Real encoders leave
     /// each NAL unit's length and header clear and protect the rest, and decrypted slice data
     /// looks like random bytes whether or not the key is right, so for those files (and for
@@ -299,6 +301,7 @@ impl AssetDecryption {
         source: &MediaSourceKind,
         metadata: &Metadata,
         tracks: &[Track],
+        max_sample_bytes: u64,
     ) -> Result<()> {
         for track in tracks.iter().filter(|track| track.kind == TrackKind::Video) {
             let Some(decryption) = self.tracks.get(&track.id) else {
@@ -309,6 +312,11 @@ impl AssetDecryption {
                 continue;
             };
             let first = track.samples.get(0);
+            // A sample too big for a segment is refused when its segment is asked for; it is not
+            // read here, where a file could make the load allocate whatever size it claims.
+            if u64::from(first.size) > max_sample_bytes {
+                continue;
+            }
             if decryption.leaves_prefix_clear(track.samples.window_start(), length_size) {
                 continue;
             }
