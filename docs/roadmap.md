@@ -130,7 +130,7 @@ Where it stands (2026-10-03, 60-minute asset):
 
 | Step | Status | Notes |
 | --- | --- | --- |
-| Mapping-JSON compatibility layer | New TDD | An adapter that turns nginx-vod-module's mapped-mode JSON into a segmentor mapper answer, so existing mapping services keep working. [TDD 0008](technical-design/0008-clipping-and-concatenation.md) defers "vod-module mapping compatibility" |
+| Mapping-JSON compatibility layer | Designed (part 1 of 5) | [TDD 0015](technical-design/0015-vod-module-mapping-adapter.md): a `vod-module` dialect of the HTTP resolver reads the existing mapping service and translates single files, adaptive sets of sequences, clips with durations, captions and track selection. Later parts: adaptive playlists, `cenc` and the DRM bridge, URL compatibility, fallback and the migration guide. [TDD 0008](technical-design/0008-clipping-and-concatenation.md) deferred "vod-module mapping compatibility" |
 | URL compatibility, or a redirect layer | Decide first | nginx-vod-module URLs differ from segmentor's. Players that load URLs from the mapper need nothing; hard-coded URLs need a rewrite at the proxy |
 | Migration guide | To do | Feature mapping, configuration translation, and a shadow-traffic comparison procedure |
 | Shadow comparison in production | To do | Run both behind the same CDN on a sample of traffic, and compare manifests, segment decodes, and error rates before cutover |
