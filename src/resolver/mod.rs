@@ -69,6 +69,8 @@ pub(crate) struct RenditionLocation {
     pub(crate) location: AssetLocation,
     /// Which tracks of the file this rendition serves; all of them when absent (TDD 0015).
     pub(crate) tracks: Option<crate::media::TrackSelection>,
+    /// The language, label and default of the audio it brings, in place of the file's.
+    pub(crate) audio: Option<crate::media::AudioOverrides>,
 }
 
 /// One clip of a sequence: a file, and the window of it to play.

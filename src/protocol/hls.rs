@@ -19,6 +19,8 @@ pub(crate) struct AdaptiveVideo<'a> {
 pub(crate) struct AdaptiveAudio<'a> {
     pub(crate) key: TrackKey,
     pub(crate) track: &'a Track,
+    /// Whether this is the group's default: the first, unless a mapper chose another.
+    pub(crate) default: bool,
 }
 
 /// The master playlist for an adaptive asset: one `#EXT-X-STREAM-INF` per video rendition, all
@@ -44,13 +46,19 @@ pub(crate) fn adaptive_master_playlist(
     );
     for (index, entry) in audio.iter().enumerate() {
         let language = track_language(entry.track);
-        let name = language.map_or_else(
-            || format!("Audio {}", index + 1),
-            |language| format!("Audio {} ({language})", index + 1),
+        // A mapper's label replaces the name made from the position and language.
+        let name = entry.track.label.as_deref().map_or_else(
+            || {
+                language.map_or_else(
+                    || format!("Audio {}", index + 1),
+                    |language| format!("Audio {} ({language})", index + 1),
+                )
+            },
+            |label| label.replace('"', "'"),
         );
         let language_attribute =
             language.map_or_else(String::new, |language| format!(",LANGUAGE=\"{language}\""));
-        let default = if index == 0 { "YES" } else { "NO" };
+        let default = if entry.default { "YES" } else { "NO" };
         writeln!(
             playlist,
             "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"{name}\"{language_attribute},DEFAULT={default},AUTOSELECT=YES,URI=\"{}/index.m3u8?v={version}\"",

@@ -578,7 +578,7 @@ impl AssetRegistry {
                 // a location comparison, which is below.
                 && old.renditions.len() == new.renditions.len()
                 && old.renditions.iter().zip(&new.renditions).all(|(old, new)| {
-                    old.id == new.id && old.tracks == new.tracks
+                    old.id == new.id && old.tracks == new.tracks && old.audio == new.audio
                 })
                 && old_locations.len() == new_locations.len()
                 && old_locations.iter().zip(&new_locations).all(
@@ -787,6 +787,7 @@ impl AssetRegistry {
                 hls_aes128: resolved.hls_aes128.clone(),
                 source_keys: resolved.source_encryption.clone(),
                 tracks: resolved.tracks,
+                audio: None,
             },
             self.settings.segment_duration_ms,
             &self.limits,
@@ -820,6 +821,7 @@ impl AssetRegistry {
             let encryption = resolved.encryption.clone();
             let hls_aes128 = resolved.hls_aes128.clone();
             let tracks = rendition.tracks;
+            let audio = rendition.audio.clone();
             tasks.spawn(async move {
                 let outcome: Result<(PackagedAsset, Arc<AssetRefresher>)> = async {
                     let refresher = Arc::new(AssetRefresher {
@@ -841,6 +843,7 @@ impl AssetRegistry {
                             encryption,
                             hls_aes128,
                             tracks,
+                            audio,
                             ..Extras::default()
                         },
                         registry.settings.segment_duration_ms,

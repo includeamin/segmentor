@@ -22,7 +22,7 @@ use super::{
 use crate::clip::{ClipWindow, MAX_CLIP_MS};
 use crate::config::Secret;
 use crate::config::{MapperConfig, is_valid_asset_id, read_token_file};
-use crate::media::TrackSelection;
+use crate::media::{AudioOverrides, TrackSelection};
 use crate::observability::request_id;
 
 const MAX_VERSION_BYTES: usize = 256;
@@ -151,6 +151,14 @@ struct WireRendition {
     /// Which tracks of the file to serve (TDD 0015).
     #[serde(default)]
     tracks: Option<String>,
+    /// The language, label and default of the audio this rendition brings, in place of its
+    /// file's (TDD 0015).
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    default: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -484,13 +492,52 @@ impl HttpResolver {
                 .map_err(|message| {
                     ResolveError::Rejected(format!("rendition `{}`: {message}", entry.id))
                 })?;
+            let audio = Self::interpret_audio_overrides(entry)?;
+            if audio.as_ref().is_some_and(|audio| audio.default)
+                && renditions.iter().any(|known: &RenditionLocation| {
+                    known.audio.as_ref().is_some_and(|audio| audio.default)
+                })
+            {
+                return reject("more than one rendition is marked default".to_owned());
+            }
             renditions.push(RenditionLocation {
                 id: entry.id.clone(),
                 location: self.interpret_location(&entry.location)?,
                 tracks,
+                audio,
             });
         }
         Ok(renditions)
+    }
+
+    /// A rendition's `language`, `label` and `default`, checked; `None` when it sets none.
+    fn interpret_audio_overrides(
+        entry: &WireRendition,
+    ) -> Result<Option<AudioOverrides>, ResolveError> {
+        let reject = |what: &str| {
+            Err(ResolveError::Rejected(format!(
+                "rendition `{}`: {what}",
+                entry.id
+            )))
+        };
+        if let Some(language) = &entry.language
+            && !(language.len() == 3 && language.bytes().all(|byte| byte.is_ascii_lowercase()))
+        {
+            return reject("language must be a three-letter ISO 639 code in lower case");
+        }
+        if let Some(label) = &entry.label
+            && (label.is_empty()
+                || label.len() > MAX_LABEL_BYTES
+                || label.chars().any(char::is_control))
+        {
+            return reject("label is empty, overlong, or has a control character");
+        }
+        let overrides = AudioOverrides {
+            language: entry.language.clone(),
+            label: entry.label.clone(),
+            default: entry.default,
+        };
+        Ok((!overrides.is_empty()).then_some(overrides))
     }
 
     /// The `tracks` of an answer, which belongs to a single file: renditions and clips carry their

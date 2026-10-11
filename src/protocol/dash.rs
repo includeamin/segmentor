@@ -103,6 +103,14 @@ pub(crate) fn write_video_adaptation(
     Ok(())
 }
 
+/// Text as the content of an XML element or the value of an attribute.
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 /// See [`write_video_adaptation`] on `id`: for the shared audio group it is `audio-{n}`, which
 /// may already differ from the source file's own numbering.
 pub(crate) fn write_audio_adaptation(
@@ -130,6 +138,10 @@ pub(crate) fn write_audio_adaptation(
             encryption,
             encryption.key_for(track.kind),
         ));
+    }
+    if let Some(label) = &track.label {
+        writeln!(manifest, "      <Label>{}</Label>", xml_escape(label))
+            .expect("writing to a String cannot fail");
     }
     writeln!(manifest, "      <Representation id=\"{id}\" bandwidth=\"{}\" codecs=\"{codec}\" mimeType=\"audio/mp4\" audioSamplingRate=\"{sample_rate}\">", presentation.bandwidth(track)?.peak)
         .expect("writing to a String cannot fail");

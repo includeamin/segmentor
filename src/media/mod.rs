@@ -8,4 +8,4 @@ pub(crate) use index::{
 };
 pub(crate) use protection::{AuxTable, SourceProtection, SourceScheme, Subsample, iv16};
 pub(crate) use samples::{SampleIndex, Tables as SampleTablesData};
-pub(crate) use selection::TrackSelection;
+pub(crate) use selection::{AudioOverrides, TrackSelection};

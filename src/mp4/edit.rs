@@ -479,6 +479,7 @@ mod tests {
             },
             samples: samples.into(),
             source_protection: None,
+            label: None,
         }
     }
 

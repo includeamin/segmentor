@@ -120,6 +120,24 @@ impl TrackSelection {
     }
 }
 
+/// What a mapper says about the audio a rendition brings, in place of what its file says
+/// (TDD 0015). It applies to exactly one audio track.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AudioOverrides {
+    /// A three-letter ISO 639 code in lower case.
+    pub(crate) language: Option<String>,
+    /// The name a viewer sees, instead of "Audio 2 (spa)".
+    pub(crate) label: Option<String>,
+    /// Makes this the audio group's default; without one the first is.
+    pub(crate) default: bool,
+}
+
+impl AudioOverrides {
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.language.is_none() && self.label.is_none() && !self.default
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,6 +159,7 @@ mod tests {
             },
             samples: SampleIndex::from_samples(&[]),
             source_protection: None,
+            label: None,
         }
     }
 
