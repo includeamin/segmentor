@@ -67,6 +67,8 @@ pub(crate) struct RenditionLocation {
     /// A short URL-safe label, unique within the asset. Appears in URLs as `video-{id}`.
     pub(crate) id: String,
     pub(crate) location: AssetLocation,
+    /// Which tracks of the file this rendition serves; all of them when absent (TDD 0015).
+    pub(crate) tracks: Option<crate::media::TrackSelection>,
 }
 
 /// One clip of a sequence: a file, and the window of it to play.
@@ -78,6 +80,8 @@ pub(crate) struct ClipLocation {
     /// back to the answer's own `encryption` when absent, so a clear pre-roll before an encrypted
     /// movie sets this to `None` on its own clip rather than on the whole answer.
     pub(crate) encryption: Option<std::sync::Arc<crate::cenc::Encryption>>,
+    /// Which tracks of the file this clip serves; all of them when absent (TDD 0015).
+    pub(crate) tracks: Option<crate::media::TrackSelection>,
 }
 
 /// Which of an answer's locations something refers to: the single file, one rendition, or one

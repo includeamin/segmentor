@@ -85,6 +85,23 @@ impl Answer {
         self
     }
 
+    /// Sets `key` on the rendition called `id` (TDD 0015).
+    pub(crate) fn with_rendition_field(mut self, id: &str, key: &str, value: Value) -> Self {
+        let rendition = self
+            .renditions
+            .iter_mut()
+            .find(|rendition| rendition["id"] == id)
+            .expect("the answer has a rendition with this id");
+        rendition[key] = value;
+        self
+    }
+
+    /// Sets `key` on the clip at `position` (TDD 0015).
+    pub(crate) fn with_clip_field(mut self, position: usize, key: &str, value: Value) -> Self {
+        self.clips[position][key] = value;
+        self
+    }
+
     /// Adds a `tracks` selector to the answer (TDD 0015).
     pub(crate) fn with_tracks(mut self, tracks: &str) -> Self {
         self.tracks = Some(tracks.to_owned());

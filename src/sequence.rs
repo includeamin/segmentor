@@ -16,6 +16,7 @@ use crate::composite::ServedAsset;
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
 use crate::fmp4::PreparedSegment;
+use crate::media::TrackSelection;
 use crate::media::{CodecConfig, MediaIndex, TrackKey};
 use crate::mp4::ParsedMedia;
 use crate::protocol::{Manifest, SequenceClip, dash, hls};
@@ -44,6 +45,15 @@ struct SequenceManifests {
     dash: Manifest,
 }
 
+/// What one clip of a sequence is made from: the index of its file among the parsed files, its
+/// window, its own encryption, and the tracks of the file it serves.
+pub(crate) type ClipPlan = (
+    usize,
+    ClipWindow,
+    Option<Arc<crate::cenc::Encryption>>,
+    Option<TrackSelection>,
+);
+
 /// Trims every clip from its already parsed file, in order, each starting where the one before
 /// ended, and builds what is served (TDD 0008, "Loading"). One clip is an ordinary asset; two or
 /// more are a sequence. Errors name the clip by its position in the mapper's list.
@@ -54,7 +64,7 @@ struct SequenceManifests {
 pub(crate) fn build(
     asset_id: &str,
     files: &[ClipFile],
-    clips: &[(usize, ClipWindow, Option<Arc<crate::cenc::Encryption>>)],
+    clips: &[ClipPlan],
     mapper_version: &str,
     aes128: Option<&Arc<crate::cenc::Aes128>>,
     segment_duration_ms: u64,
@@ -65,8 +75,8 @@ pub(crate) fn build(
     };
     let mut start = TimelinePosition::ZERO;
     let mut trimmed = Vec::with_capacity(clips.len());
-    for (position, (file, window, encryption)) in clips.iter().enumerate() {
-        let (file, window) = (*file, *window);
+    for (position, (file, window, encryption, tracks)) in clips.iter().enumerate() {
+        let (file, window, tracks) = (*file, *window, *tracks);
         let trailing = if position + 1 == clips.len() {
             Trailing::Keep
         } else {
@@ -84,22 +94,24 @@ pub(crate) fn build(
             served.to_ms = cut.served_to_ms,
             encrypted = encryption.is_some(),
         );
-        trimmed.push((file, start, cut.index, encryption.clone()));
+        trimmed.push((file, start, cut.index, encryption.clone(), tracks));
         start = cut.end;
     }
     let version = clip::version_of(
         mapper_version,
         aes128.map(AsRef::as_ref),
-        clips.iter().map(|(file, window, encryption)| {
+        clips.iter().map(|(file, window, encryption, tracks)| {
             (
                 &files[*file].parsed.index.source,
                 *window,
                 encryption.as_deref(),
+                *tracks,
             )
         }),
     );
     let mut assets = Vec::with_capacity(trimmed.len());
-    for (position, (file, clip_start, index, encryption)) in trimmed.into_iter().enumerate() {
+    for (position, (file, clip_start, index, encryption, tracks)) in trimmed.into_iter().enumerate()
+    {
         let asset = PackagedAsset::assemble(
             files[file].source.clone(),
             index,
@@ -114,7 +126,7 @@ pub(crate) fn build(
                 hls_mux_audio: false,
                 hls_aes128: aes128.cloned(),
                 source_keys: None,
-                tracks: None,
+                tracks,
             },
         )
         .map_err(named(position))?;
@@ -400,7 +412,10 @@ mod tests {
         build(
             "test",
             files,
-            clips,
+            &clips
+                .iter()
+                .map(|(file, window, encryption)| (*file, *window, encryption.clone(), None))
+                .collect::<Vec<_>>(),
             "v1",
             None,
             1000,

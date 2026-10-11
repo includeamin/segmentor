@@ -139,12 +139,18 @@ struct WireClip {
     /// clip"). Absent means "use the answer's `encryption`", which may itself be absent (clear).
     #[serde(default)]
     encryption: Option<crate::cenc::WireEncryption>,
+    /// Which tracks of the file to serve (TDD 0015).
+    #[serde(default)]
+    tracks: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct WireRendition {
     id: String,
     location: WireLocation,
+    /// Which tracks of the file to serve (TDD 0015).
+    #[serde(default)]
+    tracks: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -470,9 +476,18 @@ impl HttpResolver {
             {
                 return reject(format!("rendition id `{}` is listed twice", entry.id));
             }
+            let tracks = entry
+                .tracks
+                .as_deref()
+                .map(TrackSelection::parse)
+                .transpose()
+                .map_err(|message| {
+                    ResolveError::Rejected(format!("rendition `{}`: {message}", entry.id))
+                })?;
             renditions.push(RenditionLocation {
                 id: entry.id.clone(),
                 location: self.interpret_location(&entry.location)?,
+                tracks,
             });
         }
         Ok(renditions)
@@ -530,6 +545,14 @@ impl HttpResolver {
                     encryption: Self::interpret_clip_encryption(clip.encryption.as_ref()).map_err(
                         |message| ResolveError::Rejected(format!("clip {position}: {message}")),
                     )?,
+                    tracks: clip
+                        .tracks
+                        .as_deref()
+                        .map(TrackSelection::parse)
+                        .transpose()
+                        .map_err(|message| {
+                            ResolveError::Rejected(format!("clip {position}: {message}"))
+                        })?,
                 })
             })
             .collect()

@@ -572,6 +572,13 @@ impl AssetRegistry {
                 && old.clips.iter().zip(&new.clips).all(|(old_clip, new_clip)| {
                     old_clip.window == new_clip.window
                         && old_clip.encryption == new_clip.encryption
+                        && old_clip.tracks == new_clip.tracks
+                })
+                // Each rendition's id and track selection (TDD 0015); like the clips' above, not
+                // a location comparison, which is below.
+                && old.renditions.len() == new.renditions.len()
+                && old.renditions.iter().zip(&new.renditions).all(|(old, new)| {
+                    old.id == new.id && old.tracks == new.tracks
                 })
                 && old_locations.len() == new_locations.len()
                 && old_locations.iter().zip(&new_locations).all(
@@ -812,6 +819,7 @@ impl AssetRegistry {
             let asset_id = asset_id.to_owned();
             let encryption = resolved.encryption.clone();
             let hls_aes128 = resolved.hls_aes128.clone();
+            let tracks = rendition.tracks;
             tasks.spawn(async move {
                 let outcome: Result<(PackagedAsset, Arc<AssetRefresher>)> = async {
                     let refresher = Arc::new(AssetRefresher {
@@ -832,6 +840,7 @@ impl AssetRegistry {
                         Extras {
                             encryption,
                             hls_aes128,
+                            tracks,
                             ..Extras::default()
                         },
                         registry.settings.segment_duration_ms,
@@ -901,7 +910,7 @@ impl AssetRegistry {
                 .encryption
                 .clone()
                 .or_else(|| resolved.encryption.clone());
-            clips.push((file, clip.window, encryption));
+            clips.push((file, clip.window, encryption, clip.tracks));
         }
 
         let mut tasks = tokio::task::JoinSet::new();
