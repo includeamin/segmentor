@@ -20,6 +20,7 @@ Technical design documents explain a proposed subsystem before or during impleme
 | [0012](0012-hls-aes-128.md) | Whole-segment HLS AES-128 | Accepted; implemented for single-file, adaptive, and sequence assets |
 | [0013](0013-key-rotation.md) | Key rotation within an asset | Accepted; implemented for single-file and adaptive assets |
 | [0014](0014-encrypted-source-files.md) | Encrypted source files | Accepted; stages 1 and 2 implemented (decrypt, one file, progressive or fragmented) |
+| [0015](0015-vod-module-mapping-adapter.md) | nginx-vod-module mapping adapter | Draft |
 
 ## Workflow
 
