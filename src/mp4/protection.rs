@@ -653,7 +653,7 @@ mod tests {
                 protected: 6
             }]
         );
-        assert!(aux.subsamples(1).is_empty());
+        assert_eq!(aux.subsamples(1), []);
         assert!(
             aux.subsamples(2).is_empty(),
             "a fragment without maps has none"
