@@ -203,7 +203,7 @@ Instead of a single `location`, an answer may give several files as one adaptive
 | `location` | Yes | A `file` or `http` location with the same rules as a single asset's |
 | `tracks` | No | Which tracks of the file this rendition serves; see [Choosing tracks](#choosing-tracks) |
 | `language` | No | Three lower-case letters (ISO 639), replacing the language in the file for the audio this rendition brings. See [Naming a rendition's audio](#naming-a-renditions-audio) |
-| `label` | No | The name a viewer sees for that audio: 1 to 128 bytes, no control characters |
+| `label` | No | The name a viewer sees for that audio: 1 to 128 bytes, no control characters and no U+FFFE or U+FFFF (an XML manifest cannot hold them) |
 | `default` | No | `true` makes this audio the group's default instead of the first. At most one rendition may |
 
 The server does not ask what kind a rendition is; it loads every one exactly as it would load a single-file asset, and looks at what tracks came out. **A rendition with a video track is a video rendition. One with only audio, and no video, is an audio rendition** — this is how separate audio files, and several audio languages, are supplied.
@@ -265,7 +265,7 @@ It sits beside `location` on a single-file answer, and on each rendition and eac
 
 A selector that matches no track of a kind serves nothing of that kind, so the common `v1-a1` still serves a file that has no audio. Only a selection that leaves no track at all fails the asset, with the selector named. The audio tracks that are left are numbered `audio-1`, `audio-2`, … in file order, so the second track of a file chosen alone is `audio-1` in the URLs and playlists.
 
-A selection is part of what is served, so the URL version includes it; a mapper does not need to change its own `version`, though changing `tracks` under an unchanged `version` reloads the asset. An asset that serves every track keeps the version it always had.
+A clip is cut on the tracks it serves: a track the selection drops neither decides where the window lies nor fails it by having nothing inside it. A selection is part of what is served, so the URL version includes it; a mapper does not need to change its own `version`, though changing `tracks` under an unchanged `version` reloads the asset. An asset that serves every track keeps the version it always had.
 
 ### Naming a rendition's audio
 

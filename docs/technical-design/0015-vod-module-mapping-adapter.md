@@ -180,6 +180,8 @@ Stage 1 (the two additions to the answer model) is implemented. The translator a
 - **Overrides** are one `AudioOverrides` per rendition. `language` is three lower-case ASCII letters (`und` is accepted and, as always, shown as no language); `label` is 1 to 128 bytes without control characters; at most one rendition is `default`. A rendition whose served tracks have no audio, or more than one audio track, fails to load (`500`) rather than guess which to name.
 - **HLS** gets `NAME` from the label (a `"` becomes `'`) and `DEFAULT` from the flag, falling back to the first. **DASH** gets a `<Label>` after the content protection and before the `Representation`, escaped for XML. It is checked here for well-formedness and escaping, not against a player.
 - **Reload.** A change to any of these under an unchanged mapper `version` reloads the asset, as re-keying does.
+- **A clip's selection is applied before the clip is cut**, so the window is placed on the tracks that are served. (The first version applied it after, and a short track the clip dropped could fail a window the kept tracks satisfy; a review found it.)
+- **Known and deferred:** two renditions with the same `label` give two HLS audio members with the same `NAME`, which RFC 8216 forbids; overrides on a video rendition whose audio is not in the group are accepted and have no effect (logged nowhere). Both are for the translator stage to decide.
 - **Not done in this stage:** a one-element `renditions` answer for a single file with overrides (the translator builds it), and a `default` flag on a rendition whose audio is not in the group has no effect.
 
 ## Open questions

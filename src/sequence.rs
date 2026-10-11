@@ -82,8 +82,21 @@ pub(crate) fn build(
         } else {
             Trailing::Cut
         };
-        let cut = clip::trim(&files[file].parsed.index, window, start, trailing)
-            .map_err(named(position))?;
+        // The clip is cut on the tracks it serves: one it drops must neither decide where the
+        // window lies nor fail it by having nothing inside it (TDD 0015).
+        let narrowed;
+        let index = match tracks {
+            Some(selection) => {
+                let mut index = files[file].parsed.index.clone();
+                index.tracks = selection
+                    .apply(std::mem::take(&mut index.tracks))
+                    .map_err(named(position))?;
+                narrowed = index;
+                &narrowed
+            }
+            None => &files[file].parsed.index,
+        };
+        let cut = clip::trim(index, window, start, trailing).map_err(named(position))?;
         tracing::info!(
             event = "clip_trimmed",
             asset.id = asset_id,
@@ -94,7 +107,7 @@ pub(crate) fn build(
             served.to_ms = cut.served_to_ms,
             encrypted = encryption.is_some(),
         );
-        trimmed.push((file, start, cut.index, encryption.clone(), tracks));
+        trimmed.push((file, start, cut.index, encryption.clone()));
         start = cut.end;
     }
     let version = clip::version_of(
@@ -110,8 +123,7 @@ pub(crate) fn build(
         }),
     );
     let mut assets = Vec::with_capacity(trimmed.len());
-    for (position, (file, clip_start, index, encryption, tracks)) in trimmed.into_iter().enumerate()
-    {
+    for (position, (file, clip_start, index, encryption)) in trimmed.into_iter().enumerate() {
         let asset = PackagedAsset::assemble(
             files[file].source.clone(),
             index,
@@ -126,7 +138,8 @@ pub(crate) fn build(
                 hls_mux_audio: false,
                 hls_aes128: aes128.cloned(),
                 source_keys: None,
-                tracks,
+                // Applied above, before the clip was cut.
+                tracks: None,
                 audio: None,
             },
         )
