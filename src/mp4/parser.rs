@@ -1513,7 +1513,7 @@ mod tests {
             assert_eq!(protection(track).constant_iv.map(|iv| iv[0]), Some(0xc0));
             assert!(protection(track).aux.iv(0).is_none());
         }
-        assert!(!protection(&video).aux.subsamples(0).is_empty());
+        assert_ne!(protection(&video).aux.subsamples(0), []);
         assert_eq!(protection(&audio).aux.bytes(), 0, "audio needs no senc");
     }
 
