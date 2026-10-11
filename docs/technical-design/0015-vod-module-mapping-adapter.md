@@ -1,6 +1,6 @@
 # TDD 0015: nginx-vod-module mapping adapter
 
-- Status: Draft
+- Status: Accepted; stage 1 implemented (`tracks`, rendition `language`, `label` and `default`)
 - Created: 2026-10-11
 - Updated: 2026-10-11
 - Related ADRs: None
@@ -170,6 +170,17 @@ Additive: with no `dialect` the HTTP resolver is unchanged, and rollback is remo
 1. `tracks`, and `language`/`label`/`default` on a rendition, in segmentor's own answer, with the track filter and the HLS and DASH output.
 2. The translator, with its tests.
 3. The dialect plumbing (request building, version, TTL, health), the configuration, and the documentation, including a stub of the migration guide.
+
+## Implementation status
+
+Stage 1 (the two additions to the answer model) is implemented. The translator and the dialect (stages 2 and 3) are not. What differs from the design above, or settles it:
+
+- **`tracks` and the version.** It is mixed into the version of the asset, and of a clip, only when set, and in one spelling, so `a1-v1` and `v1-a1` are the same asset and an asset that serves every track keeps the version it always had. The `tracks` on the answer as a whole is for a single file; with `renditions` or `clips` it is rejected with a message saying where it goes.
+- **Selected audio** is renumbered in file order. The selection is applied before a protected source's keys are looked up, so it works with [encrypted sources](0014-encrypted-source-files.md).
+- **Overrides** are one `AudioOverrides` per rendition. `language` is three lower-case ASCII letters (`und` is accepted and, as always, shown as no language); `label` is 1 to 128 bytes without control characters; at most one rendition is `default`. A rendition whose served tracks have no audio, or more than one audio track, fails to load (`500`) rather than guess which to name.
+- **HLS** gets `NAME` from the label (a `"` becomes `'`) and `DEFAULT` from the flag, falling back to the first. **DASH** gets a `<Label>` after the content protection and before the `Representation`, escaped for XML. It is checked here for well-formedness and escaping, not against a player.
+- **Reload.** A change to any of these under an unchanged mapper `version` reloads the asset, as re-keying does.
+- **Not done in this stage:** a one-element `renditions` answer for a single file with overrides (the translator builds it), and a `default` flag on a rendition whose audio is not in the group has no effect.
 
 ## Open questions
 

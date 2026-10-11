@@ -55,7 +55,7 @@ DRM is the most common reason a studio-licensed catalog cannot move. These steps
 | DTS audio | Decide first | HLS only in nginx-vod-module |
 | Vorbis audio | Decide first | DASH only, and mostly a WebM concern |
 | Muxing audio and video from separate files into one stream | To do | nginx-vod-module serves a separate audio file as part of the video's stream, without client support for rendition groups |
-| Track selection for files with several audio or video tracks | To do | Let the mapper choose which tracks of a file to serve |
+| Track selection for files with several audio or video tracks | Done | The answer's `tracks`, on a file, a rendition or a clip, in nginx-vod-module's syntax (`v1-a2`, `a0`); [TDD 0015](technical-design/0015-vod-module-mapping-adapter.md) |
 
 ## Phase 3: Delivery modes and protocols
 
@@ -130,7 +130,7 @@ Where it stands (2026-10-03, 60-minute asset):
 
 | Step | Status | Notes |
 | --- | --- | --- |
-| Mapping-JSON compatibility layer | Designed (part 1 of 5) | [TDD 0015](technical-design/0015-vod-module-mapping-adapter.md): a `vod-module` dialect of the HTTP resolver reads the existing mapping service and translates single files, adaptive sets of sequences, clips with durations, captions and track selection. Later parts: adaptive playlists, `cenc` and the DRM bridge, URL compatibility, fallback and the migration guide. [TDD 0008](technical-design/0008-clipping-and-concatenation.md) deferred "vod-module mapping compatibility" |
+| Mapping-JSON compatibility layer | Part 1 of 5 in progress: `tracks` and rendition language, label and default done | [TDD 0015](technical-design/0015-vod-module-mapping-adapter.md): a `vod-module` dialect of the HTTP resolver reads the existing mapping service and translates single files, adaptive sets of sequences, clips with durations, captions and track selection. Later parts: adaptive playlists, `cenc` and the DRM bridge, URL compatibility, fallback and the migration guide. [TDD 0008](technical-design/0008-clipping-and-concatenation.md) deferred "vod-module mapping compatibility" |
 | URL compatibility, or a redirect layer | Decide first | nginx-vod-module URLs differ from segmentor's. Players that load URLs from the mapper need nothing; hard-coded URLs need a rewrite at the proxy |
 | Migration guide | To do | Feature mapping, configuration translation, and a shadow-traffic comparison procedure |
 | Shadow comparison in production | To do | Run both behind the same CDN on a sample of traffic, and compare manifests, segment decodes, and error rates before cutover |
