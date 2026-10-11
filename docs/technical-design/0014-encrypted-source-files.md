@@ -1,6 +1,6 @@
 # TDD 0014: Encrypted source files
 
-- Status: Accepted; stage 1 implemented (decrypt, one progressive file)
+- Status: Accepted; stages 1 and 2 implemented (decrypt, one file, progressive or fragmented)
 - Created: 2026-10-11
 - Updated: 2026-10-11
 - Related ADRs: [ADR 0001](../adr/0001-use-fragmented-mp4-for-media-segments.md)
@@ -155,7 +155,9 @@ Rollback is removing `source_encryption` from the answers.
 Stage 1 is implemented: decrypt, on a single progressive file, for all four schemes. What differs from the design above, or settles it:
 
 - **Aux data** is read from `senc` under `stbl` only. A file that locates its IVs with `saiz` and `saio` and has no `senc` fails with a message naming sample auxiliary information, as does a `seig` sample group. Reading outside `moov` (and the `limits.max_source_aux_bytes` limit that goes with it) arrives with the first stage that needs it: `moov` is already bounded by `limits.max_metadata_bytes`.
-- **Mapper answer.** `source_encryption` takes `keys` for a single file. `passthrough`, renditions and clips are refused with a `502`, and a key entry may name `tracks` (`all`, `video`, `audio`) to restrict it to that kind of track. Fragmented encrypted sources fail at load, naming the track.
+- **Mapper answer.** `source_encryption` takes `keys` for a single file. `passthrough`, renditions and clips are refused with a `502`, and a key entry may name `tracks` (`all`, `video`, `audio`) to restrict it to that kind of track.
+- **Stage 2, fragmented sources.** A track's table is the entries of the `senc` in each of its `traf`s, in order; each `senc` must list exactly the samples of that `traf`'s `trun` boxes, and the fragments together exactly the track's samples, or the asset fails at load naming the track. A `traf` with `saiz` and no `senc`, or none and no constant IV, fails the same way, as does a `seig` group in any `traf` (even when `tenc` says unprotected). Counts are bounded by the track's own sample count before anything is allocated.
+- **FFmpeg's fragmented output is not conformant for audio.** From the second fragment on, each audio `senc` lists every sample so far instead of the fragment's own (FFmpeg cannot decode that audio itself). Segmentor refuses the file rather than guess which entries are the fragment's: a wrong IV would decrypt to garbage. A test keeps the real file as the negative case; its video-only copy is the positive one.
 - **Not offered for a decrypted source:** I-frame playlists and fragments, and muxed HLS audio (`packaging.hls_mux_audio` is ignored for it). Both come back when a stage needs them.
 - **The wrong-key check** is the best-effort one described under [Decrypting](#decrypting).
 - **`/admin/status`** lists `source_key_ids` for a decrypted asset; the mode and the scheme are not reported yet, since decrypt is the only mode.
