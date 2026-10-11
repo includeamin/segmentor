@@ -63,6 +63,7 @@ A file on an HTTP origin:
 | `renditions` | Instead of `location` | Several files served as one adaptive asset; see [Renditions](#renditions). Exactly one of `location`, `renditions`, or `clips` must be set |
 | `clips` | Instead of `location` | One file trimmed, or several played back to back; see [Clips](#clips) |
 | `encryption` | No | Content keys and DRM signalling; see [Encryption](#encryption). The answer then carries secrets |
+| `tracks` | No | Which tracks of a single file to serve; see [Choosing tracks](#choosing-tracks). Renditions and clips carry their own, and `tracks` on an answer with either is rejected |
 
 ### `304 Not Modified`
 
@@ -200,6 +201,10 @@ Instead of a single `location`, an answer may give several files as one adaptive
 | --- | --- | --- |
 | `id` | Yes | A short URL-safe label (letters, digits, hyphens), at most 32 bytes, unique within the asset. It appears in URLs as `video-{id}` |
 | `location` | Yes | A `file` or `http` location with the same rules as a single asset's |
+| `tracks` | No | Which tracks of the file this rendition serves; see [Choosing tracks](#choosing-tracks) |
+| `language` | No | Three lower-case letters (ISO 639), replacing the language in the file for the audio this rendition brings. See [Naming a rendition's audio](#naming-a-renditions-audio) |
+| `label` | No | The name a viewer sees for that audio: 1 to 128 bytes, no control characters |
+| `default` | No | `true` makes this audio the group's default instead of the first. At most one rendition may |
 
 The server does not ask what kind a rendition is; it loads every one exactly as it would load a single-file asset, and looks at what tracks came out. **A rendition with a video track is a video rendition. One with only audio, and no video, is an audio rendition** — this is how separate audio files, and several audio languages, are supplied.
 
@@ -231,6 +236,7 @@ Instead of a single `location`, an answer may list clips: each a file and an opt
 | `from_ms` | No | Default `0`. A time on the file's own clock, the one subtitle cues are read against |
 | `to_ms` | No | Default: the end of the file. Must be later than `from_ms`; a value past the end is clamped to the end |
 | `encryption` | No | This clip's own [`encryption`](#encryption) object, with the same rules as the answer's. Absent means the clip uses the answer's own `encryption` (or is clear if the answer has none). See [Different keys per clip](#different-keys-per-clip) |
+| `tracks` | No | Which tracks of the file this clip serves; see [Choosing tracks](#choosing-tracks) |
 
 Both times are at most 4294967295 ms, and an answer may list at most `limits.max_clips` (default 64) clips.
 
@@ -243,6 +249,32 @@ Both times are at most 4294967295 ms, and an answer may list at most `limits.max
 **Loading is all or nothing:** if any clip's file cannot be read or parsed, its window holds no media, or it does not match the others, the whole asset fails with that clip named. A file named by several clips is read once. The URL version hashes the mapper's `version` with every clip's content and window, so trimming the same file differently always gives new URLs.
 
 `subtitles` cannot be combined with `clips` yet: the mapper cannot know where a keyframe-aligned clip begins, so cues written for the output would drift. Such an answer is rejected.
+
+## Choosing tracks
+
+A file may hold several tracks, such as one video and two languages of audio. `tracks` says which to serve, in the syntax nginx-vod-module uses:
+
+| Selector | Serves |
+| --- | --- |
+| `v1-a1` | The first video track and the first audio track |
+| `v1` | The first video track, and no audio |
+| `a2` | The second audio track alone |
+| `v0-a0` | Every video and every audio track |
+
+It sits beside `location` on a single-file answer, and on each rendition and each clip. Each kind is named at most once; a number after `v` or `a` is 1 to 255, counting in the order the file lists the tracks; `0` means every track of that kind; a kind that is not named is not served. **Absent means every track**, exactly as before.
+
+A selector that matches no track of a kind serves nothing of that kind, so the common `v1-a1` still serves a file that has no audio. Only a selection that leaves no track at all fails the asset, with the selector named. The audio tracks that are left are numbered `audio-1`, `audio-2`, … in file order, so the second track of a file chosen alone is `audio-1` in the URLs and playlists.
+
+A selection is part of what is served, so the URL version includes it; a mapper does not need to change its own `version`, though changing `tracks` under an unchanged `version` reloads the asset. An asset that serves every track keeps the version it always had.
+
+### Naming a rendition's audio
+
+`language`, `label` and `default` on a rendition describe the **one audio track it brings**, instead of what the file says. They are what makes a ladder of video files plus one file per language usable when the files do not carry the right language: the language is what players match on, the label is what they show, and `default` picks the track used when the viewer has no preference (without it, the first audio is the default).
+
+- The language is written as `LANGUAGE` in the HLS playlist and `lang` in the DASH manifest; the label as `NAME` (a `"` becomes `'`) and as a DASH `<Label>`; the default as `DEFAULT=YES` in HLS. DASH has no default flag.
+- They need **exactly one audio track to name**: with `tracks` leaving none, or several, the asset fails to load. Use `tracks` (`a1`, `a2`) to pick one.
+- They apply to the audio group only when that rendition's audio is in it: when the answer has audio-only renditions, the audio of the video renditions is not used.
+- They are part of the asset's version. They change the playlists and the manifest and nothing in the media segments.
 
 ## Encryption
 
