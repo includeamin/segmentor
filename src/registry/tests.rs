@@ -5682,3 +5682,307 @@ async fn changing_a_members_selection_under_the_same_version_reloads_the_asset()
     let after = version_in(&fetch(&h.app, "/hls/seq/master.m3u8").await.2);
     assert_ne!(before, after, "another selection, other URLs");
 }
+
+// ---- Rendition language, label and default (TDD 0015) ----
+
+/// A ladder with a video rendition and two dedicated audio renditions, the second named in
+/// Spanish and made the default.
+fn named_audio_ladder() -> Answer {
+    Answer::renditions(
+        "v1",
+        &[
+            ("hi", "rendition-720p.mp4"),
+            ("en", "rendition-audio-en.m4a"),
+            ("es", "rendition-audio-es.m4a"),
+        ],
+    )
+    .with_rendition_field("hi", "tracks", serde_json::json!("v1"))
+    .with_rendition_field("en", "language", serde_json::json!("eng"))
+    .with_rendition_field("en", "label", serde_json::json!("English"))
+    .with_rendition_field("es", "language", serde_json::json!("spa"))
+    .with_rendition_field("es", "label", serde_json::json!("Español"))
+    .with_rendition_field("es", "default", serde_json::json!(true))
+}
+
+#[tokio::test]
+async fn a_renditions_audio_can_be_named_and_made_the_default() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper.state.set("movie", named_audio_ladder());
+    let master = text(&fetch(&h.app, "/hls/movie/master.m3u8").await.2);
+    let lines = audio_lines(&master);
+    assert_eq!(lines.len(), 2, "{master}");
+    // The order of the group is the order of the renditions; the default is the flagged one.
+    assert!(
+        lines[0].contains("NAME=\"English\"")
+            && lines[0].contains("LANGUAGE=\"eng\"")
+            && lines[0].contains("DEFAULT=NO"),
+        "{lines:?}"
+    );
+    assert!(
+        lines[1].contains("NAME=\"Español\"")
+            && lines[1].contains("LANGUAGE=\"spa\"")
+            && lines[1].contains("DEFAULT=YES"),
+        "{lines:?}"
+    );
+    let dash = text(&fetch(&h.app, "/dash/movie/manifest.mpd").await.2);
+    assert!(
+        dash.contains("<Label>English</Label>") && dash.contains("<Label>Español</Label>"),
+        "{dash}"
+    );
+    assert!(
+        dash.contains("lang=\"eng\"") && dash.contains("lang=\"spa\""),
+        "{dash}"
+    );
+}
+
+/// Without a flag the first audio is the default, as it always was.
+#[tokio::test]
+async fn the_first_audio_is_the_default_when_none_is_flagged() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper.state.set(
+        "movie",
+        Answer::renditions(
+            "v1",
+            &[
+                ("hi", "rendition-720p.mp4"),
+                ("en", "rendition-audio-en.m4a"),
+                ("es", "rendition-audio-es.m4a"),
+            ],
+        )
+        .with_rendition_field("hi", "tracks", serde_json::json!("v1"))
+        .with_rendition_field("es", "label", serde_json::json!("Español")),
+    );
+    let lines = audio_lines(&text(&fetch(&h.app, "/hls/movie/master.m3u8").await.2));
+    assert!(lines[0].contains("DEFAULT=YES"), "{lines:?}");
+    assert!(
+        lines[1].contains("DEFAULT=NO") && lines[1].contains("NAME=\"Español\""),
+        "{lines:?}"
+    );
+}
+
+/// A language replaces what the file says, for the audio a video rendition brings with it.
+#[tokio::test]
+async fn a_language_replaces_the_one_in_the_file() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper.state.set(
+        "movie",
+        Answer::renditions("v1", &[("main", "h264-aac-two-audio.mp4")])
+            .with_rendition_field("main", "tracks", serde_json::json!("v1-a1"))
+            .with_rendition_field("main", "language", serde_json::json!("fra")),
+    );
+    let master = text(&fetch(&h.app, "/hls/movie/master.m3u8").await.2);
+    let lines = audio_lines(&master);
+    assert_eq!(lines.len(), 1, "{master}");
+    assert!(
+        lines[0].contains("LANGUAGE=\"fra\"") && !lines[0].contains("eng"),
+        "{lines:?}"
+    );
+}
+
+/// Quotes and markup in a label cannot break out of the playlist or the manifest.
+#[tokio::test]
+async fn a_label_is_escaped_where_it_is_written() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper.state.set(
+        "movie",
+        Answer::renditions(
+            "v1",
+            &[
+                ("hi", "rendition-720p.mp4"),
+                ("en", "rendition-audio-en.m4a"),
+            ],
+        )
+        .with_rendition_field("hi", "tracks", serde_json::json!("v1"))
+        .with_rendition_field("en", "label", serde_json::json!("R&D \"cut\" <1>")),
+    );
+    let master = text(&fetch(&h.app, "/hls/movie/master.m3u8").await.2);
+    assert!(master.contains("NAME=\"R&D 'cut' <1>\""), "{master}");
+    let dash = text(&fetch(&h.app, "/dash/movie/manifest.mpd").await.2);
+    assert!(
+        dash.contains("<Label>R&amp;D &quot;cut&quot; &lt;1&gt;</Label>"),
+        "{dash}"
+    );
+}
+
+/// A name changes the playlists and nothing in the media, but it is other output, so other URLs.
+#[tokio::test]
+async fn overrides_change_the_playlists_and_the_version_and_never_the_media() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper.state.set(
+        "plain",
+        Answer::renditions(
+            "v1",
+            &[
+                ("hi", "rendition-720p.mp4"),
+                ("en", "rendition-audio-en.m4a"),
+            ],
+        )
+        .with_rendition_field("hi", "tracks", serde_json::json!("v1")),
+    );
+    h.mapper.state.set(
+        "named",
+        Answer::renditions(
+            "v1",
+            &[
+                ("hi", "rendition-720p.mp4"),
+                ("en", "rendition-audio-en.m4a"),
+            ],
+        )
+        .with_rendition_field("hi", "tracks", serde_json::json!("v1"))
+        .with_rendition_field("en", "label", serde_json::json!("English")),
+    );
+    h.mapper.state.set(
+        "renamed",
+        Answer::renditions(
+            "v1",
+            &[
+                ("hi", "rendition-720p.mp4"),
+                ("en", "rendition-audio-en.m4a"),
+            ],
+        )
+        .with_rendition_field("hi", "tracks", serde_json::json!("v1"))
+        .with_rendition_field("en", "label", serde_json::json!("Anglais")),
+    );
+    h.mapper.state.set(
+        "flagged",
+        Answer::renditions(
+            "v1",
+            &[
+                ("hi", "rendition-720p.mp4"),
+                ("en", "rendition-audio-en.m4a"),
+            ],
+        )
+        .with_rendition_field("hi", "tracks", serde_json::json!("v1"))
+        .with_rendition_field("en", "label", serde_json::json!("English"))
+        .with_rendition_field("en", "default", serde_json::json!(true)),
+    );
+    h.mapper.state.set(
+        "spoken",
+        Answer::renditions(
+            "v1",
+            &[
+                ("hi", "rendition-720p.mp4"),
+                ("en", "rendition-audio-en.m4a"),
+            ],
+        )
+        .with_rendition_field("hi", "tracks", serde_json::json!("v1"))
+        .with_rendition_field("en", "label", serde_json::json!("English"))
+        .with_rendition_field("en", "language", serde_json::json!("fra")),
+    );
+    let plain = version_in(&fetch(&h.app, "/hls/plain/master.m3u8").await.2);
+    let spoken = version_in(&fetch(&h.app, "/hls/spoken/master.m3u8").await.2);
+    let named = version_in(&fetch(&h.app, "/hls/named/master.m3u8").await.2);
+    assert_ne!(named, spoken, "only the language differs");
+    let renamed = version_in(&fetch(&h.app, "/hls/renamed/master.m3u8").await.2);
+    let flagged = version_in(&fetch(&h.app, "/hls/flagged/master.m3u8").await.2);
+    assert_ne!(plain, named);
+    assert_ne!(named, renamed);
+    assert_ne!(named, flagged, "only the default flag differs");
+    for track in ["video-hi", "audio-1"] {
+        assert_eq!(
+            track_segments(&h, "named", track, &named).await,
+            track_segments(&h, "plain", track, &plain).await,
+            "{track}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bad_overrides_are_a_bad_answer() {
+    let h = harness().await;
+    let cases = [
+        ("short", "language", serde_json::json!("en")),
+        ("upper", "language", serde_json::json!("ENG")),
+        ("long", "language", serde_json::json!("english")),
+        ("digit", "language", serde_json::json!("en1")),
+        ("empty", "label", serde_json::json!("")),
+        ("huge", "label", serde_json::json!("x".repeat(129))),
+        ("control", "label", serde_json::json!("a\nb")),
+        ("kind", "default", serde_json::json!("yes")),
+    ];
+    for (id, field, value) in cases {
+        h.mapper.state.set(
+            id,
+            Answer::renditions(
+                "v1",
+                &[
+                    ("hi", "rendition-720p.mp4"),
+                    ("en", "rendition-audio-en.m4a"),
+                ],
+            )
+            .with_rendition_field("en", field, value),
+        );
+        assert_eq!(
+            status(&h.app, &format!("/hls/{id}/master.m3u8")).await,
+            StatusCode::BAD_GATEWAY,
+            "{id}"
+        );
+    }
+    // Two defaults cannot both be the default.
+    h.mapper.state.set(
+        "two",
+        Answer::renditions(
+            "v1",
+            &[
+                ("hi", "rendition-720p.mp4"),
+                ("en", "rendition-audio-en.m4a"),
+                ("es", "rendition-audio-es.m4a"),
+            ],
+        )
+        .with_rendition_field("en", "default", serde_json::json!(true))
+        .with_rendition_field("es", "default", serde_json::json!(true)),
+    );
+    assert_eq!(
+        status(&h.app, "/hls/two/master.m3u8").await,
+        StatusCode::BAD_GATEWAY
+    );
+}
+
+/// An override needs exactly one audio track to apply to.
+#[tokio::test]
+async fn an_override_with_no_audio_track_or_several_fails_the_asset() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "none",
+        Answer::renditions("v1", &[("hi", "rendition-720p.mp4")])
+            .with_rendition_field("hi", "tracks", serde_json::json!("v1"))
+            .with_rendition_field("hi", "language", serde_json::json!("eng")),
+    );
+    h.mapper.state.set(
+        "several",
+        Answer::renditions("v1", &[("main", "h264-aac-two-audio.mp4")])
+            .with_rendition_field("main", "tracks", serde_json::json!("v1-a0"))
+            .with_rendition_field("main", "label", serde_json::json!("Movie")),
+    );
+    for id in ["none", "several"] {
+        assert_eq!(
+            status(&h.app, &format!("/hls/{id}/master.m3u8")).await,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{id}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn changing_an_override_under_the_same_version_reloads_the_asset() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper.state.always_full.store(true, Ordering::SeqCst);
+    let ladder = |label: &str| {
+        let mut answer = Answer::renditions(
+            "v1",
+            &[
+                ("hi", "rendition-720p.mp4"),
+                ("en", "rendition-audio-en.m4a"),
+            ],
+        )
+        .with_rendition_field("hi", "tracks", serde_json::json!("v1"))
+        .with_rendition_field("en", "label", serde_json::json!(label));
+        answer.ttl_seconds = Some(0);
+        answer
+    };
+    h.mapper.state.set("movie", ladder("English"));
+    assert!(text(&fetch(&h.app, "/hls/movie/master.m3u8").await.2).contains("NAME=\"English\""));
+    h.mapper.state.set("movie", ladder("Anglais"));
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(text(&fetch(&h.app, "/hls/movie/master.m3u8").await.2).contains("NAME=\"Anglais\""));
+}

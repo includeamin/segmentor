@@ -56,6 +56,9 @@ pub(crate) struct Track {
     /// How the source protects this track, when it does (TDD 0014). Its per-sample data is
     /// indexed from the first sample of the file's tables: see `SampleIndex::window_start`.
     pub(crate) source_protection: Option<std::sync::Arc<super::SourceProtection>>,
+    /// The name a mapper gave this audio track, in place of the one made from its position and
+    /// language (TDD 0015).
+    pub(crate) label: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

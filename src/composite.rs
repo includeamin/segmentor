@@ -929,9 +929,19 @@ fn render(
             bandwidth: *bandwidth,
         })
         .collect::<Vec<_>>();
+    // The first audio is the default unless a mapper flagged another (TDD 0015).
+    let default_audio = audio
+        .iter()
+        .position(|entry| asset_for(video, audio_only, entry.owner).audio_default())
+        .unwrap_or(0);
     let adaptive_audio = audio_views
         .iter()
-        .map(|(key, track)| AdaptiveAudio { key: *key, track })
+        .enumerate()
+        .map(|(index, (key, track))| AdaptiveAudio {
+            key: *key,
+            track,
+            default: index == default_audio,
+        })
         .collect::<Vec<_>>();
 
     let iframe_presentation = presentation_for(&video[iframe_source].asset, version);

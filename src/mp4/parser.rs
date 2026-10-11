@@ -373,6 +373,7 @@ fn parse_track(
             codec,
             samples,
             source_protection,
+            label: None,
         },
         edit,
     ))

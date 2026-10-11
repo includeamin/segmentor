@@ -29,6 +29,8 @@ pub(crate) struct Extras {
     pub(crate) source_keys: Option<Arc<crate::cenc::SourceKeys>>,
     /// Which tracks of the file to serve; all of them when absent (TDD 0015).
     pub(crate) tracks: Option<crate::media::TrackSelection>,
+    /// A language, label and default for the file's one audio track (TDD 0015).
+    pub(crate) audio: Option<crate::media::AudioOverrides>,
 }
 
 #[derive(Debug)]
@@ -50,6 +52,8 @@ pub(crate) struct PackagedAsset {
     /// The HLS stream that carries the default audio inside the video segments, when the load
     /// asked for one and the asset can have it (TDD 0011).
     muxed: Option<Muxed>,
+    /// Whether this asset's audio is the audio group's default (TDD 0015).
+    audio_default: bool,
 }
 
 /// The muxed HLS stream: video plus the first audio track, in one init segment and one
@@ -173,10 +177,9 @@ impl PackagedAsset {
             hls_aes128,
             source_keys,
             tracks,
+            audio,
         } = extras;
-        if let Some(selection) = tracks {
-            index.tracks = selection.apply(std::mem::take(&mut index.tracks))?;
-        }
+        let audio = narrow_and_name(&mut index, tracks, audio)?;
         let decryption = crate::cenc::AssetDecryption::new(&index.tracks, source_keys.as_deref())?;
         let plan = segment::plan(&index, segment_duration_ms, limits)?;
         let subtitles = prepare_subtitles(&index, subtitles)?;
@@ -240,6 +243,7 @@ impl PackagedAsset {
                 hls_aes128.as_deref(),
                 source_keys_ref,
                 tracks,
+                audio.as_ref(),
             )
         });
         let rendered = RenderedManifests::render(
@@ -263,6 +267,7 @@ impl PackagedAsset {
             aes128: hls_aes128,
             decryption,
             muxed,
+            audio_default: audio.as_ref().is_some_and(|audio| audio.default),
         })
     }
 
@@ -278,6 +283,11 @@ impl PackagedAsset {
             .with_aes128(self.aes128.as_deref())
             .with_muxed_audio(self.muxed.is_some())
             .with_iframes(self.decryption.is_none())
+    }
+
+    /// Whether the mapper made this asset's audio the default of the audio group.
+    pub(crate) const fn audio_default(&self) -> bool {
+        self.audio_default
     }
 
     /// The key IDs (as UUIDs) of the protected tracks of the source, never the keys.
@@ -752,6 +762,49 @@ fn prepare_subtitles(index: &MediaIndex, subtitles: Vec<Subtitle>) -> Result<Vec
         .collect()
 }
 
+/// Keeps the tracks a mapper chose and gives the one audio track it named its language and label
+/// (TDD 0015). Returns the overrides that were applied, if any.
+fn narrow_and_name(
+    index: &mut MediaIndex,
+    tracks: Option<crate::media::TrackSelection>,
+    audio: Option<crate::media::AudioOverrides>,
+) -> Result<Option<crate::media::AudioOverrides>> {
+    if let Some(selection) = tracks {
+        index.tracks = selection.apply(std::mem::take(&mut index.tracks))?;
+    }
+    let audio = audio.filter(|audio| !audio.is_empty());
+    if let Some(audio) = &audio {
+        apply_audio_overrides(&mut index.tracks, audio)?;
+    }
+    Ok(audio)
+}
+
+/// Gives the one audio track a mapper named its language and label (TDD 0015). A rendition whose
+/// tracks hold none, or several, has nothing unambiguous to name, so the asset fails.
+fn apply_audio_overrides(
+    tracks: &mut [Track],
+    overrides: &crate::media::AudioOverrides,
+) -> Result<()> {
+    let mut audio = tracks
+        .iter_mut()
+        .filter(|track| track.kind == TrackKind::Audio);
+    let (Some(track), None) = (audio.next(), audio.next()) else {
+        let count = tracks
+            .iter()
+            .filter(|track| track.kind == TrackKind::Audio)
+            .count();
+        return Err(Error::InvalidMedia(format!(
+            "language, label, and default name exactly one audio track, and the tracks served \
+             have {count}"
+        )));
+    };
+    if let Some(language) = &overrides.language {
+        track.language.clone_from(language);
+    }
+    track.label.clone_from(&overrides.label);
+    Ok(())
+}
+
 /// The `v` value in media URLs: a hash of everything the index was built from (`moov`, and every
 /// `moof` of a fragmented file), [`FORMAT_REVISION`], and any subtitle files, so changing a
 /// caption gives new URLs.
@@ -762,6 +815,7 @@ fn version_of(
     aes128: Option<&crate::cenc::Aes128>,
     source_keys: Option<&crate::cenc::SourceKeys>,
     tracks: Option<crate::media::TrackSelection>,
+    audio: Option<&crate::media::AudioOverrides>,
 ) -> String {
     use std::fmt::Write;
 
@@ -804,6 +858,16 @@ fn version_of(
     if let Some(tracks) = tracks {
         hasher.update(b"tracks");
         hasher.update(tracks.canonical());
+    }
+    // A name or a language is other output, though not other media. Absent adds nothing.
+    if let Some(audio) = audio {
+        hasher.update(b"audio");
+        for part in [audio.language.as_deref(), audio.label.as_deref()] {
+            let part = part.unwrap_or_default().as_bytes();
+            hasher.update((part.len() as u64).to_be_bytes());
+            hasher.update(part);
+        }
+        hasher.update([u8::from(audio.default)]);
     }
     hasher
         .finalize()
@@ -1027,7 +1091,7 @@ mod tests {
         assert!(asset.version().bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_ne!(asset.version(), moov_only);
         assert_eq!(
-            version_of(&asset.index, &[], None, None, None, None),
+            version_of(&asset.index, &[], None, None, None, None, None),
             asset.version(),
             "and it is stable"
         );
