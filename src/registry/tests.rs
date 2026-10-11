@@ -5286,3 +5286,223 @@ async fn a_decrypted_segment_answers_head_ranges_and_etags() {
         .unwrap();
     assert_eq!(conditional.status(), StatusCode::NOT_MODIFIED);
 }
+
+// ---- Track selection (TDD 0015) ----
+
+/// The `EXT-X-MEDIA` audio lines of a master playlist.
+fn audio_lines(master: &str) -> Vec<String> {
+    master
+        .lines()
+        .filter(|line| line.starts_with("#EXT-X-MEDIA:TYPE=AUDIO"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `h264-aac-two-audio.mp4` has a video track, then English audio, then Spanish audio.
+/// `tracks` picks among them with nginx-vod-module's syntax; what is picked is served exactly as
+/// the same track is in the whole file, and the audio left is numbered `audio-1`.
+#[tokio::test]
+async fn tracks_choose_which_tracks_of_a_file_are_served() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper
+        .state
+        .set("full", Answer::file("v1", "h264-aac-two-audio.mp4"));
+    for (id, tracks) in [
+        ("first", "v1-a1"),
+        ("second", "v1-a2"),
+        ("video", "v1"),
+        ("backwards", "a2-v1"),
+        ("all", "v0-a0"),
+        ("missing", "v1-a9"),
+    ] {
+        h.mapper.state.set(
+            id,
+            Answer::file("v1", "h264-aac-two-audio.mp4").with_tracks(tracks),
+        );
+    }
+    let version_of = |id: &'static str| {
+        let h = &h;
+        async move { version_in(&fetch(&h.app, &format!("/hls/{id}/master.m3u8")).await.2) }
+    };
+    let master_of = |id: &'static str| {
+        let h = &h;
+        async move { text(&fetch(&h.app, &format!("/hls/{id}/master.m3u8")).await.2) }
+    };
+
+    let full_master = master_of("full").await;
+    assert_eq!(audio_lines(&full_master).len(), 2, "{full_master}");
+    let (full_version, second_version) = (version_of("full").await, version_of("second").await);
+    assert_ne!(
+        full_version, second_version,
+        "a selection is part of the version"
+    );
+
+    // The second audio track, alone, is the shared audio group's only member.
+    let second_master = master_of("second").await;
+    let lines = audio_lines(&second_master);
+    assert_eq!(lines.len(), 1, "{second_master}");
+    assert!(
+        lines[0].contains("LANGUAGE=\"spa\"") && lines[0].contains("audio-1/"),
+        "{lines:?}"
+    );
+    let full = |track: &'static str| track_segments(&h, "full", track, &full_version);
+    let second = |track: &'static str| track_segments(&h, "second", track, &second_version);
+    assert_eq!(
+        second("video").await,
+        full("video").await,
+        "the video is untouched"
+    );
+    assert_eq!(
+        second("audio-1").await,
+        full("audio-2").await,
+        "the Spanish track, byte for byte, now called audio-1"
+    );
+
+    // The first audio track. Each selection is other media than the others, not only than the
+    // whole file.
+    let first_version = version_of("first").await;
+    assert_ne!(first_version, second_version);
+    assert_ne!(first_version, full_version);
+    assert_ne!(version_of("video").await, first_version);
+    let first = track_segments(&h, "first", "audio-1", &first_version).await;
+    assert_eq!(first, full("audio-1").await);
+
+    // Video only: no audio at all.
+    let video_master = master_of("video").await;
+    assert_eq!(
+        audio_lines(&video_master),
+        Vec::<String>::new(),
+        "{video_master}"
+    );
+
+    // The spelling does not matter, and v0-a0 is the whole file.
+    assert_eq!(version_of("backwards").await, second_version);
+    assert_eq!(audio_lines(&master_of("all").await).len(), 2);
+
+    // A selector that matches no audio still serves the video.
+    assert_eq!(
+        audio_lines(&master_of("missing").await),
+        Vec::<String>::new()
+    );
+}
+
+/// The DASH manifest follows the selection too.
+#[tokio::test]
+async fn the_dash_manifest_lists_only_the_selected_tracks() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "second",
+        Answer::file("v1", "h264-aac-two-audio.mp4").with_tracks("v1-a2"),
+    );
+    let manifest = text(&fetch(&h.app, "/dash/second/manifest.mpd").await.2);
+    assert_eq!(
+        manifest.matches("contentType=\"audio\"").count(),
+        1,
+        "{manifest}"
+    );
+    assert!(
+        manifest.contains("lang=\"spa\"") && !manifest.contains("lang=\"eng\""),
+        "{manifest}"
+    );
+    assert_eq!(
+        manifest.matches("contentType=\"video\"").count(),
+        1,
+        "{manifest}"
+    );
+}
+
+#[tokio::test]
+async fn a_selection_that_leaves_nothing_fails_the_asset_and_a_bad_one_is_a_bad_answer() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "nothing",
+        Answer::file("v1", "h264-aac-two-audio.mp4").with_tracks("a9"),
+    );
+    assert_eq!(
+        status(&h.app, "/hls/nothing/master.m3u8").await,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    for (id, tracks) in [
+        ("empty", ""),
+        ("word", "video"),
+        ("twice", "a1-a2"),
+        ("big", "a999"),
+    ] {
+        h.mapper.state.set(
+            id,
+            Answer::file("v1", "h264-aac-two-audio.mp4").with_tracks(tracks),
+        );
+        assert_eq!(
+            status(&h.app, &format!("/hls/{id}/master.m3u8")).await,
+            StatusCode::BAD_GATEWAY,
+            "{id}"
+        );
+    }
+    // On the answer as a whole, tracks belongs to a single file, not to renditions or clips.
+    h.mapper.state.set(
+        "renditions",
+        Answer::renditions(
+            "v1",
+            &[("a", "rendition-480p.mp4"), ("b", "rendition-720p.mp4")],
+        )
+        .with_tracks("v1"),
+    );
+    assert_eq!(
+        status(&h.app, "/hls/renditions/master.m3u8").await,
+        StatusCode::BAD_GATEWAY
+    );
+}
+
+/// Changing the selection under an unchanged mapper `version` reloads the asset, as re-keying does.
+#[tokio::test]
+async fn changing_the_selection_under_the_same_version_reloads_the_asset() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    let answer = |tracks: &str| {
+        let mut answer = Answer::file("v1", "h264-aac-two-audio.mp4").with_tracks(tracks);
+        answer.ttl_seconds = Some(0);
+        answer
+    };
+    h.mapper.state.always_full.store(true, Ordering::SeqCst);
+    h.mapper.state.set("movie", answer("v1-a1"));
+    let before = text(&fetch(&h.app, "/hls/movie/master.m3u8").await.2);
+    assert!(before.contains("LANGUAGE=\"eng\""), "{before}");
+
+    h.mapper.state.set("movie", answer("v1-a2"));
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let after = text(&fetch(&h.app, "/hls/movie/master.m3u8").await.2);
+
+    assert!(
+        after.contains("LANGUAGE=\"spa\"") && !after.contains("LANGUAGE=\"eng\""),
+        "{after}"
+    );
+    assert!(
+        metric(&h.state, "vod_asset_loads_total{outcome=\"ok\"} 2"),
+        "reloaded"
+    );
+}
+
+/// A selection applies to a protected source too: the track it drops is not served, and the one
+/// it keeps is decrypted.
+#[tokio::test]
+async fn a_selection_is_applied_before_a_protected_source_is_decrypted() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper
+        .state
+        .set("clear", Answer::file("v1", "h264-aac.mp4"));
+    h.mapper.state.set(
+        "src",
+        Answer::file("v1", "h264-aac-cenc.mp4")
+            .with_source_encryption(source_keys())
+            .with_tracks("v1"),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/src/master.m3u8").await.2);
+    let clear_version = version_in(&fetch(&h.app, "/hls/clear/master.m3u8").await.2);
+    assert_eq!(
+        audio_lines(&text(&fetch(&h.app, "/hls/src/master.m3u8").await.2)),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        track_segments(&h, "src", "video", &version).await,
+        track_segments(&h, "clear", "video", &clear_version).await
+    );
+}

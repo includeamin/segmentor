@@ -114,6 +114,7 @@ pub(crate) fn build(
                 hls_mux_audio: false,
                 hls_aes128: aes128.cloned(),
                 source_keys: None,
+                tracks: None,
             },
         )
         .map_err(named(position))?;

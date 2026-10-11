@@ -22,6 +22,7 @@ use super::{
 use crate::clip::{ClipWindow, MAX_CLIP_MS};
 use crate::config::Secret;
 use crate::config::{MapperConfig, is_valid_asset_id, read_token_file};
+use crate::media::TrackSelection;
 use crate::observability::request_id;
 
 const MAX_VERSION_BYTES: usize = 256;
@@ -124,6 +125,9 @@ struct Wire {
     /// Keys for a source that is already encrypted (TDD 0014). Validated before use.
     #[serde(default)]
     source_encryption: Option<crate::cenc::WireSourceEncryption>,
+    /// Which tracks of a single file to serve (TDD 0015), such as `v1-a2`.
+    #[serde(default)]
+    tracks: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -474,6 +478,25 @@ impl HttpResolver {
         Ok(renditions)
     }
 
+    /// The `tracks` of an answer, which belongs to a single file: renditions and clips carry their
+    /// own (TDD 0015).
+    fn interpret_tracks(
+        tracks: Option<&str>,
+        single_file: bool,
+    ) -> Result<Option<TrackSelection>, ResolveError> {
+        let tracks = tracks
+            .map(TrackSelection::parse)
+            .transpose()
+            .map_err(ResolveError::Rejected)?;
+        if tracks.is_some() && !single_file {
+            return Err(ResolveError::Rejected(
+                "tracks on the answer is for a single file; put it on each rendition or clip"
+                    .to_owned(),
+            ));
+        }
+        Ok(tracks)
+    }
+
     /// A sequence of clips instead of one `location`. Windows are checked here; whether a window
     /// holds any media waits until its file is parsed (`clip::trim`).
     fn interpret_clips(&self, wire: &[WireClip]) -> Result<Vec<ClipLocation>, ResolveError> {
@@ -627,6 +650,7 @@ impl HttpResolver {
                 "source_encryption is supported for a single file only".to_owned(),
             ));
         }
+        let tracks = Self::interpret_tracks(wire.tracks.as_deref(), location.is_some())?;
         Ok(ResolvedAsset {
             location,
             renditions,
@@ -638,6 +662,7 @@ impl HttpResolver {
             encryption,
             hls_aes128,
             source_encryption,
+            tracks,
         })
     }
 }

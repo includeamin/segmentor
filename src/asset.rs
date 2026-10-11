@@ -27,6 +27,8 @@ pub(crate) struct Extras {
     pub(crate) hls_aes128: Option<Arc<crate::cenc::Aes128>>,
     /// Keys that undo the protection of a source that is already encrypted (TDD 0014).
     pub(crate) source_keys: Option<Arc<crate::cenc::SourceKeys>>,
+    /// Which tracks of the file to serve; all of them when absent (TDD 0015).
+    pub(crate) tracks: Option<crate::media::TrackSelection>,
 }
 
 #[derive(Debug)]
@@ -118,17 +120,22 @@ impl PackagedAsset {
         limits: &LimitsConfig,
     ) -> Result<Self> {
         let parsed = mp4::parse(&source, limits).await?;
+        // Only the tracks that will be served need keys, so the selection is applied first. The
+        // assembly applies it again to what it is given, which is the whole file.
+        let selected;
+        let tracks = match extras.tracks {
+            Some(selection) => {
+                selected = selection.apply(parsed.index.tracks.clone())?;
+                &selected
+            }
+            None => &parsed.index.tracks,
+        };
         // A key that does not fit fails here, where the file can still be read (TDD 0014).
         if let Some(decryption) =
-            crate::cenc::AssetDecryption::new(&parsed.index.tracks, extras.source_keys.as_deref())?
+            crate::cenc::AssetDecryption::new(tracks, extras.source_keys.as_deref())?
         {
             decryption
-                .check_keys(
-                    &source,
-                    &parsed.metadata,
-                    &parsed.index.tracks,
-                    limits.max_segment_bytes,
-                )
+                .check_keys(&source, &parsed.metadata, tracks, limits.max_segment_bytes)
                 .await?;
         }
         let limits = limits.clone();
@@ -152,7 +159,7 @@ impl PackagedAsset {
     /// version derived from the content, for a clip whose version must also cover its window.
     pub(crate) fn assemble(
         source: MediaSourceKind,
-        index: MediaIndex,
+        mut index: MediaIndex,
         metadata: &Metadata,
         segment_duration_ms: u64,
         limits: &LimitsConfig,
@@ -165,7 +172,11 @@ impl PackagedAsset {
             hls_mux_audio,
             hls_aes128,
             source_keys,
+            tracks,
         } = extras;
+        if let Some(selection) = tracks {
+            index.tracks = selection.apply(std::mem::take(&mut index.tracks))?;
+        }
         let decryption = crate::cenc::AssetDecryption::new(&index.tracks, source_keys.as_deref())?;
         let plan = segment::plan(&index, segment_duration_ms, limits)?;
         let subtitles = prepare_subtitles(&index, subtitles)?;
@@ -228,6 +239,7 @@ impl PackagedAsset {
                 encryption_ref,
                 hls_aes128.as_deref(),
                 source_keys_ref,
+                tracks,
             )
         });
         let rendered = RenderedManifests::render(
@@ -749,6 +761,7 @@ fn version_of(
     encryption: Option<&crate::cenc::Encryption>,
     aes128: Option<&crate::cenc::Aes128>,
     source_keys: Option<&crate::cenc::SourceKeys>,
+    tracks: Option<crate::media::TrackSelection>,
 ) -> String {
     use std::fmt::Write;
 
@@ -785,6 +798,12 @@ fn version_of(
     // Output decrypted under one key is not the output of another.
     if let Some(source_keys) = source_keys {
         hasher.update(source_keys.fingerprint());
+    }
+    // The same file with other tracks is other media. Nothing is added when all are served, so
+    // such an asset keeps the version it always had.
+    if let Some(tracks) = tracks {
+        hasher.update(b"tracks");
+        hasher.update(tracks.canonical());
     }
     hasher
         .finalize()
@@ -1008,7 +1027,7 @@ mod tests {
         assert!(asset.version().bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_ne!(asset.version(), moov_only);
         assert_eq!(
-            version_of(&asset.index, &[], None, None, None),
+            version_of(&asset.index, &[], None, None, None, None),
             asset.version(),
             "and it is stable"
         );

@@ -38,6 +38,7 @@ impl StaticResolver {
             encryption: None,
             hls_aes128: None,
             source_encryption: None,
+            tracks: None,
         }))
     }
 }

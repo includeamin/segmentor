@@ -68,6 +68,8 @@ pub(crate) struct Answer {
     pub(crate) hls_aes128: Option<Value>,
     /// Keys for an encrypted source file (TDD 0014).
     pub(crate) source_encryption: Option<Value>,
+    /// Which tracks of a single file to serve (TDD 0015).
+    pub(crate) tracks: Option<String>,
 }
 
 impl Answer {
@@ -80,6 +82,12 @@ impl Answer {
     /// Adds a `source_encryption` object to the answer.
     pub(crate) fn with_source_encryption(mut self, source_encryption: Value) -> Self {
         self.source_encryption = Some(source_encryption);
+        self
+    }
+
+    /// Adds a `tracks` selector to the answer (TDD 0015).
+    pub(crate) fn with_tracks(mut self, tracks: &str) -> Self {
+        self.tracks = Some(tracks.to_owned());
         self
     }
 
@@ -111,6 +119,7 @@ impl Answer {
             encryption: None,
             hls_aes128: None,
             source_encryption: None,
+            tracks: None,
         }
     }
 
@@ -126,6 +135,7 @@ impl Answer {
             encryption: None,
             hls_aes128: None,
             source_encryption: None,
+            tracks: None,
         }
     }
 
@@ -145,6 +155,7 @@ impl Answer {
             encryption: None,
             hls_aes128: None,
             source_encryption: None,
+            tracks: None,
         }
     }
 
@@ -189,6 +200,7 @@ impl Answer {
             encryption: None,
             hls_aes128: None,
             source_encryption: None,
+            tracks: None,
         }
     }
 }
@@ -344,6 +356,9 @@ async fn mapper_asset(
     }
     if let Some(source_encryption) = answer.source_encryption {
         body["source_encryption"] = source_encryption;
+    }
+    if let Some(tracks) = answer.tracks {
+        body["tracks"] = json!(tracks);
     }
     if let Some(ttl) = answer.ttl_seconds {
         body["ttl_seconds"] = json!(ttl);
