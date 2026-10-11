@@ -162,6 +162,11 @@ Stage 1 is implemented: decrypt, on a single progressive file, for all four sche
 - **Checked against independent decoders.** FFmpeg decrypts the `cenc`, `cbc1` and `cbcs` fixtures to frames bit-identical to the clear file's, and decrypts its own `cenc` output, which the tests then compare with the clear twin. `cens` has no second opinion (see Open questions).
 - **Decrypt then encrypt** gives, byte for byte, the output of encrypting the clear file under the new key, and so does decrypt then whole-segment `AES-128`.
 - **Metrics.** Decrypting a segment is counted with the encrypted segments, since it takes the same route.
+- **Not built yet:** the decrypt benchmark in `make bench-compare` (the cost of losing zero-copy is **unmeasured**, and no document may quote a number for it), and the mode in the `asset_loaded` log line (it logs `media.encrypted`, which is about the output).
+- **HEVC** is read, decrypted and announced with its real codec string, checked end to end against the clear file. `tests/fixtures/protect-fixture.py` handles `hvcC` as well as `avcC`.
+- **`segmentor package`**, the development command, has no keys and refuses a protected source instead of writing it out.
+- **A `seig` sample group is refused even when `tenc` says the track is unprotected** (a clear lead), and `default_isProtected` may be only 0 or 1.
+- **The key check reads no sample larger than `limits.max_segment_bytes`**, which is when its segment would be refused anyway.
 
 ## Open questions
 
