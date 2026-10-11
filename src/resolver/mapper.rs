@@ -528,9 +528,14 @@ impl HttpResolver {
         if let Some(label) = &entry.label
             && (label.is_empty()
                 || label.len() > MAX_LABEL_BYTES
-                || label.chars().any(char::is_control))
+                || label.chars().any(|c| {
+                    // The label is written into XML, which cannot hold these two characters.
+                    c.is_control() || matches!(c, '\u{fffe}' | '\u{ffff}')
+                }))
         {
-            return reject("label is empty, overlong, or has a control character");
+            return reject(
+                "label is empty, overlong, or has a character a playlist or manifest cannot hold",
+            );
         }
         let overrides = AudioOverrides {
             language: entry.language.clone(),

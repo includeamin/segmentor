@@ -49,6 +49,17 @@ ffmpeg_quiet \
     -use_editlist 0 -movflags +faststart \
     "$fixture_dir/h264-aac-two-audio.mp4"
 
+# A second audio track that ends after one second, next to a full-length one: a clip that drops
+# it must not be cut, or refused, because of it (TDD 0015, tracks on a clip).
+ffmpeg_quiet \
+    -f lavfi -i "$video" -f lavfi -i "$tone_a" -f lavfi -i "sine=frequency=500:sample_rate=48000:duration=1" \
+    -map 0:v -map 1:a -map 2:a \
+    -c:v libx264 -pix_fmt yuv420p -preset medium -g 30 -keyint_min 30 -sc_threshold 0 -bf 2 \
+    -c:a aac -profile:a aac_low -b:a 96k \
+    -metadata:s:a:0 language=eng -metadata:s:a:1 language=spa \
+    -use_editlist 0 -movflags +faststart \
+    "$fixture_dir/h264-aac-short-second-audio.mp4"
+
 # A timecode track next to the audio and video, as phones and cameras write.
 ffmpeg_quiet \
     -f lavfi -i "$video" -f lavfi -i "$tone_a" \

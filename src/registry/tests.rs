@@ -5986,3 +5986,62 @@ async fn changing_an_override_under_the_same_version_reloads_the_asset() {
     tokio::time::sleep(Duration::from_millis(40)).await;
     assert!(text(&fetch(&h.app, "/hls/movie/master.m3u8").await.2).contains("NAME=\"Anglais\""));
 }
+
+/// A clip is cut on the tracks it serves, not on the ones it drops: a second audio track that
+/// ends after a second must not stop a window at 2.2 seconds, which the video and the first
+/// audio cover.
+#[tokio::test]
+async fn a_clip_is_cut_on_the_tracks_it_serves() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper.state.set(
+        "late",
+        Answer::clips(
+            "v1",
+            &[clip(
+                "h264-aac-short-second-audio.mp4",
+                Some(2200),
+                Some(2900),
+            )],
+        )
+        .with_clip_field(0, "tracks", serde_json::json!("v1-a1")),
+    );
+    let (code, _, master) = fetch(&h.app, "/hls/late/master.m3u8").await;
+    assert_eq!(code, StatusCode::OK, "{}", text(&master));
+    let master = text(&master);
+    let lines = audio_lines(&master);
+    assert_eq!(lines.len(), 1, "{master}");
+    assert!(lines[0].contains("LANGUAGE=\"eng\""), "{lines:?}");
+    let version = version_in(&master.into());
+    assert_eq!(
+        status(
+            &h.app,
+            &format!("/hls/late/audio-1/segments/0/media.m4s?v={version}")
+        )
+        .await,
+        StatusCode::OK
+    );
+}
+
+/// An XML 1.0 non-character cannot be written into the manifest, so it cannot be in a label.
+#[tokio::test]
+async fn a_label_that_cannot_be_written_into_xml_is_a_bad_answer() {
+    let h = harness().await;
+    for (id, label) in [("fffe", "a\u{fffe}b"), ("ffff", "a\u{ffff}b")] {
+        h.mapper.state.set(
+            id,
+            Answer::renditions(
+                "v1",
+                &[
+                    ("hi", "rendition-720p.mp4"),
+                    ("en", "rendition-audio-en.m4a"),
+                ],
+            )
+            .with_rendition_field("en", "label", serde_json::json!(label)),
+        );
+        assert_eq!(
+            status(&h.app, &format!("/hls/{id}/master.m3u8")).await,
+            StatusCode::BAD_GATEWAY,
+            "{id}"
+        );
+    }
+}
