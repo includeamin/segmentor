@@ -255,6 +255,31 @@ done
 python3 "$fixture_dir/protect-fixture.py" cenc \
     "$fixture_dir/h264-aac-default-edits.mp4" "$fixture_dir/h264-aac-default-edits-cenc.mp4"
 
+# Fragmented sources (TDD 0014, stage 2): the CMAF fixture protected under each scheme, with a
+# senc in every traf. Then FFmpeg's own fragmented cenc output. Its video is correct. Its audio
+# is not: from the second fragment on, each audio senc lists every sample so far, not the
+# fragment's own, which breaks ISO/IEC 23001-7 (and is why FFmpeg cannot decode that audio
+# itself). Segmentor must refuse that file; the video-only copy is the one it must decrypt.
+for scheme in cenc cens cbc1 cbcs; do
+    python3 "$fixture_dir/protect-fixture.py" "$scheme" \
+        "$fixture_dir/h264-aac-fragmented-cmaf.mp4" \
+        "$fixture_dir/h264-aac-fragmented-cmaf-$scheme.mp4"
+done
+ffmpeg_quiet \
+    -i "$fixture_dir/h264-aac.mp4" -c copy \
+    -movflags frag_keyframe+empty_moov+default_base_moof \
+    -encryption_scheme cenc-aes-ctr \
+    -encryption_key 00112233445566778899aabbccddeeff \
+    -encryption_kid 0123456789abcdef0123456789abcdef \
+    "$fixture_dir/h264-aac-fragmented-cenc-ffmpeg.mp4"
+ffmpeg_quiet \
+    -i "$fixture_dir/h264-aac.mp4" -an -c copy \
+    -movflags frag_keyframe+empty_moov+default_base_moof \
+    -encryption_scheme cenc-aes-ctr \
+    -encryption_key 00112233445566778899aabbccddeeff \
+    -encryption_kid 0123456789abcdef0123456789abcdef \
+    "$fixture_dir/h264-video-fragmented-cenc-ffmpeg.mp4"
+
 # HEVC, protected: its codec string comes from the `hvcC` of the entry the protection hides.
 python3 "$fixture_dir/protect-fixture.py" cenc \
     "$fixture_dir/hevc-aac.mp4" "$fixture_dir/hevc-aac-cenc.mp4"

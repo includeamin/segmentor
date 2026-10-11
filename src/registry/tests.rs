@@ -4859,6 +4859,82 @@ async fn a_protected_source_is_served_exactly_as_its_clear_twin() {
     }
 }
 
+/// Stage 2 of TDD 0014: a fragmented source keeps its IVs in a `senc` in every `traf`. Served
+/// decrypted, it is the clear fragmented file, byte for byte, under every scheme.
+#[tokio::test]
+async fn a_protected_fragmented_source_is_served_exactly_as_its_clear_twin() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper
+        .state
+        .set("clear", Answer::file("v1", "h264-aac-fragmented-cmaf.mp4"));
+    let clear_version = version_in(&fetch(&h.app, "/hls/clear/master.m3u8").await.2);
+    for (scheme, _) in PROTECTED_SOURCES {
+        let id = format!("frag-{scheme}");
+        h.mapper.state.set(
+            &id,
+            Answer::file("v1", &format!("h264-aac-fragmented-cmaf-{scheme}.mp4"))
+                .with_source_encryption(source_keys()),
+        );
+        let version = version_in(&fetch(&h.app, &format!("/hls/{id}/master.m3u8")).await.2);
+        for track in ["video", "audio-1"] {
+            let served = track_segments(&h, &id, track, &version).await;
+            let clear = track_segments(&h, "clear", track, &clear_version).await;
+            assert!(
+                served.len() >= 4,
+                "{scheme} {track}: an init segment and the fragments"
+            );
+            assert_eq!(served, clear, "{scheme} {track}");
+        }
+    }
+}
+
+/// An encoder's own fragmented file, video only: every fragment's `senc` lists that fragment's
+/// samples, and the samples are the clear file's.
+#[tokio::test]
+async fn a_real_encoders_fragmented_cenc_video_is_decrypted() {
+    let h = harness_with(|config| config.hls_mux_audio = false).await;
+    h.mapper
+        .state
+        .set("clear", Answer::file("v1", "h264-aac.mp4"));
+    h.mapper.state.set(
+        "real",
+        Answer::file("v1", "h264-video-fragmented-cenc-ffmpeg.mp4")
+            .with_source_encryption(source_keys()),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/real/master.m3u8").await.2);
+    let clear_version = version_in(&fetch(&h.app, "/hls/clear/master.m3u8").await.2);
+    let payload = |parts: &[Bytes]| -> Vec<u8> {
+        parts[1..]
+            .iter()
+            .flat_map(|part| mdat_payload(part))
+            .collect()
+    };
+    let served = track_segments(&h, "real", "video", &version).await;
+    let clear = track_segments(&h, "clear", "video", &clear_version).await;
+    assert_eq!(
+        payload(&served),
+        payload(&clear),
+        "every video sample, decrypted"
+    );
+}
+
+/// The same encoder's file with audio: from the second fragment on, each audio `senc` lists every
+/// sample so far, not the fragment's own. Guessing which entries are the fragment's would decrypt
+/// with the wrong IVs, so the file is refused (and the load fails, not the one track).
+#[tokio::test]
+async fn a_senc_that_lists_the_samples_of_every_earlier_fragment_is_refused() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "real",
+        Answer::file("v1", "h264-aac-fragmented-cenc-ffmpeg.mp4")
+            .with_source_encryption(source_keys()),
+    );
+    assert_eq!(
+        status(&h.app, "/hls/real/master.m3u8").await,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+}
+
 /// A file with edit lists drops its leading audio samples and shifts its timeline, and the
 /// per-sample IVs and subsample maps must follow the samples that remain.
 #[tokio::test]
