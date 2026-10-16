@@ -33,7 +33,7 @@ Vodnik's mapper answer ([TDD 0002](0002-asset-map-interface.md), [mapper API](..
 
 - The filter clips (`rateFilter`, `gainFilter`, `mixFilter`) and `silence`: they need decoding, which vodnik never does.
 - Live (`playlistType` other than `vod`, `firstClipTime` and the rest): simulated live is its own design.
-- Adaptive playlists (several sequences that each have several clips): [sub-project 2](#scope-and-order).
+- Adaptive playlists (several sequences that each have several clips): [sub-project 2](#scope-and-order), designed in [TDD 0016](0016-adaptive-clips.md).
 - `dynamic` clips and `clipIds`, which need a second upstream; DRM from `vod_drm_upstream_location`; `vod_fallback_upstream_location`; entry-URL and URL-parameter compatibility. Each is a later part.
 - Reproducing nginx variables in `vod_upstream_extra_args`.
 
