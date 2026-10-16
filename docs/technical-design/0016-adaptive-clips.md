@@ -91,6 +91,8 @@ Within clip *k*, the existing rules apply unchanged: every video rendition has t
 
 Every rendition's clip *k* starts at the same position `S_k`, so that a player switching quality at a boundary finds the same time on the other rendition. `S_k` is the cumulative length of the earlier clips **in the first video rendition the mapper listed** (the reference rendition), computed as in [TDD 0008](0008-clipping-and-concatenation.md#timeline), and every other rendition's clip is shifted to start there. The one-sample length tolerance above bounds the gap or overlap this leaves at a boundary, which is inside the discontinuity players already handle. Segment numbers run across the whole timeline and equal in every rendition, by the alignment rule.
 
+**Audio-only renditions follow the video.** A video clip starts on the last keyframe at or before `from_ms`, so it may begin earlier than asked, while an audio-only file has no keyframes to snap to. Each audio-only rendition's clip *k* is therefore cut to the span of the source that the reference video rendition's clip *k* kept, and moved by the same lead, exactly as the audio of a muxed file follows its video (TDD 0008, "Cutting a clip"); its own window is ignored. Its length must then agree with the reference's within a video sample plus its own longest audio frame. This was found in review: cut from its own `from_ms`, the audio started up to a GOP away from the video it was placed beside.
+
 ### URLs
 
 Segment and playlist URLs are unchanged. Each (track, clip) has its own init segment, as in TDD 0008:
@@ -165,6 +167,7 @@ Rolling back a stage is removing its handling: an older build rejects a renditio
 Stage 1 (clear content) is implemented; stages 2 and 3 (encryption) are not. What differs from the design above, or settles it:
 
 - **Shared timeline.** The test `every_rendition_starts_each_period_at_the_same_time_and_continues_the_last` shows that every rendition's period starts at the same time, that each rendition's first fragment starts where its period says it does, and that each period starts where the one before ended, within 40 ms. So the timeline taken from the first video rendition holds on the output side; it has not been checked on real devices.
+- **Audio follows the video's cut** (see Timeline). This was not in the design as first written.
 - **Length tolerance.** The clip-length check uses the largest longest sample of any video rendition in the clip, not the larger of each pair, which is simpler and at most one coarse sample looser.
 - **Audio numbers its own segments.** Each member of the shared audio group numbers its own segments across clips, because an audio-only rendition has its own segment plan; `startNumber` and the segment URIs of an audio member follow it, not the video's.
 - **Frame counts differ by a frame between renditions.** Cut alike, two renditions encoded with different frame-reorder structures can hold one frame more or less in a clip (28 against 29 in the fixtures). The checks allow it, and the decode test compares each rendition with its own file cut the same way.

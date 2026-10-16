@@ -579,7 +579,10 @@ impl AssetRegistry {
                 // a location comparison, which is below.
                 && old.renditions.len() == new.renditions.len()
                 && old.renditions.iter().zip(&new.renditions).all(|(old, new)| {
-                    old.id == new.id && old.tracks == new.tracks && old.audio == new.audio
+                    old.id == new.id
+                        && old.tracks == new.tracks
+                        && old.audio == new.audio
+                        && same_rendition_cuts(&old.source, &new.source)
                 })
                 && old_locations.len() == new_locations.len()
                 && old_locations.iter().zip(&new_locations).all(
@@ -961,6 +964,13 @@ impl AssetRegistry {
         asset_id: &str,
         resolved: &ResolvedAsset,
     ) -> Result<ServedAsset> {
+        if resolved.renditions.len() > self.limits.max_renditions {
+            return Err(Error::InvalidMedia(format!(
+                "the mapper listed {} renditions, more than limits.max_renditions ({})",
+                resolved.renditions.len(),
+                self.limits.max_renditions
+            )));
+        }
         let (files, indices) = distinct_locations(&resolved.renditions);
         let plans = resolved
             .renditions
@@ -1155,4 +1165,22 @@ fn distinct_locations(
         indices.push(row);
     }
     (files, indices)
+}
+
+/// Whether two sources of a rendition cut the same windows from the same tracks, wherever the
+/// files live: the locations are compared by object, loosely, so a re-signed URL still counts as
+/// unchanged, and a changed window under an unchanged version must still reload the asset.
+fn same_rendition_cuts(old: &RenditionSource, new: &RenditionSource) -> bool {
+    match (old, new) {
+        (RenditionSource::Location(_), RenditionSource::Location(_)) => true,
+        (RenditionSource::Clips(old), RenditionSource::Clips(new)) => {
+            old.len() == new.len()
+                && old.iter().zip(new).all(|(old, new)| {
+                    old.window == new.window
+                        && old.encryption == new.encryption
+                        && old.tracks == new.tracks
+                })
+        }
+        _ => false,
+    }
 }
