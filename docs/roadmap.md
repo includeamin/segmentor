@@ -156,7 +156,7 @@ The order below refines [order](#order) with what the review found. Each project
 | # | Project | Status | Design |
 | --- | --- | --- | --- |
 | 1 | Adaptive playlists in the mapping adapter | Design accepted; implementation not started. Clear content first, then whole-asset encryption, then per-clip keys | [TDD 0016](technical-design/0016-adaptive-clips.md) |
-| 2 | Verification harness: Apple Media Stream Validator, DASH-IF conformance, browser suite | To do. Needs no new design, and gives the evidence every later feature is checked against | Phase 4 |
+| 2 | Verification harness: mapper-driven conformance, browser suite, Apple Media Stream Validator, DASH-IF conformance | Design drafted. It gives the evidence every later feature is checked against | [TDD 0017](technical-design/0017-verification-harness.md) |
 | 3 | The small gaps in the table below | To do, decided item by item | Each needs a decision first |
 | 4 | DRM completion | To do | Phase 1 |
 | 5 | Captions and audio | To do | Phase 2 |
