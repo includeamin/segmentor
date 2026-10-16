@@ -31,3 +31,9 @@ target
 # Local planning notes from the superpowers workflow; never committed.
 docs/superpowers/
 .superpowers/
+
+# The browser tests (tests/browser): installed packages and what a run leaves behind.
+/tests/browser/node_modules/
+/tests/browser/test-results/
+/tests/browser/playwright-report/
+/tests/browser/.harness/
