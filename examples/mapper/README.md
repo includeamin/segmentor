@@ -20,6 +20,8 @@ python3 mapper.py                      # serves catalog.json on :9911
 curl http://127.0.0.1:9911/v1/assets/sample
 ```
 
+Set `PORT` to change the port; `PORT=0` picks a free one and prints it, which is how the conformance suite starts it (`CATALOG_PATH` points it at another catalog).
+
 Point vodnik at it with:
 
 ```toml

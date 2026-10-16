@@ -1,0 +1,6 @@
+{
+  "single": {
+    "version": "v1",
+    "location": { "type": "file", "path": "h264-aac.mp4" }
+  }
+}
