@@ -1,6 +1,6 @@
 # TDD 0016: Adaptive clips
 
-- Status: Draft
+- Status: Accepted; not yet implemented
 - Created: 2026-10-16
 - Updated: 2026-10-16
 - Related ADRs: None
