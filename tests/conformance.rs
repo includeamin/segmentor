@@ -87,6 +87,8 @@ struct Server {
     child: Child,
     address: SocketAddr,
     log: PathBuf,
+    /// The mapper this server gets its assets from, when it has one; dropped (and killed) with it.
+    _mapper: Option<MapperProcess>,
 }
 
 impl Drop for Server {
@@ -121,8 +123,6 @@ fn start_server() -> Server {
 
 /// The server with `packaging.hls_mux_audio` set as given; true is the shipped default.
 fn start_server_with(hls_mux_audio: bool) -> Server {
-    let directory = root().join("target/conformance");
-    fs::create_dir_all(&directory).unwrap();
     // The server picks its own port and says which. Choosing one here and handing it over would
     // leave a gap in which another test, or anything else on the machine, could take it, and a
     // connect check would then be answered by the wrong server.
@@ -134,14 +134,102 @@ fn start_server_with(hls_mux_audio: bool) -> Server {
     for (id, file, _) in FIXTURES {
         config.push_str(&format!("[assets.{id}]\npath = \"{file}\"\n"));
     }
-    let name = format!(
+    launch(&config, name_suffix, None)
+}
+
+/// A mapper process, killed when dropped.
+struct MapperProcess {
+    child: Child,
+    log: PathBuf,
+}
+
+impl Drop for MapperProcess {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            let log = fs::read_to_string(&self.log).unwrap_or_default();
+            eprintln!(
+                "--- mapper, last log lines from {}:\n{}",
+                self.log.display(),
+                log
+            );
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The server, getting its assets from the example mapper (`examples/mapper`) serving
+/// `tests/fixtures/harness-catalog.json`, so that assets a static catalog cannot express (renditions
+/// and clips) can be audited out of process.
+fn start_server_with_mapper() -> Server {
+    let directory = root().join("target/conformance");
+    fs::create_dir_all(&directory).unwrap();
+    let name = unique_name();
+    let log_path = directory.join(format!("mapper-{name}.log"));
+    let log = fs::File::create(&log_path).unwrap();
+    // `PORT=0` makes the mapper pick a free port and print it, for the same reason the server does.
+    let child = Command::new("python3")
+        .arg(root().join("examples/mapper/mapper.py"))
+        .env("PORT", "0")
+        .env(
+            "CATALOG_PATH",
+            root().join("tests/fixtures/harness-catalog.json"),
+        )
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .spawn()
+        .expect("python3 should start the example mapper");
+    let mut mapper = MapperProcess {
+        child,
+        log: log_path.clone(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let port = loop {
+        if let Some(status) = mapper.child.try_wait().unwrap() {
+            panic!(
+                "the mapper exited with {status} before it was ready:\n{}",
+                fs::read_to_string(&log_path).unwrap_or_default()
+            );
+        }
+        let text = fs::read_to_string(&log_path).unwrap_or_default();
+        if let Some(port) = text
+            .lines()
+            .find(|line| line.starts_with("mapper: serving "))
+            .and_then(|line| line.rsplit_once(':'))
+            .and_then(|(_, port)| port.trim().parse::<u16>().ok())
+        {
+            break port;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the mapper did not report a port:\n{text}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let config = format!(
+        "[server]\nlisten = \"127.0.0.1:0\"\n[storage]\nmedia_root = \"{}\"\n[packaging]\nsegment_duration_ms = 1000\nhls_mux_audio = false\n[logging]\nlevel = \"info\"\nformat = \"compact\"\n[resolver]\ntype = \"http\"\n[resolver.http]\nbase_url = \"http://127.0.0.1:{port}\"\nallow_insecure_mapper = true\n",
+        root().join("tests/fixtures").display()
+    );
+    launch(&config, "-mapper", Some(mapper))
+}
+
+/// A name for this test's files that no other test shares.
+fn unique_name() -> String {
+    format!(
         "{}-{}",
         std::process::id(),
         std::thread::current()
             .name()
             .unwrap_or("test")
             .replace("::", "-")
-    ) + name_suffix;
+    )
+}
+
+/// Writes `config`, starts the binary on it, and waits until it says it is ready.
+fn launch(config: &str, name_suffix: &str, mapper: Option<MapperProcess>) -> Server {
+    let directory = root().join("target/conformance");
+    fs::create_dir_all(&directory).unwrap();
+    let name = unique_name() + name_suffix;
     let config_path = directory.join(format!("vod-{name}.toml"));
     fs::write(&config_path, config).unwrap();
     let log_path = directory.join(format!("server-{name}.log"));
@@ -172,6 +260,7 @@ fn start_server_with(hls_mux_audio: bool) -> Server {
                 child,
                 address,
                 log: log_path,
+                _mapper: mapper,
             };
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -184,7 +273,6 @@ fn start_server_with(hls_mux_audio: bool) -> Server {
     );
 }
 
-/// The address in the `service_ready` log line, if the server has logged it.
 fn ready_address(log: &str) -> Option<SocketAddr> {
     let line = log.lines().find(|line| line.contains("service_ready"))?;
     let start = line.find("listen.address=")? + "listen.address=".len();
@@ -1312,4 +1400,13 @@ fn source_keyframes(path: &Path) -> u64 {
         .lines()
         .filter(|line| line.starts_with('K'))
         .count() as u64
+}
+
+#[test]
+fn a_server_fed_by_a_mapper_serves_a_single_file() {
+    let server = start_server_with_mapper();
+
+    let master = get_ok(&server, "/hls/single/master.m3u8");
+
+    assert!(master.text().starts_with("#EXTM3U"));
 }
