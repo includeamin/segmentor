@@ -17,6 +17,7 @@ async function waitFor(file, pattern, what, child) {
     const text = existsSync(file) ? readFileSync(file, 'utf8') : '';
     const match = text.match(pattern);
     if (match) return match;
+    if (child.spawnError) throw new Error(`${what} did not start: ${child.spawnError.message}`);
     if (child.exitCode !== null) {
       throw new Error(`${what} exited with ${child.exitCode} before it was ready:\n${text}`);
     }
@@ -27,7 +28,12 @@ async function waitFor(file, pattern, what, child) {
 
 function start(command, args, options, logFile) {
   const log = openSync(logFile, 'w');
-  return spawn(command, args, { ...options, stdio: ['ignore', log, log] });
+  const child = spawn(command, args, { ...options, stdio: ['ignore', log, log] });
+  // A missing program must read as a failed start, not crash the runner with an unhandled event.
+  child.on('error', (error) => {
+    child.spawnError = error;
+  });
+  return child;
 }
 
 /** Serves the page, and the two players from node_modules, over loopback. */
@@ -51,12 +57,22 @@ function staticServer() {
 }
 
 export default async function globalSetup() {
+  const children = [];
+  try {
+    return await setUp(children);
+  } catch (error) {
+    // Setup failed part way: do not leave the mapper or the server running.
+    for (const child of children) child.kill();
+    throw error;
+  }
+}
+
+async function setUp(children) {
   const binary = process.env.VODNIK_BIN ?? path.join(root, 'target/debug/vodnik');
   if (!existsSync(binary)) {
     throw new Error(`${binary} does not exist. Build it first: cargo build --locked --bin vodnik (make browser-test does).`);
   }
   mkdirSync(work, { recursive: true });
-  const children = [];
 
   const mapperLog = path.join(work, 'mapper.log');
   const mapper = start(

@@ -47,6 +47,11 @@ jobs:
         working-directory: tests/browser
         run: npx playwright install --with-deps chrome
 
+      # The expected failures were measured on one Chrome (docs/conformance.md); a newer one changes them,
+      # so the version is in the log when the run turns red with no change to the code.
+      - name: Chrome version
+        run: google-chrome --version
+
       - name: Play
         working-directory: tests/browser
         run: npx playwright test

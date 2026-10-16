@@ -11,10 +11,10 @@ import { FAST, PLAYERS, errors, play, reach, state } from './helpers.js';
 // lands at the join between the two clips of `grid`, which is the point of it.
 const ASSETS = ['grid', 'ladder'];
 
-// KNOWN: what these specs found, and have left failing on purpose (see docs/conformance.md).
+// KNOWN: what these specs found, and have left unfixed on purpose (see docs/conformance.md).
 // The ladder's manifest puts every video rendition in an AdaptationSet of its own, so dash.js sees
-// one rendition, not a ladder, and can never switch. The entry must go once that is fixed: the test
-// then passes, and an expected failure that passes fails the run.
+// one rendition, not a ladder, and can never switch. Under dash.js the test checks that symptom and
+// nothing else; it fails once the manifest is fixed, and the entry must go.
 const KNOWN =
   'the DASH manifest has one AdaptationSet per video rendition, so dash.js lists a single rendition and cannot switch between them';
 
@@ -29,8 +29,14 @@ for (const player of Object.keys(PLAYERS)) {
   for (const asset of ASSETS) {
     for (const [name, start] of [['up then down', 'lowest'], ['down then up', 'highest']]) {
       test(`${player} switches ${name} on ${asset}`, async ({ page }) => {
-        if (player === 'dash') test.fail(true, KNOWN);
         await play(page, player, asset, start);
+        if (player === 'dash') {
+          await reach(page, 0.5);
+          const count = await page.evaluate(() => window.harness.levels().length);
+          expect(count, `the known problem is gone, so remove KNOWN and let this test switch: ${KNOWN}`).toBe(1);
+          expect(await errors(page)).toEqual([]);
+          return;
+        }
         const { low, high } = await levelsOf(page);
         expect(high.height, 'the renditions differ in size').toBeGreaterThan(low.height);
         const [first, second] = start === 'lowest' ? [high, low] : [low, high];
