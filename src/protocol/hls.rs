@@ -23,6 +23,54 @@ pub(crate) struct AdaptiveAudio<'a> {
     pub(crate) default: bool,
 }
 
+/// One video rendition of an adaptive sequence: its id and each of its clips (TDD 0016).
+pub(crate) struct SequenceVideo<'a> {
+    /// The rendition id, as it appears in `video-{id}` URLs.
+    pub(crate) id: &'a str,
+    pub(crate) clips: Vec<SequenceClip<'a>>,
+}
+
+/// One member of the shared audio group of an adaptive sequence, with each of its clips.
+pub(crate) struct SequenceAudio<'a> {
+    /// The external key it is served under (`audio-{n}`).
+    pub(crate) key: TrackKey,
+    /// Its key inside each clip's own presentation, which may differ from `key`.
+    pub(crate) internal_key: TrackKey,
+    /// Whether this is the group's default: the first, unless a mapper chose another.
+    pub(crate) default: bool,
+    pub(crate) clips: Vec<SequenceClip<'a>>,
+}
+
+/// One `#EXT-X-MEDIA` line of the shared audio group.
+fn write_adaptive_audio_media(
+    playlist: &mut String,
+    index: usize,
+    key: TrackKey,
+    track: &Track,
+    default: bool,
+    version: &str,
+) {
+    let language = track_language(track);
+    // A mapper's label replaces the name made from the position and language.
+    let name = track.label.as_deref().map_or_else(
+        || {
+            language.map_or_else(
+                || format!("Audio {}", index + 1),
+                |language| format!("Audio {} ({language})", index + 1),
+            )
+        },
+        |label| label.replace('"', "'"),
+    );
+    let language_attribute =
+        language.map_or_else(String::new, |language| format!(",LANGUAGE=\"{language}\""));
+    let default = if default { "YES" } else { "NO" };
+    writeln!(
+        playlist,
+        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"{name}\"{language_attribute},DEFAULT={default},AUTOSELECT=YES,URI=\"{key}/index.m3u8?v={version}\""
+    )
+    .expect("writing to a String cannot fail");
+}
+
 /// The master playlist for an adaptive asset: one `#EXT-X-STREAM-INF` per video rendition, all
 /// pointing at the one shared audio group, sorted by ascending bandwidth by the caller.
 pub(crate) fn adaptive_master_playlist(
@@ -45,26 +93,14 @@ pub(crate) fn adaptive_master_playlist(
             .unwrap_or_default(),
     );
     for (index, entry) in audio.iter().enumerate() {
-        let language = track_language(entry.track);
-        // A mapper's label replaces the name made from the position and language.
-        let name = entry.track.label.as_deref().map_or_else(
-            || {
-                language.map_or_else(
-                    || format!("Audio {}", index + 1),
-                    |language| format!("Audio {} ({language})", index + 1),
-                )
-            },
-            |label| label.replace('"', "'"),
+        write_adaptive_audio_media(
+            &mut playlist,
+            index,
+            entry.key,
+            entry.track,
+            entry.default,
+            version,
         );
-        let language_attribute =
-            language.map_or_else(String::new, |language| format!(",LANGUAGE=\"{language}\""));
-        let default = if entry.default { "YES" } else { "NO" };
-        writeln!(
-            playlist,
-            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"{name}\"{language_attribute},DEFAULT={default},AUTOSELECT=YES,URI=\"{}/index.m3u8?v={version}\"",
-            entry.key
-        )
-        .expect("writing to a String cannot fail");
     }
     for subtitle in subtitles {
         write_subtitle_rendition(&mut playlist, subtitle, version);
@@ -442,6 +478,12 @@ pub(crate) fn sequence_master_playlist(
 /// codec string ("every media format present in any Media Segment", RFC 8216); and the largest
 /// clip's resolution. Like the single-file master, it counts video plus the default audio.
 fn sequence_variant(clips: &[SequenceClip<'_>]) -> Result<SequenceVariant> {
+    sequence_variant_with(clips, true)
+}
+
+/// [`sequence_variant`], optionally counting only the video: a rendition of an adaptive sequence
+/// declares its own video, and the audio group is named once for all of them.
+fn sequence_variant_with(clips: &[SequenceClip<'_>], with_audio: bool) -> Result<SequenceVariant> {
     let overflow = || Error::InvalidMedia("bandwidth overflow".to_owned());
     let (mut peak, mut weighted, mut total_ms) = (0u64, 0u128, 0u128);
     let (mut video_codecs, mut audio_codecs) = (Vec::<String>::new(), Vec::<String>::new());
@@ -449,7 +491,11 @@ fn sequence_variant(clips: &[SequenceClip<'_>]) -> Result<SequenceVariant> {
     for clip in clips {
         let presentation = clip.presentation;
         let video = presentation.video();
-        let audio = presentation.audio_tracks().next();
+        let audio = if with_audio {
+            presentation.audio_tracks().next()
+        } else {
+            None
+        };
         let (mut clip_peak, mut clip_average) = (0u64, 0u64);
         for track in video.into_iter().chain(audio) {
             let bandwidth = presentation.bandwidth(track)?;
@@ -495,6 +541,103 @@ fn sequence_variant(clips: &[SequenceClip<'_>]) -> Result<SequenceVariant> {
         codecs,
         resolution,
     })
+}
+
+/// Every video rendition with what its `#EXT-X-STREAM-INF` declares, lowest peak bandwidth first;
+/// renditions with the same peak keep the mapper's order.
+fn variants_by_bandwidth<'v, 'a>(
+    video: &'v [SequenceVideo<'a>],
+) -> Result<Vec<(&'v SequenceVideo<'a>, SequenceVariant)>> {
+    if video.is_empty() {
+        return Err(Error::InvalidMedia(
+            "an adaptive sequence has no video renditions".to_owned(),
+        ));
+    }
+    let mut variants = video
+        .iter()
+        .map(|entry| Ok((entry, sequence_variant_with(&entry.clips, false)?)))
+        .collect::<Result<Vec<_>>>()?;
+    variants.sort_by_key(|(_, variant)| variant.peak);
+    Ok(variants)
+}
+
+/// The video renditions of an adaptive sequence in the order the master playlist and the manifest
+/// list them: lowest peak bandwidth first.
+pub(crate) fn video_by_bandwidth<'v, 'a>(
+    video: &'v [SequenceVideo<'a>],
+) -> Result<Vec<&'v SequenceVideo<'a>>> {
+    Ok(variants_by_bandwidth(video)?
+        .into_iter()
+        .map(|(entry, _)| entry)
+        .collect())
+}
+
+/// The master playlist of an adaptive sequence (TDD 0016): one variant per video rendition whose
+/// attributes cover every clip of it, all pointing at the one shared audio group.
+pub(crate) fn adaptive_sequence_master_playlist(
+    version: &str,
+    video: &[SequenceVideo<'_>],
+    audio: &[SequenceAudio<'_>],
+) -> Result<String> {
+    let variants = variants_by_bandwidth(video)?;
+    let mut playlist = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
+    for (index, member) in audio.iter().enumerate() {
+        let tracks = member
+            .clips
+            .iter()
+            .map(|clip| clip.presentation.track(member.internal_key))
+            .collect::<Result<Vec<_>>>()?;
+        // The first clip whose track names a language labels the rendition, so an unlabelled
+        // pre-roll does not hide the main content's language.
+        let track = tracks
+            .iter()
+            .copied()
+            .find(|track| track_language(track).is_some())
+            .or_else(|| tracks.first().copied())
+            .ok_or_else(|| Error::InvalidMedia("an audio rendition has no clips".to_owned()))?;
+        write_adaptive_audio_media(
+            &mut playlist,
+            index,
+            member.key,
+            track,
+            member.default,
+            version,
+        );
+    }
+    let mut audio_codecs = Vec::<String>::new();
+    if let Some(first) = audio.first() {
+        for clip in &first.clips {
+            push_distinct(
+                &mut audio_codecs,
+                clip.presentation.track(first.internal_key)?.codec.codecs(),
+            );
+        }
+    }
+    let audio_attribute = if audio.is_empty() {
+        ""
+    } else {
+        ",AUDIO=\"audio\""
+    };
+    for (entry, variant) in variants {
+        let codecs = std::iter::once(variant.codecs)
+            .chain(audio_codecs.iter().cloned())
+            .collect::<Vec<_>>()
+            .join(",");
+        let resolution = variant
+            .resolution
+            .map_or_else(String::new, |(width, height)| {
+                format!(",RESOLUTION={width}x{height}")
+            });
+        writeln!(
+            playlist,
+            "#EXT-X-STREAM-INF:BANDWIDTH={},AVERAGE-BANDWIDTH={},CODECS=\"{codecs}\"{resolution}{audio_attribute}",
+            variant.peak, variant.average
+        )
+        .expect("writing to a String cannot fail");
+        writeln!(playlist, "video-{}/index.m3u8?v={version}", entry.id)
+            .expect("writing to a String cannot fail");
+    }
+    Ok(playlist)
 }
 
 fn push_distinct(list: &mut Vec<String>, value: String) {
@@ -716,6 +859,70 @@ pub(crate) fn track_language(track: &Track) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::protocol::fixtures::Loaded;
+
+    const THREE_SECONDS: u64 = 3_000_000_000;
+
+    #[test]
+    fn the_grid_master_has_one_variant_per_rendition_sorted_by_bandwidth() {
+        let (high_0, high_1) = (
+            Loaded::fixture("rendition-720p.mp4"),
+            Loaded::fixture("rendition-720p.mp4"),
+        );
+        let (low_0, low_1) = (
+            Loaded::fixture("rendition-480p.mp4"),
+            Loaded::fixture("rendition-480p.mp4"),
+        );
+        let video = vec![
+            SequenceVideo {
+                id: "720p",
+                clips: vec![high_0.clip_view(0, 0), high_1.clip_view(3, THREE_SECONDS)],
+            },
+            SequenceVideo {
+                id: "480p",
+                clips: vec![low_0.clip_view(0, 0), low_1.clip_view(3, THREE_SECONDS)],
+            },
+        ];
+
+        let master = adaptive_sequence_master_playlist("v1", &video, &[]).unwrap();
+
+        assert_eq!(master.matches("#EXT-X-STREAM-INF").count(), 2, "{master}");
+        let low = master
+            .find("video-480p/index.m3u8?v=v1")
+            .expect("a 480p variant");
+        let high = master
+            .find("video-720p/index.m3u8?v=v1")
+            .expect("a 720p variant");
+        assert!(low < high, "the lower bandwidth comes first: {master}");
+    }
+
+    #[test]
+    fn a_variant_covers_every_clip_of_its_rendition() {
+        let wide = Loaded::fixture("rendition-720p.mp4");
+        let narrow = Loaded::fixture("rendition-480p.mp4");
+        let video = vec![SequenceVideo {
+            id: "mixed",
+            clips: vec![narrow.clip_view(0, 0), wide.clip_view(3, THREE_SECONDS)],
+        }];
+        let peak = |loaded: &Loaded| {
+            let presentation = loaded.presentation();
+            presentation
+                .bandwidth(presentation.video().unwrap())
+                .unwrap()
+                .peak
+        };
+        let codecs = |loaded: &Loaded| loaded.presentation().video().unwrap().codec.codecs();
+
+        let master = adaptive_sequence_master_playlist("v1", &video, &[]).unwrap();
+
+        let expected = peak(&wide).max(peak(&narrow));
+        assert!(
+            master.contains(&format!("#EXT-X-STREAM-INF:BANDWIDTH={expected},")),
+            "the peak is the maximum over the clips: {master}"
+        );
+        assert!(master.contains("RESOLUTION=640x360"), "{master}");
+        assert!(master.contains(&codecs(&wide)), "{master}");
+        assert!(master.contains(&codecs(&narrow)), "{master}");
+    }
 
     #[test]
     fn an_encrypted_media_playlist_names_its_keys_before_the_map() {

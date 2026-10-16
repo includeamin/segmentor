@@ -246,5 +246,18 @@ pub(crate) mod fixtures {
         pub(crate) fn presentation(&self) -> Presentation<'_> {
             Presentation::new(&self.index.tracks, &self.plan, &self.version)
         }
+
+        /// This fixture as one clip of a sequence, for the renderers.
+        pub(crate) fn clip_view(
+            &self,
+            first_segment: u32,
+            start_nanos: u64,
+        ) -> super::SequenceClip<'_> {
+            super::SequenceClip {
+                presentation: self.presentation(),
+                first_segment,
+                start_nanos,
+            }
+        }
     }
 }

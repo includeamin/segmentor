@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use super::hls::track_language;
+use super::hls::{SequenceAudio, SequenceVideo, track_language, video_by_bandwidth};
 use super::{Presentation, SequenceClip};
 use crate::error::{Error, Result};
 use crate::media::Track;
@@ -287,6 +287,66 @@ pub(crate) fn sequence_manifest(
     Ok(manifest)
 }
 
+/// A static MPD for an adaptive sequence (TDD 0016): one `Period` per clip, each holding every
+/// video rendition and every member of the shared audio group, which keep their ids from one
+/// period to the next so a player's adaptation state survives the change.
+pub(crate) fn adaptive_sequence_manifest(
+    video: &[SequenceVideo<'_>],
+    audio: &[SequenceAudio<'_>],
+    total_nanos: u64,
+    version: &str,
+) -> Result<String> {
+    let ordered = video_by_bandwidth(video)?;
+    let clip_count = ordered[0].clips.len();
+    if clip_count == 0
+        || ordered.iter().any(|entry| entry.clips.len() != clip_count)
+        || audio.iter().any(|member| member.clips.len() != clip_count)
+    {
+        return Err(Error::InvalidMedia(
+            "every rendition of an adaptive sequence needs the same, non-zero number of clips"
+                .to_owned(),
+        ));
+    }
+    let mut manifest = mpd_open(&nanos_as_seconds(total_nanos), false);
+    for position in 0..clip_count {
+        writeln!(
+            manifest,
+            "  <Period id=\"clip-{position}\" start=\"PT{}S\">",
+            nanos_as_seconds(ordered[0].clips[position].start_nanos)
+        )
+        .expect("writing to a String cannot fail");
+        for entry in &ordered {
+            let clip = &entry.clips[position];
+            let track = clip.presentation.video().ok_or_else(|| {
+                Error::InvalidMedia(format!("rendition `{}` has no video track", entry.id))
+            })?;
+            write_video_adaptation(
+                &mut manifest,
+                clip.presentation,
+                track,
+                version,
+                &format!("video-{}", entry.id),
+                clip_addressing(clip, position, track)?,
+            )?;
+        }
+        for member in audio {
+            let clip = &member.clips[position];
+            let track = clip.presentation.track(member.internal_key)?;
+            write_audio_adaptation(
+                &mut manifest,
+                clip.presentation,
+                track,
+                version,
+                &member.key.to_string(),
+                clip_addressing(clip, position, track)?,
+            )?;
+        }
+        manifest.push_str("  </Period>\n");
+    }
+    manifest.push_str("</MPD>\n");
+    Ok(manifest)
+}
+
 /// The clip's start in `track`'s ticks, rounded down exactly as `clip::trim` places the clip, so
 /// the offset and the first fragment's decode time agree.
 fn clip_addressing(clip: &SequenceClip<'_>, position: usize, track: &Track) -> Result<Addressing> {
@@ -330,7 +390,76 @@ fn presentation_duration(presentation: Presentation<'_>) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::TrackKey;
     use crate::protocol::fixtures::Loaded;
+    use crate::protocol::hls::{SequenceAudio, SequenceVideo};
+
+    const THREE_SECONDS: u64 = 3_000_000_000;
+
+    fn views(loaded: &[Loaded; 2]) -> Vec<SequenceClip<'_>> {
+        vec![
+            loaded[0].clip_view(0, 0),
+            loaded[1].clip_view(3, THREE_SECONDS),
+        ]
+    }
+
+    #[test]
+    fn the_grid_manifest_has_one_period_per_clip_with_every_representation() {
+        let high = [
+            Loaded::fixture("rendition-720p.mp4"),
+            Loaded::fixture("rendition-720p.mp4"),
+        ];
+        let low = [
+            Loaded::fixture("rendition-480p.mp4"),
+            Loaded::fixture("rendition-480p.mp4"),
+        ];
+        let english = [
+            Loaded::fixture("rendition-audio-en.m4a"),
+            Loaded::fixture("rendition-audio-en.m4a"),
+        ];
+        let video = vec![
+            SequenceVideo {
+                id: "720p",
+                clips: views(&high),
+            },
+            SequenceVideo {
+                id: "480p",
+                clips: views(&low),
+            },
+        ];
+        let audio = vec![SequenceAudio {
+            key: TrackKey::audio(1),
+            internal_key: TrackKey::audio(1),
+            default: true,
+            clips: views(&english),
+        }];
+
+        let manifest = adaptive_sequence_manifest(&video, &audio, 2 * THREE_SECONDS, "v1").unwrap();
+
+        assert_eq!(manifest.matches("<Period ").count(), 2, "{manifest}");
+        assert!(
+            manifest.contains(r#"<Period id="clip-0" start="PT0.000S">"#),
+            "{manifest}"
+        );
+        assert!(
+            manifest.contains(r#"<Period id="clip-1" start="PT3.000S">"#),
+            "{manifest}"
+        );
+        for id in ["video-720p", "video-480p", "audio-1"] {
+            assert_eq!(
+                manifest
+                    .matches(&format!(r#"Representation id="{id}""#))
+                    .count(),
+                2,
+                "{id} appears in every period: {manifest}"
+            );
+        }
+        assert!(manifest.contains(r#"startNumber="3""#), "{manifest}");
+        assert!(
+            manifest.contains(r#"initialization="$RepresentationID$/clips/1/init.mp4?v=v1""#),
+            "{manifest}"
+        );
+    }
 
     #[test]
     fn an_encrypted_manifest_declares_its_namespaces_and_protection() {

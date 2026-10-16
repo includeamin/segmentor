@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
+use crate::adaptive::AdaptiveSequenceAsset;
 use crate::asset::PackagedAsset;
 use crate::error::{Error, Result};
 use crate::fmp4;
@@ -28,6 +29,8 @@ pub(crate) enum ServedAsset {
     Single(Arc<PackagedAsset>),
     Composite(Box<CompositeAsset>),
     Sequence(Box<SequenceAsset>),
+    /// Every rendition is itself a sequence of clips (TDD 0016).
+    AdaptiveSequence(Box<AdaptiveSequenceAsset>),
 }
 
 impl ServedAsset {
@@ -40,6 +43,8 @@ impl ServedAsset {
                 .encryption()
                 .map(crate::cenc::Encryption::key_ids),
             Self::Sequence(asset) => asset.key_ids(),
+            // Stage 1 of TDD 0016 serves clear content only.
+            Self::AdaptiveSequence(_) => None,
         }
     }
 
@@ -47,7 +52,7 @@ impl ServedAsset {
     pub(crate) fn source_key_ids(&self) -> Vec<String> {
         match self {
             Self::Single(asset) => asset.source_key_ids(),
-            Self::Composite(_) | Self::Sequence(_) => Vec::new(),
+            Self::Composite(_) | Self::Sequence(_) | Self::AdaptiveSequence(_) => Vec::new(),
         }
     }
 
@@ -56,6 +61,7 @@ impl ServedAsset {
             Self::Single(asset) => asset.version(),
             Self::Composite(asset) => &asset.version,
             Self::Sequence(asset) => asset.version(),
+            Self::AdaptiveSequence(asset) => asset.version(),
         }
     }
 
@@ -64,6 +70,7 @@ impl ServedAsset {
             Self::Single(asset) => asset.hls_master_playlist(),
             Self::Composite(asset) => asset.rendered.hls_master.clone(),
             Self::Sequence(asset) => asset.hls_master(),
+            Self::AdaptiveSequence(asset) => asset.hls_master(),
         }
     }
 
@@ -75,6 +82,7 @@ impl ServedAsset {
             Self::Single(asset) => asset.dash_manifest(),
             Self::Composite(asset) => Ok(asset.rendered.dash.clone()),
             Self::Sequence(asset) => Ok(asset.dash()),
+            Self::AdaptiveSequence(asset) => Ok(asset.dash()),
         }
     }
 
@@ -86,7 +94,9 @@ impl ServedAsset {
                 .hls_iframes
                 .clone()
                 .ok_or(Error::NotFound("asset has no video track")),
-            Self::Sequence(_) => Err(Error::NotFound("a sequence has no I-frame playlist")),
+            Self::Sequence(_) | Self::AdaptiveSequence(_) => {
+                Err(Error::NotFound("a sequence has no I-frame playlist"))
+            }
         }
     }
 
@@ -103,7 +113,9 @@ impl ServedAsset {
                 let prepared = source.prepare_iframe(frame_index)?;
                 Ok((source, prepared))
             }
-            Self::Sequence(_) => Err(Error::NotFound("a sequence has no I-frame playlist")),
+            Self::Sequence(_) | Self::AdaptiveSequence(_) => {
+                Err(Error::NotFound("a sequence has no I-frame playlist"))
+            }
         }
     }
 
@@ -114,7 +126,9 @@ impl ServedAsset {
                 asset.subtitle(language)?;
                 Ok(asset.rendered.hls_subtitle.clone())
             }
-            Self::Sequence(_) => Err(Error::NotFound("subtitle does not exist")),
+            Self::Sequence(_) | Self::AdaptiveSequence(_) => {
+                Err(Error::NotFound("subtitle does not exist"))
+            }
         }
     }
 
@@ -122,7 +136,9 @@ impl ServedAsset {
         match self {
             Self::Single(asset) => asset.subtitle(language),
             Self::Composite(asset) => asset.subtitle(language),
-            Self::Sequence(_) => Err(Error::NotFound("subtitle does not exist")),
+            Self::Sequence(_) | Self::AdaptiveSequence(_) => {
+                Err(Error::NotFound("subtitle does not exist"))
+            }
         }
     }
 
@@ -137,7 +153,9 @@ impl ServedAsset {
                 asset.init_segment(key)
             }
             Self::Composite(asset) => asset.resolve(rendition, key)?.0.init_segment(key),
-            Self::Sequence(_) => Err(Error::NotFound("a sequence's init segments are per clip")),
+            Self::Sequence(_) | Self::AdaptiveSequence(_) => {
+                Err(Error::NotFound("a sequence's init segments are per clip"))
+            }
         }
     }
 
@@ -151,6 +169,7 @@ impl ServedAsset {
     ) -> Result<Bytes> {
         match self {
             Self::Sequence(asset) if rendition.is_none() => asset.clip_init_segment(key, clip),
+            Self::AdaptiveSequence(asset) => asset.clip_init_segment(rendition, key, clip),
             _ => Err(Error::NotFound("track does not exist")),
         }
     }
@@ -174,6 +193,7 @@ impl ServedAsset {
                 }
                 asset.media_playlist(key)
             }
+            Self::AdaptiveSequence(asset) => asset.media_playlist(rendition, key),
         }
     }
 
@@ -211,6 +231,7 @@ impl ServedAsset {
             Self::Single(asset) => asset.is_aes128(),
             Self::Composite(asset) => asset.video[0].asset.is_aes128(),
             Self::Sequence(asset) => asset.is_aes128(),
+            Self::AdaptiveSequence(_) => false,
         }
     }
 
@@ -247,6 +268,7 @@ impl ServedAsset {
                 }
                 asset.prepare_segment(key, segment_index)
             }
+            Self::AdaptiveSequence(asset) => asset.prepare_segment(rendition, key, segment_index),
         }
     }
 
@@ -260,6 +282,9 @@ impl ServedAsset {
             }
             (Self::Sequence(asset), LocationKey::Clip(position)) => {
                 asset.update_location(*position, url);
+            }
+            (Self::AdaptiveSequence(asset), LocationKey::RenditionClip(id, position)) => {
+                asset.update_location(id, *position, url);
             }
             (Self::Composite(asset), LocationKey::Rendition(id)) => {
                 if let Some(entry) = asset.video.iter().find(|entry| &entry.id == id) {
@@ -288,6 +313,7 @@ impl ServedAsset {
                 }
             }
             Self::Sequence(asset) => asset.log_load_details(asset_id),
+            Self::AdaptiveSequence(asset) => asset.log_load_details(asset_id),
         }
     }
 
@@ -315,6 +341,7 @@ impl ServedAsset {
                     .saturating_add(asset.subtitles.iter().map(|s| s.data.len() as u64).sum())
             }
             Self::Sequence(asset) => asset.index_bytes(),
+            Self::AdaptiveSequence(asset) => asset.index_bytes(),
         }
     }
 
@@ -324,6 +351,7 @@ impl ServedAsset {
             Self::Single(asset) => asset.presentation().tracks().len(),
             Self::Composite(asset) => asset.video.len() + asset.audio.len(),
             Self::Sequence(asset) => asset.track_count(),
+            Self::AdaptiveSequence(asset) => asset.track_count(),
         }
     }
 
@@ -337,6 +365,7 @@ impl ServedAsset {
                 .first()
                 .map_or(0, |entry| entry.asset.plan.segments.len()),
             Self::Sequence(asset) => asset.segment_count(),
+            Self::AdaptiveSequence(asset) => asset.segment_count(),
         }
     }
 
@@ -345,6 +374,7 @@ impl ServedAsset {
         match self {
             Self::Single(_) | Self::Composite(_) => 1,
             Self::Sequence(asset) => asset.clip_count(),
+            Self::AdaptiveSequence(asset) => asset.clip_count(),
         }
     }
 
@@ -352,7 +382,7 @@ impl ServedAsset {
         match self {
             Self::Single(asset) => asset.subtitle_count(),
             Self::Composite(asset) => asset.subtitles.len(),
-            Self::Sequence(_) => 0,
+            Self::Sequence(_) | Self::AdaptiveSequence(_) => 0,
         }
     }
 
@@ -366,6 +396,7 @@ impl ServedAsset {
                 .first()
                 .map_or(0.0, |entry| index_duration_seconds(&entry.asset.index)),
             Self::Sequence(asset) => asset.duration_seconds(),
+            Self::AdaptiveSequence(asset) => asset.duration_seconds(),
         }
     }
 }
@@ -516,7 +547,7 @@ impl CompositeAsset {
 
 /// `TrackKey`'s ordinal is private to `media`; audio keys always spell `audio-{n}`, so this reads
 /// it back out through that canonical string instead of needing a crate-visible accessor.
-fn audio_ordinal(key: TrackKey) -> usize {
+pub(crate) fn audio_ordinal(key: TrackKey) -> usize {
     key.to_string()
         .strip_prefix("audio-")
         .and_then(|n| n.parse().ok())
