@@ -59,6 +59,30 @@ The workflow then runs these jobs:
 
 Running the release again for the same tag is safe, so a preview can be promoted to latest by re-running with `channel = latest`. A preview release is titled `vX.Y.Z (preview)`.
 
+## Publishing the crate: the `Publish crate` workflow
+
+Run **Actions → Publish crate → Run workflow** to publish the crate for a version tag to [crates.io](https://crates.io). Publishing cannot be undone, only yanked, so the workflow is manual and has two safeguards.
+
+| Input | Meaning |
+| --- | --- |
+| `tag` | The version tag to publish, for example `v1.3.0`. Leave it empty for the newest tag |
+| `dry_run` | On by default. Packages the crate and builds it from the package, which proves the `exclude` list in `Cargo.toml` kept everything the code needs. Turn it off to publish for real |
+
+The workflow runs two jobs:
+
+1. **Package and check.** Resolves the tag (it must be an existing `vX.Y.Z` tag on the default branch), asks crates.io whether that version is already published, stamps the tag's version into `Cargo.toml` and `Cargo.lock`, and runs `cargo package --locked`. If the version is already on crates.io nothing more happens, so running it again is safe.
+2. **Publish.** Runs only when `dry_run` is off and the version is not yet published. It waits for approval on the `crates-io` environment, verifies the package again, then runs `cargo publish --no-verify`. That is the only step that sees the token: the dependencies' build scripts run during the verification, so it is done without the token.
+
+One-time setup, by the repository owner:
+
+1. **Create a token** at crates.io under *Account Settings → API Tokens*, with the scopes `publish-new` and `publish-update`. The first publish creates the crate, so the token cannot yet be limited to its name; after that first publish, replace it with a token limited to `vodnik` and `publish-update`.
+2. **Add it as a repository secret** named `CARGO_REGISTRY_TOKEN` under *Settings → Secrets and variables → Actions*.
+3. **Create the `crates-io` environment** under *Settings → Environments* and add yourself as a required reviewer. Without a reviewer the publish job runs as soon as the check passes.
+4. **Check the links in `Cargo.toml`.** `repository`, `homepage` and `documentation` are shown on crates.io for that version for good, so they must point at where the repository lives when you publish.
+5. **Run it once as a dry run**, then again with `dry_run` off. The first publish claims the crate name.
+
+crates.io's Trusted Publishing, which uses GitHub's OpenID Connect identity instead of a stored token, would let the workflow drop the secret; it is worth a look once the first release is out.
+
 ## Verifying a release
 
 Each archive and the image carry evidence of where they were built, so a download can be checked rather than trusted.
@@ -99,6 +123,6 @@ They build throwaway git repositories and check the version bump for every commi
 
 - The workflows use only `GITHUB_TOKEN` and the marketplace actions they name. Tags pushed with that token do not start other workflows, which is why the release is a separate manual run, and why the image is published by a workflow the release calls rather than by a `release` event.
 - The Linux binaries are dynamically linked against glibc. A static musl build is not provided, because the TLS provider compiles C code that makes that build harder; the container image is built on Debian to match its distroless runtime.
-- Nothing is published to crates.io by the workflows. Publishing a crate cannot be undone, only yanked, so it is a manual `cargo publish` after `cargo package` has been checked.
+- Nothing publishes to crates.io on its own. The `Publish crate` workflow is a manual run that only packages unless you turn `dry_run` off, because publishing a crate cannot be undone, only yanked.
 - macOS and Windows binaries are not built.
-- The tag, release, and container workflows have not been run on GitHub yet; the scripts and shell steps they call have been run locally.
+- The tag, release, container, and crate workflows have not been run on GitHub yet; the scripts and shell steps they call have been run locally. For the crate workflow that means `cargo package` and the crates.io existence check.

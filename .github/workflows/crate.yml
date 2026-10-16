@@ -1,0 +1,142 @@
+name: Publish crate
+
+# Publishes the crate for an existing version tag to crates.io. Publishing cannot be undone, only
+# yanked, so it is a manual step with two safeguards: it only packages and checks unless you turn
+# `dry_run` off, and the real publish waits for the approval configured on the `crates-io`
+# environment. See docs/releasing.md ("Publishing the crate") for the one-time setup.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to publish, for example v1.2.0. Leave empty for the newest tag."
+        required: false
+        default: ""
+      dry_run:
+        description: "Package and check only. Turn it off to publish for real."
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-crate
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Package and check the crate
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tags.outputs.tag }}
+      version: ${{ steps.tags.outputs.version }}
+      published: ${{ steps.registry.outputs.published }}
+    steps:
+      - name: Check out the default branch with full history and tags
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the tag and check it belongs to main
+        id: tags
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          tags="$(git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+          tag="${INPUT_TAG:-$(head -n 1 <<<"$tags")}"
+          if [[ -z "$tag" ]]; then
+            echo "::error::No version tag exists yet. Merge a feat or fix change to main first."
+            exit 1
+          fi
+          if ! grep -Fxq "$tag" <<<"$tags"; then
+            echo "::error::$tag is not an existing vX.Y.Z tag."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$tag" "origin/${{ github.event.repository.default_branch }}"; then
+            echo "::error::$tag is not on the default branch; only released history is published."
+            exit 1
+          fi
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >>"$GITHUB_OUTPUT"
+
+      - name: Ask crates.io whether this version is already published
+        id: registry
+        env:
+          VERSION: ${{ steps.tags.outputs.version }}
+        run: |
+          set -euo pipefail
+          name="$(sed -n 's/^name *= *"\(.*\)".*/\1/p' Cargo.toml | head -n 1)"
+          code="$(curl -sS -o /dev/null -w '%{http_code}' \
+            -A "vodnik-release (${{ github.server_url }}/${{ github.repository }})" \
+            "https://crates.io/api/v1/crates/$name/$VERSION")"
+          case "$code" in
+            200) echo "published=true" >>"$GITHUB_OUTPUT"
+                 echo "::notice::$name $VERSION is already on crates.io; there is nothing to publish." ;;
+            404) echo "published=false" >>"$GITHUB_OUTPUT" ;;
+            *)   echo "::error::crates.io answered $code for $name $VERSION."; exit 1 ;;
+          esac
+
+      # The scripts are copied aside because the build checks out the tag, which may predate them.
+      - name: Keep a copy of the release scripts
+        run: cp -r .github/scripts "$RUNNER_TEMP/scripts"
+
+      - name: Check out the tag
+        run: git checkout --detach "${{ steps.tags.outputs.tag }}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # `cargo package` builds the crate from the files that would be uploaded, so it fails if the
+      # `exclude` list in Cargo.toml has dropped something the code needs.
+      - name: Package the crate and build it from the package
+        run: |
+          "$RUNNER_TEMP/scripts/stamp-version.sh" "${{ steps.tags.outputs.version }}"
+          cargo package --locked --allow-dirty
+          {
+            echo "### Packaged ${{ steps.tags.outputs.tag }}"
+            cargo package --locked --allow-dirty --list | wc -l | xargs echo "Files in the package:"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish to crates.io
+    needs: check
+    if: ${{ !inputs.dry_run && needs.check.outputs.published != 'true' }}
+    runs-on: ubuntu-latest
+    # Required reviewers on this environment are what make the real publish a deliberate step.
+    environment: crates-io
+    env:
+      TAG: ${{ needs.check.outputs.tag }}
+      VERSION: ${{ needs.check.outputs.version }}
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Keep a copy of the release scripts
+        run: cp -r .github/scripts "$RUNNER_TEMP/scripts"
+
+      - name: Check out the tag
+        run: git checkout --detach "$TAG"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Built and verified without the token: a dependency's build script runs during this step,
+      # and must not be able to read the registry token.
+      - name: Stamp the version and verify the package
+        run: |
+          "$RUNNER_TEMP/scripts/stamp-version.sh" "$VERSION"
+          cargo package --locked --allow-dirty
+
+      - name: Publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [[ -z "$CARGO_REGISTRY_TOKEN" ]]; then
+            echo "::error::The CARGO_REGISTRY_TOKEN secret is not set."
+            exit 1
+          fi
+          cargo publish --locked --allow-dirty --no-verify
+          echo "### Published $TAG to crates.io" >>"$GITHUB_STEP_SUMMARY"
