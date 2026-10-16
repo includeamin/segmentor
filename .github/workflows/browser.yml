@@ -1,0 +1,63 @@
+name: Browser tests
+
+# Plays the harness assets in a real Chrome with hls.js and dash.js, to see that a viewer can start,
+# seek, and switch quality (docs/technical-design/0017-verification-harness.md). It is not a
+# required check yet: browser tests are slower and flakier than the rest, and this workflow has to
+# earn that status by passing consistently. Known player problems it has found are marked in the
+# specs as expected failures, so a pass means nothing new broke.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browser-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chrome:
+    name: Play in Chrome
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the server
+        run: cargo build --locked --bin vodnik
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install the test dependencies
+        working-directory: tests/browser
+        run: npm ci --no-audit --no-fund
+
+      # Google Chrome, not Playwright's bundled Chromium: the bundled build has no H.264 or AAC.
+      - name: Install Chrome
+        working-directory: tests/browser
+        run: npx playwright install --with-deps chrome
+
+      - name: Play
+        working-directory: tests/browser
+        run: npx playwright test
+
+      - name: Keep the report and the server logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-test-output
+          path: |
+            tests/browser/playwright-report
+            tests/browser/test-results
+            tests/browser/.harness
+          if-no-files-found: ignore
