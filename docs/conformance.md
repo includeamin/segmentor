@@ -89,6 +89,43 @@ Each audit was checked by breaking the server and confirming that the suite fail
 | Audio-only clips are placed 100 ms late on the timeline | The server's own length check refuses the asset. The audit's audio-start rule is covered by its synthetic test only |
 | The grid's second clip asks for a window from 2100 ms, past the next keyframe | The window rule: "clip 1 is 1000 ms long, but its window holds at least 2000 ms" |
 
+### Browser playback
+
+The same assets are played in a real browser. `tests/browser` is a Node project (Playwright, with hls.js and dash.js installed from npm at pinned versions, never from a CDN) that starts the example mapper, the server and a small player page, and drives them. Run it with `make browser-test`; it needs Node 22 or later, `python3`, and **Google Chrome** (`npx playwright install chrome` on a runner), because Playwright's bundled Chromium has no H.264 or AAC. In CI it is the `Browser tests` workflow, which is not a required check yet.
+
+Measured on 2026-10-16 with hls.js 1.7.3, dash.js 5.2.1 and Chrome 155. For each of `single`, `ladder`, `preroll`, `grid` and `trimmed`, under each player:
+
+- **starts**: playback passes half a second with no player error;
+- **ends for the length the manifest states**: `ended` fires, and the duration is within 0.25 s of `mediaPresentationDuration`;
+- **plays all of it**: what was played covers the presentation, less what is explained (the video starts 67 ms in, the last 60 ms is not waited for, and each join between clips may leave one reorder delay of 67 ms);
+- **seeks**: to 60% and to half a second before the end, each made while paused and then resumed, since the assets last only a few seconds.
+
+On `ladder` and `grid`, **quality switching** forces each rendition in turn, up then down and down then up, with the player's own adaptive switching turned off, and each switch must show as a change in picture size. A player replaces what is buffered after the fragment it is playing, so a switch shows at the next segment boundary; each waits for the one before. The first switch on `grid` lands at the join between its two clips.
+
+A test that is known to fail is marked as an expected failure in the spec, with the reason, so it fails the run the day it starts passing and the entry has to go. Tests that fail only some of the time are tagged `@intermittent` and left out of the default run; `INTERMITTENT=1 npx playwright test` includes them. Retrying them would only hide a player that sometimes does not finish.
+
+### Found by the browser suite
+
+| Finding | Evidence | In the suite |
+| --- | --- | --- |
+| **The DASH manifest of a ladder puts each video rendition in an `AdaptationSet` of its own.** In DASH the switchable steps of one piece of content belong in one adaptation set; separate ones are alternative tracks. So dash.js lists a single rendition and can never adapt between them. This affects every ladder, not only clips | The `ladder` MPD has two video adaptation sets of one representation each. dash.js `getRepresentationsByType('video')` returns 1 | The four dash.js quality specs are expected failures |
+| **dash.js skips about 0.3 s at the join between clips** | `preroll` presents 141 of 150 frames and `grid` 112 of 118; `played` ranges `[0.07, 2.73]` then `[3.07, 5.01]`. A sequence of video-only files does the same; a sequence of audio-only files plays perfectly | `dash plays preroll` and `dash plays grid`, "plays all of it", are expected failures |
+| **hls.js never fires `ended` on a sequence of whole files** | It stops 35 ms short of the end with a `bufferStalledError`, no fatal error, and its main stream controller stays `IDLE` while the audio one ends. The video buffer has a 66 ms hole at the join. The same file played twice does the same, and the reported duration is 6.13 s for 6.0 s | `hls plays preroll`, "ends", is an expected failure |
+| **hls.js on the adaptive-clips `grid` is unreliable** | It ends in most isolated runs, but in the full suite twice in a row it did not, and it does not end whenever a quality switch is made at the join: the duration comes out as 4.1 s instead of 4.0 s, about 0.3 s around the join is skipped, and it stalls short of the end | `hls plays grid`, "ends" and "plays all of it", are `@intermittent` |
+
+What was ruled out: the audio (audio-only sequences are fine), a change of resolution (the same file twice fails), a clip that starts mid-GOP, and hls.js's tolerance for holes (widening `maxBufferHole` to 0.3 s changed nothing). What was not determined is the cause. The one pattern is that every problem is at a join between clips, in the video, in both protocols. A reasonable guess is the timeline at the join, where the last frames of a clip are presented up to 67 ms after the next clip is declared to start ([TDD 0008](technical-design/0008-clipping-and-concatenation.md), "Timeline"), but nothing here proves it. Telling a defect in the output from a quirk of these two players needs a third player (Shaka Player) and a decision on that design.
+
+Each layer is mutation-checked like the one before (2026-10-16): the server is broken, the suite is run, and the server is restored.
+
+| Mutation | Caught by the browser suite |
+| --- | --- |
+| The init segment of every clip after the first answers 404 | 11 specs, under both players, on `preroll` and `grid` |
+| The 480p rendition cannot be reached after the first clip | The 4 hls.js specs on `grid` that start on, or switch to, 480p |
+| No `EXT-X-DISCONTINUITY` before the second clip | No spec fails, but `hls plays preroll`, "ends", an expected failure, **passes**, so the run reports it: hls.js does reach the end of the sequence without the discontinuity. That points the end-of-stream problem above at how hls.js handles it. Leaving the tag out is not a fix: clips can differ in encoding |
+| Audio-only clips are cut from the mapper's own window, with the server's own length check removed (the bug found in the review of TDD 0016) | **Nothing.** A player starts, seeks and plays a stream whose audio is out of step with its video. Audio and video agreeing is what the mapper-driven audit above checks |
+
+What works: quality switching across the join between the clips of `grid` in hls.js, up and down; every property above for `single`, `ladder` and `trimmed` under both players; seeking everywhere; audio-only sequences.
+
 ## What is not covered
 
 The suite verifies structural rules the code can be held to. It is not a certification.
@@ -99,7 +136,8 @@ The suite verifies structural rules the code can be held to. It is not a certifi
 | DASH-IF conformance (`DASH-IF-Conformance` tool or web validator) | Not run | Needs Java or the hosted validator. Run it on a served MPD before a release |
 | Encrypted (`drm-clearkey`) and subtitled assets through a mapper | Not covered | They have in-process tests only; the mapper-driven audit has no key handling or subtitle playlists yet |
 | CMAF (ISO/IEC 23000-19) profile conformance | Not claimed | The layout is CMAF-style but no CMAF validator has been run. Do not claim conformance |
-| Browser playback with hls.js and dash.js (start, seek, play) | Not implemented | Needs Node, `npm`, and a browser driver such as Playwright. Neither `npm` nor a driver was available where this suite was written |
+| Browser playback with hls.js and dash.js | Chrome only | `make browser-test`; see above. Safari (native HLS) and Firefox are manual |
+| Clear Key playback in a browser | Not covered | The browser suite has no key handling yet; `drm-clearkey` is in the example catalog |
 | Device and player matrix (Safari, tvOS, Android ExoPlayer, smart TVs) | Not covered | Manual |
 
 Until the vendor validators and browser tests are run and their output recorded here, treat the output as structurally sound and cross-checked but not certified.
