@@ -82,21 +82,8 @@ pub(crate) fn build(
         } else {
             Trailing::Cut
         };
-        // The clip is cut on the tracks it serves: one it drops must neither decide where the
-        // window lies nor fail it by having nothing inside it (TDD 0015).
-        let narrowed;
-        let index = match tracks {
-            Some(selection) => {
-                let mut index = files[file].parsed.index.clone();
-                index.tracks = selection
-                    .apply(std::mem::take(&mut index.tracks))
-                    .map_err(named(position))?;
-                narrowed = index;
-                &narrowed
-            }
-            None => &files[file].parsed.index,
-        };
-        let cut = clip::trim(index, window, start, trailing).map_err(named(position))?;
+        let index = narrow(&files[file].parsed.index, tracks).map_err(named(position))?;
+        let cut = clip::trim(&index, window, start, trailing).map_err(named(position))?;
         tracing::info!(
             event = "clip_trimmed",
             asset.id = asset_id,
@@ -155,6 +142,21 @@ pub(crate) fn build(
     )?)))
 }
 
+/// The index a clip is cut from: the file's own, or only the tracks the clip serves. The clip is
+/// cut on the tracks it serves: one it drops must neither decide where the window lies nor fail
+/// it by having nothing inside it (TDD 0015).
+pub(crate) fn narrow(
+    index: &MediaIndex,
+    tracks: Option<TrackSelection>,
+) -> Result<std::borrow::Cow<'_, MediaIndex>> {
+    let Some(selection) = tracks else {
+        return Ok(std::borrow::Cow::Borrowed(index));
+    };
+    let mut narrowed = index.clone();
+    narrowed.tracks = selection.apply(std::mem::take(&mut narrowed.tracks))?;
+    Ok(std::borrow::Cow::Owned(narrowed))
+}
+
 fn assemble(
     clips: Vec<(PackagedAsset, TimelinePosition)>,
     total: TimelinePosition,
@@ -205,7 +207,12 @@ fn layout(index: &MediaIndex) -> Vec<(String, Discriminant<CodecConfig>, String)
 /// Every clip must have the same tracks, and the same codec in each (TDD 0008, "Compatibility
 /// between clips"). Anything within a codec may differ: resolution, profile, parameter sets.
 fn check_compatible(clips: &[(PackagedAsset, TimelinePosition)]) -> Result<()> {
-    let Some(((first, _), rest)) = clips.split_first() else {
+    check_layouts(&clips.iter().map(|(asset, _)| asset).collect::<Vec<_>>())
+}
+
+/// [`check_compatible`] over the assets alone, for callers that keep the timeline elsewhere.
+pub(crate) fn check_layouts(clips: &[&PackagedAsset]) -> Result<()> {
+    let Some((first, rest)) = clips.split_first() else {
         return Err(Error::InvalidMedia(
             "a sequence needs at least one clip".to_owned(),
         ));
@@ -218,7 +225,7 @@ fn check_compatible(clips: &[(PackagedAsset, TimelinePosition)]) -> Result<()> {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    for (offset, (clip, _)) in rest.iter().enumerate() {
+    for (offset, clip) in rest.iter().enumerate() {
         let position = offset + 1;
         let found = layout(&clip.index);
         if expected

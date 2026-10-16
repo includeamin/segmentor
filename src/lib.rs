@@ -9,6 +9,14 @@
 
 use std::process::ExitCode;
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "served by the registry from the next task (TDD 0016)"
+    )
+)]
+mod adaptive;
 mod asset;
 mod authorization;
 mod cenc;
