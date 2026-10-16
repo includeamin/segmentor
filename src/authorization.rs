@@ -372,7 +372,7 @@ fn header_and_claims_length(token: &str) -> usize {
     token.rfind('.').unwrap_or(token.len())
 }
 
-/// Minting tokens, for tests of the code that checks them. segmentor never issues credentials.
+/// Minting tokens, for tests of the code that checks them. vodnik never issues credentials.
 #[cfg(test)]
 pub(crate) mod testing {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};

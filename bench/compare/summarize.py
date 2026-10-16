@@ -7,9 +7,9 @@ import statistics
 import sys
 
 out = sys.argv[1]
-servers = [s for s in ("segmentor", "segmentor-separate", "nginx", "nginx-cached")
+servers = [s for s in ("vodnik", "vodnik-separate", "nginx", "nginx-cached")
            if os.path.exists(f"{out}/{s}-cold.csv")]
-label = {"segmentor": "segmentor", "segmentor-separate": "segmentor, separate audio",
+label = {"vodnik": "vodnik", "vodnik-separate": "vodnik, separate audio",
          "nginx": "nginx-vod-module", "nginx-cached": "nginx-vod-module, response cache"}
 
 
@@ -52,7 +52,7 @@ def read(path, default="missing"):
         return default
 
 
-print(f"# segmentor vs nginx-vod-module: {os.path.basename(out)}\n")
+print(f"# vodnik vs nginx-vod-module: {os.path.basename(out)}\n")
 print(f"Host: {platform.machine()}, {os.cpu_count()} logical CPUs. Servers pinned to "
       f"`{os.environ.get('SERVER_CPUS', '0-3')}`, load generator to "
       f"`{os.environ.get('LOAD_CPUS', '4-7')}`.\n")

@@ -33,7 +33,7 @@ Two properties of the existing code shape this design:
 
 ## Non-goals
 
-- Frame-accurate cuts. They need re-encoding the partial GOP, and segmentor never decodes.
+- Frame-accurate cuts. They need re-encoding the partial GOP, and vodnik never decodes.
 - Adaptive clips (a clip with `renditions`). A later extension; the wire format below leaves room for it without a breaking change.
 - Subtitles with clips, and I-frame playlists for sequences of two or more clips. See [Deferred](#deferred).
 - Clips in the static `[assets.*]` catalog. Clips come from a mapper.

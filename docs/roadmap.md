@@ -1,18 +1,18 @@
 # Roadmap
 
-This page lists everything segmentor still needs before it can replace [nginx-vod-module](research/nginx-vod-module.md) in production. Each step is grouped into a phase, with its status and the design it belongs to.
+This page lists everything vodnik still needs before it can replace [nginx-vod-module](research/nginx-vod-module.md) in production. Each step is grouped into a phase, with its status and the design it belongs to.
 
-- **Feature parity** means segmentor does everything nginx-vod-module does that someone actually relies on. It does not mean copying nginx-vod-module's configuration syntax or URL scheme. Migrating an existing deployment is a separate step (Phase 5).
-- **Out of scope by design** lists features that conflict with segmentor's architecture. They would need an ADR before any code.
+- **Feature parity** means vodnik does everything nginx-vod-module does that someone actually relies on. It does not mean copying nginx-vod-module's configuration syntax or URL scheme. Migrating an existing deployment is a separate step (Phase 5).
+- **Out of scope by design** lists features that conflict with vodnik's architecture. They would need an ADR before any code.
 
 The baseline is nginx-vod-module's [published feature list](https://github.com/kaltura/nginx-vod-module#features), compared with the status lines of TDDs 0001 to 0009.
 
-## Where segmentor already matches
+## Where vodnik already matches
 
-| nginx-vod-module feature | segmentor | Design |
+| nginx-vod-module feature | vodnik | Design |
 | --- | --- | --- |
 | On-the-fly repackaging of MP4 to HLS and DASH | Done | [TDD 0001](technical-design/0001-on-demand-mp4-packaging-core.md) |
-| Local, remote (HTTP range), and mapped working modes | Done; mapped mode uses segmentor's own mapper API | [TDD 0002](technical-design/0002-asset-map-interface.md) |
+| Local, remote (HTTP range), and mapped working modes | Done; mapped mode uses vodnik's own mapper API | [TDD 0002](technical-design/0002-asset-map-interface.md) |
 | Adaptive bitrate, alternative audio renditions | Done | [TDD 0006](technical-design/0006-trick-play-subtitles-and-renditions.md) |
 | HLS I-frame playlists | Done, for clear assets and encrypted ones | [TDD 0006](technical-design/0006-trick-play-subtitles-and-renditions.md) |
 | WebVTT subtitles (HLS and DASH) | Done, as sidecar files | [TDD 0006](technical-design/0006-trick-play-subtitles-and-renditions.md) |
@@ -38,7 +38,7 @@ DRM is the most common reason a studio-licensed catalog cannot move. These steps
 | AV1 and VP9 encryption | To do | OBU-aware and superframe-aware subsample rules |
 | Opus and FLAC encryption | To do | Whole-sample protection, as for AAC |
 | `cenc` (AES-CTR) scheme | Decide first | Only needed for players that cannot do `cbcs`. Confirm a real target device needs it before building |
-| SPEKE v2 key exchange | To do, mapper side | segmentor never talks to a licence server, so this is a reference mapper adapter and guide, not server code |
+| SPEKE v2 key exchange | To do, mapper side | vodnik never talks to a licence server, so this is a reference mapper adapter and guide, not server code |
 | Widevine, FairPlay, PlayReady playback on real devices | To do | Manual release check with an operator's DRM vendor account; only Clear Key is verified in browsers today |
 
 ## Phase 2: Captions and codecs
@@ -59,16 +59,16 @@ DRM is the most common reason a studio-licensed catalog cannot move. These steps
 
 ## Phase 3: Delivery modes and protocols
 
-These change what segmentor is, so each starts with a new TDD.
+These change what vodnik is, so each starts with a new TDD.
 
 | Step | Status | Notes |
 | --- | --- | --- |
 | Simulated live from VOD files | New TDD | A live playlist, a sliding window, and a wall-clock timeline over the clip sequences that already exist. [TDD 0008](technical-design/0008-clipping-and-concatenation.md) defers it explicitly |
-| Fallback on file not found | New TDD | nginx-vod-module retries another datacenter on a miss. In segmentor this is a mapper concern (a second location) or an origin failover list |
+| Fallback on file not found | New TDD | nginx-vod-module retries another datacenter on a miss. In vodnik this is a mapper concern (a second location) or an origin failover list |
 | Ad markers (`EXT-X-DATERANGE`, DASH events) | New TDD | Deferred by [TDD 0008](technical-design/0008-clipping-and-concatenation.md), together with linear channels |
 | Microsoft Smooth Streaming (MSS) | Decide first | A third manifest and fragment layout, plus PlayReady for MSS. Only worth it for a known Xbox or legacy smart-TV audience |
 | Adobe HDS | Not recommended | Requires Flash, which no current player supports |
-| MPEG-TS segments for HLS | Decide first | nginx-vod-module serves TS; segmentor serves fMP4 ([ADR 0001](adr/0001-use-fragmented-mp4-for-media-segments.md)). Needed only for very old HLS players |
+| MPEG-TS segments for HLS | Decide first | nginx-vod-module serves TS; vodnik serves fMP4 ([ADR 0001](adr/0001-use-fragmented-mp4-for-media-segments.md)). Needed only for very old HLS players |
 | Clipped MP4 for progressive download | Decide first | A whole-file MP4 response for a window, for players that cannot do HLS or DASH |
 
 ## Phase 4: Production readiness
@@ -86,17 +86,17 @@ These change what segmentor is, so each starts with a new TDD.
 
 ## Performance: faster than nginx-vod-module everywhere
 
-The goal is for segmentor to beat nginx-vod-module on every measurement of the [head-to-head comparison](benchmarks.md#segmentor-vs-nginx-vod-module), not only on segment throughput. Each step is measured with `make bench-compare` before and after, and gives back nothing elsewhere.
+The goal is for vodnik to beat nginx-vod-module on every measurement of the [head-to-head comparison](benchmarks.md#vodnik-vs-nginx-vod-module), not only on segment throughput. Each step is measured with `make bench-compare` before and after, and gives back nothing elsewhere.
 
 Where it stands (2026-10-03, 60-minute asset):
 
-| Measurement | segmentor | nginx-vod-module | Gap |
+| Measurement | vodnik | nginx-vod-module | Gap |
 | --- | ---: | ---: | --- |
-| First segment from a fresh process | 8.5 ms | 19.4 ms | segmentor 2.3× ahead (was 245 ms against 69 ms) |
+| First segment from a fresh process | 8.5 ms | 19.4 ms | vodnik 2.3× ahead (was 245 ms against 69 ms) |
 | First master playlist from a fresh process | 6.6 ms | 4.6 ms | nginx-vod-module 1.4× faster, by deferring its parse to the media playlist |
-| Playlist requests/s on 1 core, response cache on | 17,603 | 12,988 | segmentor 1.36× ahead |
-| A viewer's playlists per second on 1 core, response cache on | 8,554 muxed, 5,868 separate | 6,494 | segmentor 1.32× ahead when muxed; behind with audio as its own rendition |
-| Segment throughput, 1 core | 447 MiB/s | 197 MiB/s | segmentor 2.3× ahead |
+| Playlist requests/s on 1 core, response cache on | 17,603 | 12,988 | vodnik 1.36× ahead |
+| A viewer's playlists per second on 1 core, response cache on | 8,554 muxed, 5,868 separate | 6,494 | vodnik 1.32× ahead when muxed; behind with audio as its own rendition |
+| Segment throughput, 1 core | 447 MiB/s | 197 MiB/s | vodnik 2.3× ahead |
 
 **How.** Work largest gap first: cold start, then playlists, then segments.
 
@@ -131,19 +131,19 @@ Where it stands (2026-10-03, 60-minute asset):
 | Step | Status | Notes |
 | --- | --- | --- |
 | Mapping-JSON compatibility layer | Part 1 of 5 in progress: `tracks` and rendition language, label and default done | [TDD 0015](technical-design/0015-vod-module-mapping-adapter.md): a `vod-module` dialect of the HTTP resolver reads the existing mapping service and translates single files, adaptive sets of sequences, clips with durations, captions and track selection. Later parts: adaptive playlists, `cenc` and the DRM bridge, URL compatibility, fallback and the migration guide. [TDD 0008](technical-design/0008-clipping-and-concatenation.md) deferred "vod-module mapping compatibility" |
-| URL compatibility, or a redirect layer | Decide first | nginx-vod-module URLs differ from segmentor's. Players that load URLs from the mapper need nothing; hard-coded URLs need a rewrite at the proxy |
+| URL compatibility, or a redirect layer | Decide first | nginx-vod-module URLs differ from vodnik's. Players that load URLs from the mapper need nothing; hard-coded URLs need a rewrite at the proxy |
 | Migration guide | To do | Feature mapping, configuration translation, and a shadow-traffic comparison procedure |
 | Shadow comparison in production | To do | Run both behind the same CDN on a sample of traffic, and compare manifests, segment decodes, and error rates before cutover |
 
 ## Out of scope by design
 
-segmentor never decodes media. The following nginx-vod-module features need decoding (it uses FFmpeg libraries for them), so they would need an ADR that changes that principle:
+vodnik never decodes media. The following nginx-vod-module features need decoding (it uses FFmpeg libraries for them), so they would need an ADR that changes that principle:
 
 - thumbnail capture and resizing;
 - volume maps;
 - playback-rate change, gain, and audio mixing filters.
 
-If one of them is needed, the usual approach is a separate service next to segmentor (for example a thumbnail service reading the same storage), keeping the packaging path decode-free.
+If one of them is needed, the usual approach is a separate service next to vodnik (for example a thumbnail service reading the same storage), keeping the packaging path decode-free.
 
 ## order
 

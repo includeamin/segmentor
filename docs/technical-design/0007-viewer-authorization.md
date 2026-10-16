@@ -10,33 +10,33 @@
 
 Two additive mechanisms, chosen so the common case costs no extra request:
 
-1. **Signed playback tokens** (the default, and the only mechanism most deployments need): the operator's own system decides who may watch what and mints a short-lived, scoped token. segmentor verifies it locally, on every request, with no network call of its own.
-2. **A live authorization check** (opt-in, per deployment): for the smaller set of cases that need real-time revocation — banning a viewer mid-stream, capping concurrent sessions — that a pre-issued token cannot express, segmentor asks an external HTTP authorizer, cached briefly, the same shape as a mapper resolution.
+1. **Signed playback tokens** (the default, and the only mechanism most deployments need): the operator's own system decides who may watch what and mints a short-lived, scoped token. vodnik verifies it locally, on every request, with no network call of its own.
+2. **A live authorization check** (opt-in, per deployment): for the smaller set of cases that need real-time revocation — banning a viewer mid-stream, capping concurrent sessions — that a pre-issued token cannot express, vodnik asks an external HTTP authorizer, cached briefly, the same shape as a mapper resolution.
 
-Neither changes behavior when `[authorization]` is absent from the configuration: the origin serves exactly as it does today. That is why the existing "authorize at the reverse proxy or CDN" guidance in [deployment](../deployment.md#before-you-expose-it) remains correct and unaffected — this design is a second option for when the decision belongs in segmentor itself, not a replacement for the first.
+Neither changes behavior when `[authorization]` is absent from the configuration: the origin serves exactly as it does today. That is why the existing "authorize at the reverse proxy or CDN" guidance in [deployment](../deployment.md#before-you-expose-it) remains correct and unaffected — this design is a second option for when the decision belongs in vodnik itself, not a replacement for the first.
 
 ## Context
 
-segmentor has no authentication today, by design: [deployment](../deployment.md#before-you-expose-it) tells operators to authorize at a reverse proxy or CDN, in front of an origin that trusts everything reaching it. That is enough when the proxy already has what it needs to decide — a signed CDN URL, a fixed source IP, mTLS. It stops being enough when the decision needs to know about the *asset* (which of the renditions or subtitle languages TDD 0006 lets a mapper list this viewer may see, not just "is this request allowed at the edge at all"), or when an operator would rather make the decision once, in the one system that already knows the catalog and the URL structure, than duplicate it across every proxy and CDN configuration in front of it.
+vodnik has no authentication today, by design: [deployment](../deployment.md#before-you-expose-it) tells operators to authorize at a reverse proxy or CDN, in front of an origin that trusts everything reaching it. That is enough when the proxy already has what it needs to decide — a signed CDN URL, a fixed source IP, mTLS. It stops being enough when the decision needs to know about the *asset* (which of the renditions or subtitle languages TDD 0006 lets a mapper list this viewer may see, not just "is this request allowed at the edge at all"), or when an operator would rather make the decision once, in the one system that already knows the catalog and the URL structure, than duplicate it across every proxy and CDN configuration in front of it.
 
 Two facts drive the design, and they pull in the same direction:
 
-- **A decision made once must not become a per-request problem.** One HLS or DASH session is a manifest, then an init segment and many media segments per track, repeated for as long as playback continues. If every one of those called out over the network to an authorizer, that would be most of segmentor's request volume turned into synchronous external latency on the hot path — a completely different cost profile from the mapper, which resolves an asset once and shares that answer across every viewer.
+- **A decision made once must not become a per-request problem.** One HLS or DASH session is a manifest, then an init segment and many media segments per track, repeated for as long as playback continues. If every one of those called out over the network to an authorizer, that would be most of vodnik's request volume turned into synchronous external latency on the hot path — a completely different cost profile from the mapper, which resolves an asset once and shares that answer across every viewer.
 - **The registry's cache is already shared across viewers, on purpose, and must stay that way.** `AssetRegistry`'s resolution and loaded-asset caches are keyed by `(asset_id, version)` (see `registry/mod.rs`), not by viewer, and sharing them is exactly what keeps a popular asset cheap to serve. A viewer-scoped answer cannot be folded into that cache without either fragmenting it per viewer — which throws away the sharing — or living somewhere else entirely. This design keeps authorization completely separate from asset resolution and caching.
 
 ## Goals
 
 - A request without a valid grant gets refused on every URL a title exposes — playlists, manifests, init segments, media segments, I-frame and subtitle resources — not only the master playlist, since a client that has once seen a playlist can otherwise construct the rest.
 - The common case (a token already granted) adds no network call and no measurable latency.
-- An operator can express "this grant covers renditions A and B but not C" and "this grant covers this asset until this time," without segmentor knowing anything about accounts, subscriptions, or billing.
+- An operator can express "this grant covers renditions A and B but not C" and "this grant covers this asset until this time," without vodnik knowing anything about accounts, subscriptions, or billing.
 - A deployment that genuinely needs live revocation can opt into it, at a cost it explicitly accepts, without changing the token format everyone else uses.
 - Zero behavior change, zero cost, for a deployment that does not configure `[authorization]`.
 
 ## Non-goals
 
 - **DRM.** Encryption, license servers, and key rotation solve "a viewer who has the bytes cannot redistribute them," which is a different, larger problem than "may this request have the bytes at all." TDD 0006 already keeps that separate and deferred; this design does not revisit it, and does not require it.
-- **Issuing tokens.** segmentor verifies them. Minting them — and everything upstream of that: login, entitlement, payment — is the operator's own system, the same way the operator's system already decides what to tell the mapper.
-- **Viewer identity or sessions.** A token is an opaque, scoped grant. segmentor never learns who a viewer is, only what a token claims.
+- **Issuing tokens.** vodnik verifies them. Minting them — and everything upstream of that: login, entitlement, payment — is the operator's own system, the same way the operator's system already decides what to tell the mapper.
+- **Viewer identity or sessions.** A token is an opaque, scoped grant. vodnik never learns who a viewer is, only what a token claims.
 - **Per-segment external calls.** The live-check mode (below) is scoped to a cacheable decision, not to every request; see Goals.
 - **Changing what the mapper protocol carries.** Authorization and asset resolution are independent trust boundaries (see Security and limits); this design adds no fields to the mapper's answer.
 
@@ -52,7 +52,7 @@ Disabled by default: with `[authorization]` absent, the check is not added to th
 
 **Format.** JWT, restricted tightly rather than accepted broadly: exactly one algorithm is configured (`HS256` with a shared secret by default, or `ES256`/`EdDSA` with a public key for deployments where the issuer is a separate, less-trusted system), a token's header must name exactly that algorithm, and anything else — including `alg: none` — is refused outright, with no negotiation and no fallback. JWT rather than a bespoke format because operators wiring this into an existing entitlement system almost always already have something that issues JWTs (an IdP, an API gateway, a custom backend); a bespoke format would just mean they write a translator in front of it. The restriction to one fixed, explicit algorithm closes the usual JWT footguns (algorithm confusion, `none`) by construction rather than by relying on a general-purpose library's defaults.
 
-**Claims segmentor understands:**
+**Claims vodnik understands:**
 
 | Claim | Required | Meaning |
 | --- | --- | --- |
@@ -66,7 +66,7 @@ Unknown claims are ignored, so the format can grow — the same forward-compatib
 
 **Transport.** Two supported, an operator's choice:
 
-- **Query parameter** (`?auth=...`, alongside the existing `?v=`). segmentor's own HLS and DASH renderers append it to every URL they emit, exactly as they already append `?v=` — so a player that only ever follows the URLs a playlist gives it carries the grant forward automatically, with no player-side configuration. This is the only transport that works uniformly everywhere, including native players (Safari's built-in HLS, most mobile and TV players) that a page cannot make attach a custom header.
+- **Query parameter** (`?auth=...`, alongside the existing `?v=`). vodnik's own HLS and DASH renderers append it to every URL they emit, exactly as they already append `?v=` — so a player that only ever follows the URLs a playlist gives it carries the grant forward automatically, with no player-side configuration. This is the only transport that works uniformly everywhere, including native players (Safari's built-in HLS, most mobile and TV players) that a page cannot make attach a custom header.
 - **Cookie**, scoped to the asset's path. Needed because a query-string token is part of the URL, and therefore part of a CDN's cache key: it turns a shared, immutable segment into an effectively per-viewer one, which is the entire tradeoff a CDN exists to avoid (see Caching, below). A cookie authorizes the same way without appearing in the URL, so the cache key — and the sharing — survives. The cost is that not every player has a cookie jar, and cross-origin delivery needs the same care `[cors]` already documents for the demo and admin pages.
 
 **Ordering and the "no oracle" property.** The check runs before the asset is resolved. A request refused for a bad token therefore never causes a resolver lookup, which means an unauthorized caller learns nothing about whether the named asset exists — the ordering itself prevents that leak, without needing special-cased error messages.
@@ -75,7 +75,7 @@ Unknown claims are ignored, so the format can grow — the same forward-compatib
 
 ### Mode 2: a live check (opt-in, composes with tokens)
 
-For the smaller set of deployments that need revocation faster than a short `exp` can provide — banning a viewer while they are watching, enforcing a concurrent-stream cap — a second, optional gate: segmentor asks an external HTTP authorizer, and caches the answer briefly. Structurally this reuses the mapper's `HttpResolver` machinery (connect/request timeouts, retries, a positive TTL, a shorter negative TTL, `stale_if_error`) rather than reinventing it, because the cost/caching shape is the same problem the mapper already solved: `GET {base_url}/v1/authorize?asset={asset_id}&grant={opaque hash of the token}` → `{"allowed": true, "ttl_seconds": N}`, cached per `(asset_id, grant hash)` so a session's later requests do not re-ask until the TTL expires.
+For the smaller set of deployments that need revocation faster than a short `exp` can provide — banning a viewer while they are watching, enforcing a concurrent-stream cap — a second, optional gate: vodnik asks an external HTTP authorizer, and caches the answer briefly. Structurally this reuses the mapper's `HttpResolver` machinery (connect/request timeouts, retries, a positive TTL, a shorter negative TTL, `stale_if_error`) rather than reinventing it, because the cost/caching shape is the same problem the mapper already solved: `GET {base_url}/v1/authorize?asset={asset_id}&grant={opaque hash of the token}` → `{"allowed": true, "ttl_seconds": N}`, cached per `(asset_id, grant hash)` so a session's later requests do not re-ask until the TTL expires.
 
 This is additive to Mode 1, not a replacement: a token still establishes what a grant covers; the live check adds "and is this grant still good right now," checked far less often than every request because of the cache, the same amortization the mapper already relies on.
 
@@ -85,7 +85,7 @@ This is additive to Mode 1, not a replacement: a token still establishes what a 
 
 Per-viewer authorization and shared-edge caching pull in opposite directions, and this design does not pretend otherwise:
 
-- A **query-parameter token** is part of the URL, so it is part of any CDN's cache key by default. Fine-grained (near-per-viewer) tokens mean near-zero cache sharing on segment bytes — every viewer effectively gets their own cached copy, which is worse than today's immutable, `?v=`-keyed URLs that every viewer already shares. This is not a segmentor-specific problem; it is the same tradeoff behind CloudFront and Akamai's signed URLs, which have exactly this cost.
+- A **query-parameter token** is part of the URL, so it is part of any CDN's cache key by default. Fine-grained (near-per-viewer) tokens mean near-zero cache sharing on segment bytes — every viewer effectively gets their own cached copy, which is worse than today's immutable, `?v=`-keyed URLs that every viewer already shares. This is not a vodnik-specific problem; it is the same tradeoff behind CloudFront and Akamai's signed URLs, which have exactly this cost.
 - A **cookie token** keeps the cache key URL-only, so segment sharing survives, provided the CDN is told to vary its cache on the URL alone and forward (not cache-key) the cookie to the origin for the authorization check itself. Most CDNs support this split; it needs to be configured deliberately, and is worth a worked example in operations documentation once a transport ships (see Open questions).
 - **Grant granularity is an operator knob, independent of the mechanism.** A token scoped to one content tier or one geographic region, shared by every viewer entitled to it, recovers most of the caching benefit at the cost of coarser revocation (revoking the tier revokes everyone on it); a token scoped to one viewer is the opposite trade. Nothing in this design forces either choice.
 
@@ -95,7 +95,7 @@ Per-viewer authorization and shared-edge caching pull in opposite directions, an
 - Exactly one configured algorithm is accepted, checked exactly; `alg: none` and algorithm negotiation are refused outright, not merely discouraged.
 - Clock-skew tolerance is bounded and configurable, not unlimited.
 - A live-check request carries only an opaque grant hash and the asset ID, never anything else about the request or the viewer, so the authorizer cannot be used to learn more than its own token already encoded.
-- Authorization and asset resolution are independent trust boundaries: a compromised mapper cannot forge a viewer's grant (it never sees or issues tokens), and a compromised or leaked token cannot make segmentor fetch from an origin the `[remote_media]` policy would not already allow (verification and resolution are separate code paths that never share state).
+- Authorization and asset resolution are independent trust boundaries: a compromised mapper cannot forge a viewer's grant (it never sees or issues tokens), and a compromised or leaked token cannot make vodnik fetch from an origin the `[remote_media]` policy would not already allow (verification and resolution are separate code paths that never share state).
 - New bounded inputs, checked before anything is parsed: a maximum token size, and (Mode 2) a maximum authorizer response size, mirroring the mapper's `max_response_bytes`.
 
 ## Observability
@@ -121,9 +121,9 @@ Additive and disabled by default: with `[authorization]` absent, the router is u
 
 Mode 1 is implemented. What differs from, or settles, the design above:
 
-- **Configuration.** `[authorization]` with `algorithm` (`HS256`, `ES256`, `EdDSA`), exactly one of `key_env` (the secret, or a PEM public key, read from that variable) and `key_file`, `transports` (any of `header`, `cookie`, `query`; all by default), `query_parameter` (`auth`), `cookie_name` (`segmentor_auth`), `clock_skew_secs` (30, at most 300) and `max_token_bytes` (4096). Unknown keys are rejected, and no error or `Debug` output includes key material. `HS256` secrets must be at least 32 bytes.
+- **Configuration.** `[authorization]` with `algorithm` (`HS256`, `ES256`, `EdDSA`), exactly one of `key_env` (the secret, or a PEM public key, read from that variable) and `key_file`, `transports` (any of `header`, `cookie`, `query`; all by default), `query_parameter` (`auth`), `cookie_name` (`vodnik_auth`), `clock_skew_secs` (30, at most 300) and `max_token_bytes` (4096). Unknown keys are rejected, and no error or `Debug` output includes key material. `HS256` secrets must be at least 32 bytes.
 - **Transports.** The header is `Authorization: Bearer <token>`. They are tried in the order header, cookie, query, and the first one present decides: a bad header is not rescued by a good cookie. A transport that is not enabled is not read.
-- **Cookie.** segmentor reads the cookie and never sets it, so the operator's own login flow sets it, with whatever scope and `SameSite` it needs. It is not path-scoped by segmentor.
+- **Cookie.** vodnik reads the cookie and never sets it, so the operator's own login flow sets it, with whatever scope and `SameSite` it needs. It is not path-scoped by vodnik.
 - **Query tokens reach every URL.** A playlist or manifest requested with a query token is rewritten per viewer: each `?v=` URL gains `&auth=<token>` (`&amp;auth=` in DASH). Those responses carry no `ETag` and are `private, no-store`, and are not compressed from the shared cache. Playlists requested with the header or cookie are the shared, cacheable ones, unchanged.
 - **Failure codes.** `401` with `WWW-Authenticate: Bearer` for a missing, malformed, tampered, expired or not-yet-valid token, with a fixed reason body (`invalid token`, `token expired`, `token not yet valid`); `403` for a valid token that does not cover the resource. Refusals are `Cache-Control: no-store`, and never name the asset.
 - **Scope.** The `asset` claim is a string or a list; `renditions` and `subtitles` narrow a grant to those resources. Every media route is protected; `/health`, `/ready`, `/metrics` and `/admin/status` are not.
@@ -133,7 +133,7 @@ Not done: Mode 2, a token-minting CLI, and the CDN worked example. These remain 
 
 ## Open questions
 
-- **Token minting.** Does segmentor ship a small CLI (`segmentor sign-token ...`) for operators without their own JWT tooling, or is issuing anything, even for convenience, scope creep for a project that otherwise never mints credentials?
+- **Token minting.** Does vodnik ship a small CLI (`vodnik sign-token ...`) for operators without their own JWT tooling, or is issuing anything, even for convenience, scope creep for a project that otherwise never mints credentials?
 - **Cookie transport and CORS.** The demo and admin pages already need `[cors]`; a cookie-based grant adds `SameSite` and credentialed-fetch questions those pages, and any browser-based player, would need to handle. Worth resolving before or after the query-parameter transport ships?
 - **Revocation without Mode 2.** A short `exp` is the only bound on a compromised token's lifetime when the live check is not configured. Is that enough for a default, or does even the token-only mode need a cheap denylist?
 - **A worked CDN example.** Query-parameter tokens fragment the cache per grant; cookie tokens need the CDN configured to keep the cache key URL-only. Should [operations](../operations.md) gain a concrete example (a CloudFront function or a Cloudflare Worker) once a transport is chosen, the way [deployment](../deployment.md) already has one for Compose and Kubernetes?

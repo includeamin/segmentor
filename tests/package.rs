@@ -52,7 +52,7 @@ fn refuses_an_encrypted_source_instead_of_writing_ciphertext() {
     ] {
         let output = root.join(format!("target/package-encrypted-source-{name}"));
         let _ = fs::remove_dir_all(&output);
-        let result = Command::new(env!("CARGO_BIN_EXE_segmentor"))
+        let result = Command::new(env!("CARGO_BIN_EXE_vodnik"))
             .args(["package", "--input"])
             .arg(root.join("tests/fixtures").join(name))
             .arg("--output")
@@ -75,7 +75,7 @@ fn refuses_an_encrypted_source_instead_of_writing_ciphertext() {
 }
 
 fn run_packager(root: &Path, output: &Path) {
-    let result = Command::new(env!("CARGO_BIN_EXE_segmentor"))
+    let result = Command::new(env!("CARGO_BIN_EXE_vodnik"))
         .args([
             "package",
             "--input",

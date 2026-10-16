@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Writes source-cipher-vectors.json: protected samples for segmentor's decryption unit tests.
+"""Writes source-cipher-vectors.json: protected samples for vodnik's decryption unit tests.
 
 Each vector is the same plaintext, (0..n) % 251, protected by the openssl-based reference
 encryptor under one scheme and subsample layout. Run it from anywhere:

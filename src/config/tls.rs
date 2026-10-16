@@ -3,7 +3,7 @@
 //!
 //! This is deliberately small: no ACME, no renewal, no hot reload. A certificate that needs
 //! automatic issuance or renewal (for example from Let's Encrypt) is what a reverse proxy or a
-//! tool like Caddy already does well; segmentor only terminates the connection with whatever
+//! tool like Caddy already does well; vodnik only terminates the connection with whatever
 //! `cert_path` and `key_path` currently hold, at the moment it starts.
 
 use std::path::{Path, PathBuf};

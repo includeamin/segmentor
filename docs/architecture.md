@@ -1,6 +1,6 @@
 # Architecture
 
-`segmentor` is a single binary that serves HLS and DASH by repackaging MP4 files on demand. The layers are:
+`vodnik` is a single binary that serves HLS and DASH by repackaging MP4 files on demand. The layers are:
 
 ```text
 HTTP layer (http, metrics)  ->  loaded assets (asset, hls, dash)  ->  media pipeline (source, mp4, media, segment, fmp4)

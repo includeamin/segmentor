@@ -53,9 +53,9 @@ Run **Actions → Release → Run workflow** and choose:
 The workflow then runs these jobs:
 
 1. **Prepare.** Builds the changelog for that tag from the commits since the previous version tag, grouped into Breaking changes, Features, Bug fixes, Performance, Documentation, Refactoring, Build and CI, Tests, and Other changes, with links to each commit and to the full comparison.
-2. **Build**, once for `x86_64-unknown-linux-gnu` and once for `aarch64-unknown-linux-gnu`, each on a native runner. It checks out the tag, stamps its version into `Cargo.toml` and `Cargo.lock` for the build only, builds `segmentor` in release mode with `--locked`, and packages `segmentor-vX.Y.Z-<target>.tar.gz` (the binary, `LICENSE-MIT`, `LICENSE-APACHE`, `README.md`, and `vod.example.toml`) with a SHA-256 file.
+2. **Build**, once for `x86_64-unknown-linux-gnu` and once for `aarch64-unknown-linux-gnu`, each on a native runner. It checks out the tag, stamps its version into `Cargo.toml` and `Cargo.lock` for the build only, builds `vodnik` in release mode with `--locked`, and packages `vodnik-vX.Y.Z-<target>.tar.gz` (the binary, `LICENSE-MIT`, `LICENSE-APACHE`, `README.md`, and `vod.example.toml`) with a SHA-256 file.
 3. **Publish.** Attests the build provenance of each archive, then creates the GitHub release, or **updates it if it already exists** (notes, title, and channel), and uploads the assets.
-4. **Container.** Runs the [`Container image`](../.github/workflows/container.yml) workflow: builds the image natively for `linux/amd64` and `linux/arm64`, publishes one multi-architecture image to `ghcr.io/<owner>/segmentor`, signs it with cosign, and attests its provenance. It is tagged `X.Y.Z` and `X.Y`, plus `latest` or `preview` according to the channel. That workflow can also be run by hand for an existing tag.
+4. **Container.** Runs the [`Container image`](../.github/workflows/container.yml) workflow: builds the image natively for `linux/amd64` and `linux/arm64`, publishes one multi-architecture image to `ghcr.io/<owner>/vodnik`, signs it with cosign, and attests its provenance. It is tagged `X.Y.Z` and `X.Y`, plus `latest` or `preview` according to the channel. That workflow can also be run by hand for an existing tag.
 
 Running the release again for the same tag is safe, so a preview can be promoted to latest by re-running with `channel = latest`. A preview release is titled `vX.Y.Z (preview)`.
 
@@ -65,19 +65,19 @@ Each archive and the image carry evidence of where they were built, so a downloa
 
 ```sh
 # A release archive: the checksum, then the build provenance from GitHub.
-sha256sum --check segmentor-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-gh attestation verify segmentor-v0.4.0-x86_64-unknown-linux-gnu.tar.gz --repo includeamin/segmentor
+sha256sum --check vodnik-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+gh attestation verify vodnik-v0.4.0-x86_64-unknown-linux-gnu.tar.gz --repo vodnik-rs/vodnik
 
 # The container image: the keyless signature, which names this repository's workflow.
-cosign verify ghcr.io/includeamin/segmentor:0.4.0 \
-  --certificate-identity-regexp '^https://github.com/includeamin/segmentor/\.github/workflows/' \
+cosign verify ghcr.io/vodnik-rs/vodnik:0.4.0 \
+  --certificate-identity-regexp '^https://github.com/vodnik-rs/vodnik/\.github/workflows/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 # Or the GitHub attestation of the image.
-gh attestation verify oci://ghcr.io/includeamin/segmentor:0.4.0 --repo includeamin/segmentor
+gh attestation verify oci://ghcr.io/vodnik-rs/vodnik:0.4.0 --repo vodnik-rs/vodnik
 ```
 
-Pin the image by digest (`ghcr.io/includeamin/segmentor@sha256:...`) in anything that matters, since a tag can move.
+Pin the image by digest (`ghcr.io/vodnik-rs/vodnik@sha256:...`) in anything that matters, since a tag can move.
 
 ## Before the first release from a new repository
 

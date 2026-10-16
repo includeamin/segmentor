@@ -1,15 +1,15 @@
-# Runs segmentor from the published image with a read-only filesystem and no extra privileges.
+# Runs vodnik from the published image with a read-only filesystem and no extra privileges.
 #
 #   mkdir -p media && cp /path/to/some-video.mp4 media/sample.mp4
 #   docker compose -f deploy/docker-compose.yml up
 #   ffplay http://127.0.0.1:3000/hls/sample/master.m3u8
 #
 # Put a reverse proxy or CDN that provides TLS in front of it before exposing it to the internet;
-# segmentor has no TLS and no authentication (see docs/deployment.md).
+# vodnik has no TLS and no authentication (see docs/deployment.md).
 services:
-  segmentor:
+  vodnik:
     # Use a version tag, and in production pin the image by digest (image@sha256:...).
-    image: ghcr.io/includeamin/segmentor:latest
+    image: ghcr.io/vodnik-rs/vodnik:latest
     ports:
       - "3000:3000"
     volumes:

@@ -1,6 +1,6 @@
 # Security policy
 
-segmentor reads untrusted media files and, when configured with a mapper, fetches media from
+vodnik reads untrusted media files and, when configured with a mapper, fetches media from
 URLs that a mapper chooses. Both are places where a bug can become a vulnerability, so reports are
 welcome and taken seriously.
 
@@ -10,7 +10,7 @@ welcome and taken seriously.
 
 Use GitHub's private reporting: open the repository's **Security** tab and choose **Report a
 vulnerability**. If that is not available to you, email **aminjamal10@gmail.com** with
-`segmentor security` in the subject.
+`vodnik security` in the subject.
 
 Include what you can of:
 

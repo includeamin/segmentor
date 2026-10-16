@@ -8,7 +8,7 @@
 
 ## Summary
 
-A deployment that runs nginx-vod-module in mapped mode asks a **mapping service** for a JSON "media set" per asset. This design lets segmentor read that same service directly: a `vod-module` dialect of the HTTP resolver fetches the media set the way nginx does, translates it into segmentor's own mapper answer, and hands that to the existing validation. The mapping service needs no change when the deployment moves from nginx-vod-module to segmentor.
+A deployment that runs nginx-vod-module in mapped mode asks a **mapping service** for a JSON "media set" per asset. This design lets vodnik read that same service directly: a `vod-module` dialect of the HTTP resolver fetches the media set the way nginx does, translates it into vodnik's own mapper answer, and hands that to the existing validation. The mapping service needs no change when the deployment moves from nginx-vod-module to vodnik.
 
 This is the first of five parts of the migration layer (see [Scope and order](#scope-and-order)). It covers single files, adaptive sets of sequences, clips with durations, sidecar captions, and track selection. DRM, URL compatibility, adaptive playlists and fallback come later.
 
@@ -20,7 +20,7 @@ nginx-vod-module's mapped mode (documented in its README; nothing here is derive
 - Set-level `durations`, `discontinuity`, `segmentDuration`, `playlistType`, `clipFrom`/`clipTo`, `notifications`, `closedCaptions`, and a family of live fields.
 - `tracks` defaults to `v1-a1`: only the first video and the first audio track of a file.
 
-Segmentor's mapper answer ([TDD 0002](0002-asset-map-interface.md), [mapper API](../mapper-api.md)) is shaped differently: one of `location`, `renditions` or `clips`; a required opaque `version`; no per-rendition language or track selection. Existing mapping services therefore cannot talk to segmentor.
+Vodnik's mapper answer ([TDD 0002](0002-asset-map-interface.md), [mapper API](../mapper-api.md)) is shaped differently: one of `location`, `renditions` or `clips`; a required opaque `version`; no per-rendition language or track selection. Existing mapping services therefore cannot talk to vodnik.
 
 ## Goals
 
@@ -31,7 +31,7 @@ Segmentor's mapper answer ([TDD 0002](0002-asset-map-interface.md), [mapper API]
 
 ## Non-goals
 
-- The filter clips (`rateFilter`, `gainFilter`, `mixFilter`) and `silence`: they need decoding, which segmentor never does.
+- The filter clips (`rateFilter`, `gainFilter`, `mixFilter`) and `silence`: they need decoding, which vodnik never does.
 - Live (`playlistType` other than `vod`, `firstClipTime` and the rest): simulated live is its own design.
 - Adaptive playlists (several sequences that each have several clips): [sub-project 2](#scope-and-order).
 - `dynamic` clips and `clipIds`, which need a second upstream; DRM from `vod_drm_upstream_location`; `vod_fallback_upstream_location`; entry-URL and URL-parameter compatibility. Each is a later part.
@@ -85,11 +85,11 @@ The translation is a pure function from the parsed JSON to a native answer (as J
 
 Rules the table leaves out:
 
-- **Windows.** With several pieces `durations` is required (as in nginx), must match them in length, and every duration must be positive. Set-level `clipFrom`/`clipTo` apply only to a single piece; across several they are refused. A window together with `language`, `label` or `default` on a lone sequence is refused too, since `clips` carry no overrides. Captions beside `clips` meet segmentor's existing rule that subtitles cannot be combined with clips, and are refused with it.
+- **Windows.** With several pieces `durations` is required (as in nginx), must match them in length, and every duration must be positive. Set-level `clipFrom`/`clipTo` apply only to a single piece; across several they are refused. A window together with `language`, `label` or `default` on a lone sequence is refused too, since `clips` carry no overrides. Captions beside `clips` meet vodnik's existing rule that subtitles cannot be combined with clips, and are refused with it.
 - **Paths.** `sourceType` defaults to `http` if `remote_base_url` is set, else `file`. A file `path` must start with `file_root` (the configured prefix is removed to make it relative to `storage.media_root`); with no `file_root` it must already be a valid relative path. An http `path` is joined to `remote_base_url`, or used as is if it is `http://` or `https://`. The special path `"empty"` is refused.
 - **`tracks`** is always sent, defaulting to `v1-a1`. See [the answer model](#additions-to-the-answer-model).
-- **Refused, with the JSON path:** `playlistType` other than `vod`; any live field; clip types `rateFilter`, `gainFilter`, `mixFilter`, `silence`, `dynamic`; `clipIds`; `notifications`; `closedCaptions`; source `encryptionKey`, `encryptionIv`, `encryptionScheme` (nginx's source encryption has no key ID, which segmentor's [source decryption](0014-encrypted-source-files.md) needs); a concat `offset` other than 0; `segmentDuration` unless it equals the server's `segment_duration_ms`.
-- **Dropped with a debug log**, because segmentor computes or does not need them: `bitrate`, `avg_bitrate`, `keyFrameDurations`, `firstKeyFrameOffset`, `cache` (see below), `consistentSequenceMediaInfo`, `referenceClipIndex`, `id`. `discontinuity: false` is accepted and logged: segmentor marks every clip boundary as a discontinuity, which players handle.
+- **Refused, with the JSON path:** `playlistType` other than `vod`; any live field; clip types `rateFilter`, `gainFilter`, `mixFilter`, `silence`, `dynamic`; `clipIds`; `notifications`; `closedCaptions`; source `encryptionKey`, `encryptionIv`, `encryptionScheme` (nginx's source encryption has no key ID, which vodnik's [source decryption](0014-encrypted-source-files.md) needs); a concat `offset` other than 0; `segmentDuration` unless it equals the server's `segment_duration_ms`.
+- **Dropped with a debug log**, because vodnik computes or does not need them: `bitrate`, `avg_bitrate`, `keyFrameDurations`, `firstKeyFrameOffset`, `cache` (see below), `consistentSequenceMediaInfo`, `referenceClipIndex`, `id`. `discontinuity: false` is accepted and logged: vodnik marks every clip boundary as a discontinuity, which players handle.
 - `ignore` lists JSON paths (or field names) the operator accepts dropping; it can only relax a refusal, never add behavior.
 
 Two worked examples. An adaptive set with a language track:
@@ -122,17 +122,17 @@ is refused for its zero duration, while `durations` of `[10000,60000]` gives two
 
 ### Versions, caching and file identity
 
-The mapping has no version, and segmentor needs one ("equal versions are assumed to be identical media"). The adapter makes it from what determines the output: a SHA-256 over the translated answer's locations (kind and identity), windows, `tracks`, rendition overrides and subtitles, and a constant bumped whenever the translator changes.
+The mapping has no version, and vodnik needs one ("equal versions are assumed to be identical media"). The adapter makes it from what determines the output: a SHA-256 over the translated answer's locations (kind and identity), windows, `tracks`, rendition overrides and subtitles, and a constant bumped whenever the translator changes.
 
-- A location's identity is its path, or its URL **without the query**: the rule segmentor already uses to tell a re-signed URL from a different object. A service that signs URLs on every request therefore does not churn the version or reload the asset.
+- A location's identity is its path, or its URL **without the query**: the rule vodnik already uses to tell a re-signed URL from a different object. A service that signs URLs on every request therefore does not churn the version or reload the asset.
 - For a `file` location the file's size and modification time are mixed in (one `stat` per resolve), so a replaced file is noticed at the next revalidation, as nginx notices when its caches expire.
 - Mapping services give no ETag, so every revalidation fetches the mapping again. When the computed version equals the loaded one the answer is `Unchanged` and nothing is reparsed.
 - The TTL is `Cache-Control: max-age` if present, else `default_ttl_ms`, clamped as for any mapper. A set with `"cache": false` gets `min_ttl_ms`.
-- There is no `expires_at`. When an origin rejects a read, segmentor already re-resolves once and retries, which fetches the mapping again and picks up a fresh signed URL.
+- There is no `expires_at`. When an origin rejects a read, vodnik already re-resolves once and retries, which fetches the mapping again and picks up a fresh signed URL.
 
 ### Additions to the answer model
 
-The adapter can only be faithful if segmentor's own answer can express two things. Both are optional fields, so existing mappers are unaffected and native mappers can use them.
+The adapter can only be faithful if vodnik's own answer can express two things. Both are optional fields, so existing mappers are unaffected and native mappers can use them.
 
 **`tracks`: which tracks of a file to serve.** A string beside `location`, on the answer, on each rendition and on each clip, in nginx's syntax: `v1`, `a2`, `v1-a1`; `v0` and `a0` mean every track of that kind. `v2` is the second video track in file order. A kind that is not mentioned is dropped. A selector that matches nothing selects nothing, so the default `v1-a1` still serves a video-only file; if no track at all remains the asset fails to load, naming the selection. Selected audio tracks are renumbered `audio-1`, `audio-2`… in file order, and the selection is part of the asset's own URL version. Absent means all tracks, as today. The adapter always sends `v1-a1` unless the mapping says otherwise, because nginx serves only the first video and first audio track.
 
@@ -167,7 +167,7 @@ Every refusal is the `502` an invalid native answer gets, with a message that na
 
 Additive: with no `dialect` the HTTP resolver is unchanged, and rollback is removing it. Built in three stages, each releasable:
 
-1. `tracks`, and `language`/`label`/`default` on a rendition, in segmentor's own answer, with the track filter and the HLS and DASH output.
+1. `tracks`, and `language`/`label`/`default` on a rendition, in vodnik's own answer, with the track filter and the HLS and DASH output.
 2. The translator, with its tests.
 3. The dialect plumbing (request building, version, TTL, health), the configuration, and the documentation, including a stub of the migration guide.
 
@@ -189,4 +189,4 @@ Stage 1 (the two additions to the answer model) is implemented. The translator a
 - **Captions by extension or by content.** The adapter decides at mapping time, before the file is read, so it uses the extension. A caption file with another extension would be treated as media and fail to load; is that acceptable, or should the loader sniff?
 - **A `tracks` selector that matches nothing.** nginx's behavior is not documented; this design selects nothing for that selector and fails only if the whole selection is empty. A real deployment's behavior may differ.
 - **`discontinuity: false`** is accepted as a discontinuity. If a deployment relies on seamless playback across clips with the same encoding, that needs the continuous mode of the adaptive-playlist design.
-- **File URIs containing slashes**, as nginx allows in `<fileuri>`: segmentor asset IDs cannot, so a mapping request for such an asset needs the URL-compatibility design.
+- **File URIs containing slashes**, as nginx allows in `<fileuri>`: vodnik asset IDs cannot, so a mapping request for such an asset needs the URL-compatibility design.

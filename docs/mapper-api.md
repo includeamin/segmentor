@@ -1,6 +1,6 @@
 # Mapper API reference
 
-This page is for people who write a **mapper**: the service that tells `segmentor` where the media for an asset ID lives. It is a self-contained reference. The reasoning behind it is in [TDD 0002](technical-design/0002-asset-map-interface.md).
+This page is for people who write a **mapper**: the service that tells `vodnik` where the media for an asset ID lives. It is a self-contained reference. The reasoning behind it is in [TDD 0002](technical-design/0002-asset-map-interface.md).
 
 A mapper answers one question: *where is asset X, and which version of it is current?* It never sees or returns media bytes. Playback authorization is not its job either; put viewer checks in a front proxy.
 
@@ -22,7 +22,7 @@ Accept: application/json
 Authorization: Bearer <token>          (if configured)
 If-None-Match: "2026-09-18T10:22:31Z#7"  (on revalidation)
 X-Request-Id: 18d6d3516a4d8c6c-2
-User-Agent: segmentor/0.1.0
+User-Agent: vodnik/0.1.0
 ```
 
 ### `200 OK`
@@ -172,7 +172,7 @@ A file in another encoding (Windows-1252 and UTF-16 are common for SRT) is refus
 
 - Times: `begin`, `end`, and `dur` on `<p>`, and `begin`/`end` on `<div>` and `<body>`, counted from the start of the parent; clock times (`00:00:01.500`, and `00:00:01:12` in frames), and offsets in `h`, `m`, `s`, `ms`, `f` (frames), and `t` (ticks), using the root's `ttp:frameRate`, `ttp:frameRateMultiplier`, and `ttp:tickRate`. A paragraph with no `end` or `dur` lasts as long as its parent, and one with no end at all is refused.
 - Text: `<br/>` is a line break, runs of white space are one space (unless `xml:space="preserve"`), `<span>` is inline, and `tts:fontStyle`, `tts:fontWeight`, and `tts:textDecoration` become `<i>`, `<b>`, and `<u>`, whether set on the element or through a referenced `<style>`. Timed spans (karaoke) are shown for the whole cue.
-- Refused: a `ttp:timeBase` other than `media` (SMPTE and clock time bases need a timeline segmentor does not have), a `DOCTYPE`, malformed XML, an entity the document does not define (`&nbsp;` is not an XML entity), and nesting deeper than 64 elements.
+- Refused: a `ttp:timeBase` other than `media` (SMPTE and clock time bases need a timeline vodnik does not have), a `DOCTYPE`, malformed XML, an entity the document does not define (`&nbsp;` is not an XML entity), and nesting deeper than 64 elements.
 - Elements are TTML's when bound to a TTML namespace, with or without a prefix; a document with no namespaces is read as TTML.
 
 **Change `version` when a subtitle file changes.** The server reloads an asset only when its `version` or location changes, so an edited caption under an unchanged version is not picked up until the asset is evicted.
@@ -208,7 +208,7 @@ Instead of a single `location`, an answer may give several files as one adaptive
 
 The server does not ask what kind a rendition is; it loads every one exactly as it would load a single-file asset, and looks at what tracks came out. **A rendition with a video track is a video rendition. One with only audio, and no video, is an audio rendition** — this is how separate audio files, and several audio languages, are supplied.
 
-**Video renditions must be cut alike.** Every video rendition must have the same number of segments, starting at the same instants (within about one frame of the coarsest rendition), so a player can switch between them at a segment boundary. This falls out of using the same keyframe interval to encode each one; segmentor cannot repair renditions that do not already agree. A mismatch fails the whole asset, naming the two renditions and where they diverge.
+**Video renditions must be cut alike.** Every video rendition must have the same number of segments, starting at the same instants (within about one frame of the coarsest rendition), so a player can switch between them at a segment boundary. This falls out of using the same keyframe interval to encode each one; vodnik cannot repair renditions that do not already agree. A mismatch fails the whole asset, naming the two renditions and where they diverge.
 
 **Audio is one shared group, so switching video quality never restarts it.** It comes from the audio renditions when there are any (in the order listed, numbered `audio-1`, `audio-2`, ...), and otherwise from the first video rendition that has audio; the audio of every other video rendition is ignored. **Loading is all or nothing:** if any rendition fails — cannot be fetched, fails to parse, or breaks alignment — the whole asset fails with that rendition named, rather than serving a ladder with a silent gap. At most `limits.max_renditions` (default 8) may be listed; each rendition counts toward `limits.max_index_bytes` like any asset, and the composite's version hashes the mapper's `version` together with every rendition's own content, so replacing one file's bytes under an unchanged mapper `version` is still caught.
 
@@ -278,7 +278,7 @@ A clip is cut on the tracks it serves: a track the selection drops neither decid
 
 ## Encryption
 
-An answer may carry an `encryption` object. segmentor then encrypts what it serves with Common Encryption in the `cbcs` scheme, and signals the DRM systems you name in the HLS and DASH manifests. One set of segments plays under Widevine, FairPlay, PlayReady, and Clear Key. The object applies to the whole asset: every track, every rendition, and every clip that does not carry its own (see [Different keys per clip](#different-keys-per-clip)).
+An answer may carry an `encryption` object. vodnik then encrypts what it serves with Common Encryption in the `cbcs` scheme, and signals the DRM systems you name in the HLS and DASH manifests. One set of segments plays under Widevine, FairPlay, PlayReady, and Clear Key. The object applies to the whole asset: every track, every rendition, and every clip that does not carry its own (see [Different keys per clip](#different-keys-per-clip)).
 
 ```json
 {
@@ -304,7 +304,7 @@ An answer may carry an `encryption` object. segmentor then encrypts what it serv
 | `scheme` | `cbcs`. Anything else is rejected |
 | `keys` | One entry with `"tracks": "all"` (or no `tracks`), or one `"video"` and one `"audio"` entry, for example `{ "tracks": "video", … }, { "tracks": "audio", … }`. Every track of the asset must end up with exactly one key. FairPlay needs one key for all tracks: an answer listing FairPlay with separate video and audio keys is rejected |
 | `key_id`, `key` | 16 bytes each, as 32 hex digits |
-| `iv` | Optional, 16 bytes as 32 hex digits: the constant IV declared in the init segment. When absent, it is the first 16 bytes of SHA-256(`"segmentor cbcs iv"` followed by `key_id`), so every replica derives the same one. It is never derived from the key |
+| `iv` | Optional, 16 bytes as 32 hex digits: the constant IV declared in the init segment. When absent, it is the first 16 bytes of SHA-256(`"vodnik cbcs iv"` followed by `key_id`), so every replica derives the same one. It is never derived from the key |
 | `systems` | At most 8. Each names a DRM system by its standard system ID (a UUID) |
 | `pssh` | Optional base64 of a complete, well-formed `pssh` box whose system ID matches the entry's `system_id`, at most 16 KiB decoded |
 | `license_url` | Optional `https` URL. Written into the DASH manifest as `dashif:Laurl`, and used as Clear Key's HLS key URI |
@@ -325,7 +325,7 @@ A Widevine or PlayReady entry without a `pssh` gets no HLS key line: HLS signals
 
 Any other system ID is accepted and signalled in DASH only (its `pssh` and `license_url` go into its `ContentProtection`); HLS has no standard form for it. The DASH manifest carries a `mp4protection` `ContentProtection` with `cenc:default_KID`, then one per system.
 
-**segmentor never contacts a licence server.** It encrypts with the keys you give it and tells players where to get a licence; the player fetches the licence from your DRM vendor. The `pssh` boxes and URLs are yours to produce.
+**vodnik never contacts a licence server.** It encrypts with the keys you give it and tells players where to get a licence; the player fetches the licence from your DRM vendor. The `pssh` boxes and URLs are yours to produce.
 
 **Codecs.** H.264 and HEVC video and AAC, AC-3, and E-AC-3 audio can be encrypted. HEVC streams in the multiview, scalable, 3D, and screen-content profiles, or with layers above the base layer, are refused with a message naming the cause. VP9, AV1, Opus, and FLAC cannot be encrypted. A source file that is itself encrypted is still rejected.
 
@@ -397,13 +397,13 @@ A source file that is already CENC-encrypted (`encv` and `enca` sample entries) 
 - `key_id` and `key` are 32 hex digits. A track is decrypted with the entry whose `key_id` equals the key ID in its `tenc`; if none does, the asset fails to load, naming the key ID. `tracks` is optional (`all`, `video`, or `audio`) and restricts an entry to that kind of track; an entry for the kind of track wins over one for `all`.
 - The sources read are MP4 files, progressive or fragmented, protected with `cenc`, `cens`, `cbc1`, or `cbcs`, whose IVs and subsample maps are in a `senc` box: one under the track's sample table, or one in each `traf`, which must list exactly the samples of that `traf`. A file that locates its IVs only with `saiz` and `saio`, or whose `senc` boxes do not match its samples (FFmpeg's own fragmented audio is one), fails at load.
 - The asset is then an ordinary one: served clear, or encrypted again under `encryption` (a new key) or `hls_aes128`. The URL version covers the keys, so a changed key gives new URLs.
-- **A wrong key is not always noticed.** Decrypting with a wrong key gives garbage without any error. Segmentor can tell only when the file encrypts its NAL unit lengths, which real encoders do not; otherwise it trusts the key that goes with the key ID, and a CDN would keep what a wrong key produced. Give the right key, and change `version` when you correct one.
+- **A wrong key is not always noticed.** Decrypting with a wrong key gives garbage without any error. Vodnik can tell only when the file encrypts its NAL unit lengths, which real encoders do not; otherwise it trusts the key that goes with the key ID, and a CDN would keep what a wrong key produced. Give the right key, and change `version` when you correct one.
 - **Limits.** One file only: `source_encryption` on `renditions` or `clips` is rejected, as is `{"passthrough": true}` (not built yet). A decrypted asset has no I-frame playlists and no muxed HLS audio. Keys are secrets like the others in an answer: use `https` and a bearer token, and no message or log line contains them.
 - `/admin/status` lists `source_key_ids` for such an asset. Design: [TDD 0014](technical-design/0014-encrypted-source-files.md).
 
 ## HLS AES-128
 
-For protection without a DRM vendor, an answer may carry `hls_aes128` instead of `encryption`. segmentor then encrypts every HLS media segment whole with AES-128-CBC (RFC 8216, `METHOD=AES-128`), and the media playlists name the key. Design: [TDD 0012](technical-design/0012-hls-aes-128.md).
+For protection without a DRM vendor, an answer may carry `hls_aes128` instead of `encryption`. vodnik then encrypts every HLS media segment whole with AES-128-CBC (RFC 8216, `METHOD=AES-128`), and the media playlists name the key. Design: [TDD 0012](technical-design/0012-hls-aes-128.md).
 
 ```json
 {
@@ -429,7 +429,7 @@ What a player sees:
 #EXT-X-KEY:METHOD=AES-128,URI="https://keys.example.com/movie/1"
 ```
 
-- **segmentor does not serve the key.** `key_uri` is your own endpoint, and it is where authorization belongs: anyone who can fetch the key can decrypt the stream. This is not DRM; for licensed content use `encryption`.
+- **vodnik does not serve the key.** `key_uri` is your own endpoint, and it is where authorization belongs: anyone who can fetch the key can decrypt the stream. This is not DRM; for licensed content use `encryption`.
 - **The init segment is sent clear** (the key line follows the map line), and each segment's IV is its media sequence number, with no `IV` attribute.
 - **HLS only.** An `hls_aes128` asset answers `404` on `/dash/`, and offers no I-frame playlist.
 - **Not together with `encryption`:** an answer that sets both, or sets `hls_aes128` with a clip's own `encryption`, is rejected. `hls_aes128` sits on the answer and covers every rendition of an adaptive asset and every clip of a sequence, under the one key. A segment's IV is its media sequence number in the playlist, which counts across the clips of a sequence.
@@ -441,10 +441,10 @@ The server keeps one loaded copy per asset, keyed by `(asset_id, version)`. A di
 
 ## Try it
 
-[`examples/mapper/`](https://github.com/includeamin/segmentor/tree/main/examples/mapper) is a
+[`examples/mapper/`](https://github.com/vodnik-rs/vodnik/tree/main/examples/mapper) is a
 runnable version of the mapper below, and
-[`docker-compose.dev.yml`](https://github.com/includeamin/segmentor/blob/main/docker-compose.dev.yml)
-at the repository root wires it up to segmentor and to the [demo player](../demo/) and
+[`docker-compose.dev.yml`](https://github.com/vodnik-rs/vodnik/blob/main/docker-compose.dev.yml)
+at the repository root wires it up to vodnik and to the [demo player](../demo/) and
 [control panel](../admin/) with one command:
 
 ```sh

@@ -30,10 +30,10 @@ contains() { # description needle haystack
 # says which version it is.
 releases="$work/releases/download"
 for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
-  name="segmentor-v9.9.9-$target"
+  name="vodnik-v9.9.9-$target"
   mkdir -p "$work/build/$name" "$releases/v9.9.9"
-  printf '#!/bin/sh\necho "segmentor 9.9.9 (%s)"\n' "$target" >"$work/build/$name/segmentor"
-  chmod +x "$work/build/$name/segmentor"
+  printf '#!/bin/sh\necho "vodnik 9.9.9 (%s)"\n' "$target" >"$work/build/$name/vodnik"
+  chmod +x "$work/build/$name/vodnik"
   tar -C "$work/build" -czf "$releases/v9.9.9/$name.tar.gz" "$name"
   (cd "$releases/v9.9.9" && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")
 done
@@ -41,8 +41,8 @@ done
 mkdir -p "$work/releases/latest"
 : >"$work/releases/latest/v9.9.9"
 
-export SEGMENTOR_DOWNLOAD_BASE="file://$releases"
-export SEGMENTOR_LATEST_URL="file://$work/releases/latest/v9.9.9"
+export VODNIK_DOWNLOAD_BASE="file://$releases"
+export VODNIK_LATEST_URL="file://$work/releases/latest/v9.9.9"
 export HOME="$work/home"
 mkdir -p "$HOME"
 
@@ -54,37 +54,37 @@ run() { # runs install.sh, printing its output and exit status on the last line
 
 # -- a plain install -------------------------------------------------------------------------
 out="$(run --version v9.9.9 --prefix "$work/bin")"
-contains "installs a pinned version" "Installed $work/bin/segmentor" "$out"
+contains "installs a pinned version" "Installed $work/bin/vodnik" "$out"
 contains "exit status is zero" "exit=0" "$out"
 contains "checks the checksum" "Checksum verified." "$out"
-contains "the installed file runs" "segmentor 9.9.9" "$("$work/bin/segmentor")"
-check "the installed file is executable" "yes" "$([[ -x "$work/bin/segmentor" ]] && echo yes || echo no)"
-check "no temporary file is left behind" "segmentor" "$(ls "$work/bin")"
+contains "the installed file runs" "vodnik 9.9.9" "$("$work/bin/vodnik")"
+check "the installed file is executable" "yes" "$([[ -x "$work/bin/vodnik" ]] && echo yes || echo no)"
+check "no temporary file is left behind" "vodnik" "$(ls "$work/bin")"
 
 out="$(run --version v9.9.9 --prefix "$work/bin")"
 contains "installing over an existing binary works" "exit=0" "$out"
 
 out="$(run --prefix "$work/latest-bin")"
-contains "resolves the latest release" "segmentor v9.9.9" "$out"
+contains "resolves the latest release" "vodnik v9.9.9" "$out"
 contains "the latest install succeeds" "exit=0" "$out"
 
 out="$(run --version v9.9.9)"
-contains "defaults to ~/.local/bin for an ordinary user" "$HOME/.local/bin/segmentor" "$out"
+contains "defaults to ~/.local/bin for an ordinary user" "$HOME/.local/bin/vodnik" "$out"
 contains "warns when the prefix is not on PATH" "is not on your PATH" "$out"
 
 # -- refusing to install ---------------------------------------------------------------------
 # Corrupt the archive after its checksum was written.
 cp -r "$releases" "$work/tampered"
-name="segmentor-v9.9.9-$(case "$(uname -m)" in aarch64 | arm64) echo aarch64 ;; *) echo x86_64 ;; esac)-unknown-linux-gnu"
+name="vodnik-v9.9.9-$(case "$(uname -m)" in aarch64 | arm64) echo aarch64 ;; *) echo x86_64 ;; esac)-unknown-linux-gnu"
 printf 'tampered' >>"$work/tampered/v9.9.9/$name.tar.gz"
-out="$(SEGMENTOR_DOWNLOAD_BASE="file://$work/tampered" run --version v9.9.9 --prefix "$work/bad")"
+out="$(VODNIK_DOWNLOAD_BASE="file://$work/tampered" run --version v9.9.9 --prefix "$work/bad")"
 contains "rejects a checksum mismatch" "checksum mismatch" "$out"
 contains "a mismatch is a failure" "exit=1" "$out"
-check "a mismatch installs nothing" "no" "$([[ -e "$work/bad/segmentor" ]] && echo yes || echo no)"
+check "a mismatch installs nothing" "no" "$([[ -e "$work/bad/vodnik" ]] && echo yes || echo no)"
 
 out="$(run --version v1.2.3 --prefix "$work/none")"
 contains "a release that does not exist is a clear error" "could not download" "$out"
-check "and installs nothing" "no" "$([[ -e "$work/none/segmentor" ]] && echo yes || echo no)"
+check "and installs nothing" "no" "$([[ -e "$work/none/vodnik" ]] && echo yes || echo no)"
 
 out="$(run --version latest --prefix "$work/x")"
 contains "rejects a version that is not vX.Y.Z" "must look like v1.2.3" "$out"
@@ -117,7 +117,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 # -- dry run ---------------------------------------------------------------------------------
-out="$(SEGMENTOR_DOWNLOAD_BASE="file:///does/not/exist" run --dry-run --prefix "$work/dry")"
+out="$(VODNIK_DOWNLOAD_BASE="file:///does/not/exist" run --dry-run --prefix "$work/dry")"
 contains "a dry run says what it would do" "Would download" "$out"
 contains "and succeeds without a network" "exit=0" "$out"
 check "and installs nothing" "no" "$([[ -e "$work/dry" ]] && echo yes || echo no)"
@@ -135,7 +135,7 @@ contains "a failed provenance check is a warning by default" "Warning: could not
 contains "and the install still succeeds" "exit=0" "$out"
 out="$(PATH="$stubs:$PATH" run --version v9.9.9 --prefix "$work/attest-strict" --require-attestation)"
 contains "--require-attestation makes it fatal" "--require-attestation was given" "$out"
-check "and installs nothing" "no" "$([[ -e "$work/attest-strict/segmentor" ]] && echo yes || echo no)"
+check "and installs nothing" "no" "$([[ -e "$work/attest-strict/vodnik" ]] && echo yes || echo no)"
 
 # Without gh at all: a PATH holding only the tools the script uses.
 tools="$work/tools"

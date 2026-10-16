@@ -253,7 +253,7 @@ ffmpeg_quiet \
     "$fixture_dir/h264-aac-cenc-ffmpeg.mp4"
 
 # The same clear file protected under each of the four schemes by the openssl-based reference
-# encryptor, which shares no code with segmentor. FFmpeg decrypts cenc, cbc1, and cbcs to the
+# encryptor, which shares no code with vodnik. FFmpeg decrypts cenc, cbc1, and cbcs to the
 # clear file's exact frames; it has no cens pattern support, so cens has no second opinion.
 for scheme in cenc cens cbc1 cbcs; do
     python3 "$fixture_dir/protect-fixture.py" "$scheme" \
@@ -270,7 +270,7 @@ python3 "$fixture_dir/protect-fixture.py" cenc \
 # senc in every traf. Then FFmpeg's own fragmented cenc output. Its video is correct. Its audio
 # is not: from the second fragment on, each audio senc lists every sample so far, not the
 # fragment's own, which breaks ISO/IEC 23001-7 (and is why FFmpeg cannot decode that audio
-# itself). Segmentor must refuse that file; the video-only copy is the one it must decrypt.
+# itself). Vodnik must refuse that file; the video-only copy is the one it must decrypt.
 for scheme in cenc cens cbc1 cbcs; do
     python3 "$fixture_dir/protect-fixture.py" "$scheme" \
         "$fixture_dir/h264-aac-fragmented-cmaf.mp4" \

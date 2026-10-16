@@ -586,8 +586,7 @@ pub(crate) struct ScratchDir(PathBuf);
 
 impl ScratchDir {
     pub(crate) fn new(name: &str) -> Self {
-        let path =
-            std::env::temp_dir().join(format!("segmentor-test-{}-{name}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("vodnik-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("a scratch directory can be created");
         Self(path)

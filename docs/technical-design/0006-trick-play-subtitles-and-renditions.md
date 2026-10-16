@@ -11,12 +11,12 @@
 Three product gaps were chosen for the next stage, in this order of delivery:
 
 1. **HLS I-frame playlists**, for scrub previews and fast-forward. No mapper change, no decoding.
-2. **Sidecar WebVTT subtitles**, listed by the mapper and served by segmentor.
+2. **Sidecar WebVTT subtitles**, listed by the mapper and served by vodnik.
 3. **Adaptive renditions**, several source files per title served as one adaptive stream, listed by the mapper.
 
 DRM is required but deferred to its own design, after these three. Section [DRM](#drm-later) records what these designs must not make harder.
 
-The mapper changes are additive: a mapper that sends none of the new fields behaves exactly as today, and a segmentor that does not know the fields ignores them.
+The mapper changes are additive: a mapper that sends none of the new fields behaves exactly as today, and a vodnik that does not know the fields ignores them.
 
 ## Context
 
@@ -75,7 +75,7 @@ An optional `subtitles` list, each entry:
 
 `location` is a `file` or `http` location exactly as for media, and an `http` one is subject to the same `[remote_media]` policy: allowed hosts, no private addresses, no redirects. `language` is a BCP 47 tag and unique within the asset. `default` and `forced` are optional.
 
-### What segmentor does with a file
+### What vodnik does with a file
 
 The file is fetched when the asset loads and is held in memory, so requests never touch the origin:
 
@@ -121,7 +121,7 @@ Audio is a single shared group, so that switching video quality never switches o
 
 ### Alignment
 
-Players switch between renditions at segment boundaries, so every video rendition must have the same segments. The composite refuses the asset unless all video renditions have the same number of segments with the same start times, within one sample of the coarser rendition, and the same start offset. The error names the two renditions and the first segment that differs. Keyframe placement in the sources decides this, so it is a property of the encodes and not something segmentor can repair.
+Players switch between renditions at segment boundaries, so every video rendition must have the same segments. The composite refuses the asset unless all video renditions have the same number of segments with the same start times, within one sample of the coarser rendition, and the same start offset. The error names the two renditions and the first segment that differs. Keyframe placement in the sources decides this, so it is a property of the encodes and not something vodnik can repair.
 
 ### Output
 
@@ -157,5 +157,5 @@ Three independent changes, in order. The first needs no mapper change and can sh
 
 - **IDR versus other sync samples.** Should the I-frame playlist inspect the NAL unit type of each keyframe, so open-GOP HEVC files do not list pictures that cannot decode alone?
 - **I-frame streams per rendition.** Is one stream, from the lowest rendition, enough for Apple's seek bar, or should each rendition have one?
-- **Default subtitle track.** When the mapper marks none as `default`, should segmentor pick none, or the first?
+- **Default subtitle track.** When the mapper marks none as `default`, should vodnik pick none, or the first?
 - **Other subtitle formats.** SubRip (SRT) is now converted to WebVTT when the asset loads (decided and implemented 2026-10-05; see the [mapper API](../mapper-api.md#subtitles) for the rules). TTML and DFXP are converted too (2026-10-05, same rules); other formats are still open.

@@ -410,6 +410,8 @@ fn uuid(text: &str) -> Result<[u8; 16], String> {
     hex16(&text.replace('-', ""), "system_id")
 }
 
+/// The seed is the project's former name, kept so segments encrypted before the rename keep the
+/// same IVs: changing it would give cached and freshly served segments of one asset different IVs.
 fn derived_iv(key_id: &[u8; 16]) -> [u8; 16] {
     let mut hasher = Sha256::new();
     hasher.update(b"segmentor cbcs iv");

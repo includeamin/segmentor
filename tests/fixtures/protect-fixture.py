@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Protects a clear progressive MP4 under one of the CENC schemes, for segmentor's tests.
+"""Protects a clear progressive MP4 under one of the CENC schemes, for vodnik's tests.
 
 Usage: protect-fixture.py SCHEME INPUT OUTPUT [--whole-video]
 SCHEME is cenc, cens, cbc1, or cbcs. With --whole-video the video is protected whole, with no

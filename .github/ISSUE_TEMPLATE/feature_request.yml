@@ -1,5 +1,5 @@
 name: Feature request
-description: Something segmentor should do that it does not.
+description: Something vodnik should do that it does not.
 labels: ["enhancement"]
 body:
   - type: textarea
@@ -21,4 +21,4 @@ body:
   - type: markdown
     attributes:
       value: |
-        Larger features start as a short design document; see [CONTRIBUTING.md](https://github.com/includeamin/segmentor/blob/main/CONTRIBUTING.md). Existing plans are in [docs/technical-design](https://github.com/includeamin/segmentor/tree/main/docs/technical-design).
+        Larger features start as a short design document; see [CONTRIBUTING.md](https://github.com/vodnik-rs/vodnik/blob/main/CONTRIBUTING.md). Existing plans are in [docs/technical-design](https://github.com/vodnik-rs/vodnik/tree/main/docs/technical-design).

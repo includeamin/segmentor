@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A minimal mapper for local development and demos.
 
-Implements just enough of the wire protocol in docs/mapper-api.md for segmentor to resolve
+Implements just enough of the wire protocol in docs/mapper-api.md for vodnik to resolve
 assets against it: GET /v1/health, GET /v1/assets/{id}, and the optional GET /v1/assets listing. It answers from catalog.json, read
 fresh on every request, so editing that file (or the mount in docker-compose.dev.yml) and waiting
 out the short TTL below is enough to see a change without restarting anything.

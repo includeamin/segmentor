@@ -148,7 +148,7 @@ fn start_server_with(hls_mux_audio: bool) -> Server {
 
     // The server writes its log to stdout and its fatal errors to stderr; keep both.
     let log = fs::File::create(&log_path).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_segmentor"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vodnik"))
         .args(["serve", "--config"])
         .arg(&config_path)
         .stdout(log.try_clone().unwrap())

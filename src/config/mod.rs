@@ -550,7 +550,7 @@ mod tests {
             }
         );
         assert_eq!(settings.query_parameter, "auth");
-        assert_eq!(settings.cookie_name, "segmentor_auth");
+        assert_eq!(settings.cookie_name, "vodnik_auth");
         assert!(!format!("{settings:?}").contains(GOOD_SECRET));
     }
 

@@ -1,7 +1,7 @@
 """A reference encryptor for the CENC protection schemes (ISO/IEC 23001-7), for test fixtures.
 
-It is built on the `openssl` command line and shares no code with segmentor, so a fixture
-protected by it is an independent check of segmentor's decryption.
+It is built on the `openssl` command line and shares no code with vodnik, so a fixture
+protected by it is an independent check of vodnik's decryption.
 """
 import subprocess
 

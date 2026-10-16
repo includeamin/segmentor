@@ -10,7 +10,7 @@
 
 Implemented as designed. With the option off, every response for every fixture is byte-identical to before. Tests check that each muxed fragment's `mdat` is exactly the separate video fragment's payload followed by the audio fragment's, for every segment, and that each `trun` points at its track's first byte. FFmpeg decodes the muxed stream with one video and one audio stream.
 
-On the head-to-head benchmark, with servers on one core, a viewer's playlists come 8,554 times a second from muxed segmentor against 6,494 from nginx-vod-module with its response cache. Segment bandwidth is unchanged by muxing (447 against 444 MiB/s), and each segment request takes about twice as long because it carries twice the bytes.
+On the head-to-head benchmark, with servers on one core, a viewer's playlists come 8,554 times a second from muxed vodnik against 6,494 from nginx-vod-module with its response cache. Segment bandwidth is unchanged by muxing (447 against 444 MiB/s), and each segment request takes about twice as long because it carries twice the bytes.
 
 ## Summary
 
@@ -18,9 +18,9 @@ On the head-to-head benchmark, with servers on one core, a viewer's playlists co
 
 ## Context
 
-segmentor serves audio as its own HLS rendition ([TDD 0006](0006-trick-play-subtitles-and-renditions.md)). That is the better layout for several languages or several video renditions, because audio is stored once and switched independently. For the most common asset, one file with one video and one audio track, it costs requests: a viewer fetches a master, a video playlist, and an audio playlist, then two segments for every six seconds.
+vodnik serves audio as its own HLS rendition ([TDD 0006](0006-trick-play-subtitles-and-renditions.md)). That is the better layout for several languages or several video renditions, because audio is stored once and switched independently. For the most common asset, one file with one video and one audio track, it costs requests: a viewer fetches a master, a video playlist, and an audio playlist, then two segments for every six seconds.
 
-nginx-vod-module muxes audio into the video segments by default. On the head-to-head benchmark, it serves fewer playlist sets per second than segmentor serves playlist requests, but each set is two requests rather than three. Per viewer, nginx-vod-module is therefore 1.12 times ahead on playlists, and it halves segment requests ([benchmarks](../benchmarks.md#segmentor-vs-nginx-vod-module)).
+nginx-vod-module muxes audio into the video segments by default. On the head-to-head benchmark, it serves fewer playlist sets per second than vodnik serves playlist requests, but each set is two requests rather than three. Per viewer, nginx-vod-module is therefore 1.12 times ahead on playlists, and it halves segment requests ([benchmarks](../benchmarks.md#vodnik-vs-nginx-vod-module)).
 
 ## Goals
 
@@ -80,7 +80,7 @@ One `moov` with both `trak` boxes, copied as for a single track, and an `mvex` w
 - A muxed fragment's `trun` data offsets point at each track's first sample, and its payload is the video payload followed by the audio payload of the same segment number.
 - FFmpeg decodes the muxed presentation with one video and one audio stream, for the same duration as the separate one.
 - Master playlists for one and two audio tracks; an encrypted asset falls back to separate renditions; the option off changes nothing.
-- `make bench-compare` gains a muxed segmentor variant.
+- `make bench-compare` gains a muxed vodnik variant.
 
 ## Rollout
 

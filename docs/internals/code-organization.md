@@ -6,7 +6,7 @@ A review of the source layout and the reorganization plan. Steps 1 to 3 are **do
 
 ```text
 src/
-  main.rs            10 lines: calls segmentor::run()
+  main.rs            10 lines: calls vodnik::run()
   lib.rs             module declarations, run(), APP_NAME
   fuzzing.rs         hidden entry points for the fuzz target
   benchmarking.rs    hidden entry points for benches/ (real asset loader and server)
@@ -119,7 +119,7 @@ src/
   observability/
     logging.rs
     metrics.rs             route list defined by http/router.rs, passed in
-tests/                     integration tests can now `use segmentor::...`
+tests/                     integration tests can now `use vodnik::...`
 benches/                   criterion benchmarks for the performance budgets
 fuzz/                      depends on the library crate, no #[path] includes
 ```

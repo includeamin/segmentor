@@ -1,4 +1,4 @@
-# segmentor configuration for docker-compose.dev.yml: resolves assets from the example mapper
+# vodnik configuration for docker-compose.dev.yml: resolves assets from the example mapper
 # instead of a static [assets.*] catalog. See vod.example.toml for every setting.
 
 [server]

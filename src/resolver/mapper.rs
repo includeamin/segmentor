@@ -205,7 +205,7 @@ impl HttpResolver {
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_millis(settings.connect_timeout_ms))
             .timeout(Duration::from_millis(settings.request_timeout_ms))
-            .user_agent(concat!("segmentor/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("vodnik/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|error| {
                 crate::error::Error::Configuration(format!("mapper client: {error}"))

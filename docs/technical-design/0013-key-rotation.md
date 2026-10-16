@@ -8,7 +8,7 @@
 
 ## Summary
 
-The mapper can give an asset a list of **key periods**: consecutive stretches of the timeline, each with its own content key, DRM signalling, or no encryption at all. A period starts at a segment boundary. Segmentor encrypts each segment under its period's key, tells the player which key a segment uses, and keeps one initialization segment for the whole asset. The first period can be clear, which gives the "clear lead" that nginx-vod-module offers as `vod_drm_clear_lead_segment_count`.
+The mapper can give an asset a list of **key periods**: consecutive stretches of the timeline, each with its own content key, DRM signalling, or no encryption at all. A period starts at a segment boundary. Vodnik encrypts each segment under its period's key, tells the player which key a segment uses, and keeps one initialization segment for the whole asset. The first period can be clear, which gives the "clear lead" that nginx-vod-module offers as `vod_drm_clear_lead_segment_count`.
 
 ## Context
 
@@ -28,9 +28,9 @@ TDD 0009 already supports different keys per clip, and a clip sequence can expre
 
 ## Non-goals
 
-- Deriving keys. The mapper supplies every key, as it does today; segmentor never contacts a licence server.
+- Deriving keys. The mapper supplies every key, as it does today; vodnik never contacts a licence server.
 - Rotation for `AES-128` whole-segment encryption ([TDD 0012](0012-hls-aes-128.md)).
-- Rotation on a time schedule that segmentor computes. The mapper lists the periods.
+- Rotation on a time schedule that vodnik computes. The mapper lists the periods.
 - Changing keys inside a segment.
 
 ## Design
