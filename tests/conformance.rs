@@ -1448,3 +1448,426 @@ fn a_track_audit_can_start_at_a_later_sequence_number() {
     });
     assert!(refused.is_err(), "a wrong first sequence number must fail");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Presentations of several clips and renditions, through a mapper (TDD 0017)
+// ---------------------------------------------------------------------------------------------
+
+/// What the harness catalog serves, how many clips each track has, and the track names a player
+/// sees in the URLs and representation IDs.
+const MAPPER_ASSETS: [(&str, &[&str], usize); 4] = [
+    ("ladder", &["video-720p", "video-480p", "audio-1"], 1),
+    ("preroll", &["video", "audio-1"], 2),
+    ("grid", &["video-720p", "video-480p", "audio-1"], 2),
+    ("trimmed", &["video-720p", "video-480p", "audio-1"], 1),
+];
+
+fn audit_mapper_asset(server: &Server, asset: &str, tracks: &[&str], clips: usize) {
+    let hls = audit_hls_clips(server, asset);
+    let dash = audit_dash_clips(server, asset);
+    let mut expected = tracks.to_vec();
+    expected.sort_unstable();
+    let mut found = hls.keys().map(String::as_str).collect::<Vec<_>>();
+    found.sort_unstable();
+    assert_eq!(found, expected, "{asset}: the tracks a player sees");
+    for (track, audits) in &hls {
+        assert_eq!(audits.len(), clips, "{asset}/{track}: clips in HLS");
+    }
+    check_presentation(asset, &hls, &dash);
+}
+
+#[test]
+fn ladder_preroll_and_trimmed_assets_conform() {
+    let server = start_server_with_mapper();
+    for (asset, tracks, clips) in MAPPER_ASSETS {
+        if asset != "grid" {
+            audit_mapper_asset(&server, asset, tracks, clips);
+        }
+    }
+}
+
+/// Clips cut at 1000 ms start before the keyframe a player would call the second one, because a
+/// video clip begins on the keyframe at or before its window; the audio has to follow the video.
+#[test]
+fn a_grid_cut_mid_gop_conforms() {
+    let server = start_server_with_mapper();
+    let (asset, tracks, clips) = MAPPER_ASSETS[2];
+    audit_mapper_asset(&server, asset, tracks, clips);
+}
+
+/// One clip of one track, audited.
+struct ClipAudit {
+    audited: Audited,
+    /// The global number of the clip's first segment.
+    first_segment: u32,
+    /// Where the clip starts on the presentation timeline, and how long it is, in milliseconds.
+    start_ms: u64,
+    length_ms: u64,
+}
+
+fn clip_audit(audited: Audited, first_segment: u32) -> ClipAudit {
+    let scale = u64::from(audited.timescale);
+    ClipAudit {
+        first_segment,
+        start_ms: audited.start_ticks * 1000 / scale,
+        length_ms: audited.total_ticks * 1000 / scale,
+        audited,
+    }
+}
+
+/// The number in a `segments/{n}/media.m4s` reference.
+fn segment_number(reference: &str) -> u32 {
+    reference
+        .split("segments/")
+        .nth(1)
+        .and_then(|rest| rest.split('/').next())
+        .and_then(|number| number.parse().ok())
+        .unwrap_or_else(|| panic!("no segment number in {reference}"))
+}
+
+/// The init reference of clip `position` of `clips`: a presentation of one clip has a plain init
+/// segment, and one of several has an init segment for each (TDD 0008). The reference is relative
+/// to the playlist or manifest that holds it, so a DASH one also carries the track's directory.
+fn assert_init_reference(context: &str, init: &str, position: usize, clips: usize) {
+    if clips == 1 {
+        assert!(
+            init.contains("init.mp4") && !init.contains("clips/"),
+            "{context}: a single clip has a plain init reference, not {init}"
+        );
+    } else {
+        assert!(
+            init.contains(&format!("clips/{position}/init.mp4")),
+            "{context}: init reference {init} should name clip {position}"
+        );
+    }
+}
+
+/// Audits one asset's HLS presentation clip by clip: every media playlist of the master (the
+/// variants and the audio renditions), each split at its `EXT-X-MAP`s.
+fn audit_hls_clips(server: &Server, asset: &str) -> HashMap<String, Vec<ClipAudit>> {
+    let master_url = format!("/hls/{asset}/master.m3u8");
+    let master = get_ok(server, &master_url).text();
+    let lines = master.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "#EXTM3U", "{asset}");
+    let mut targets: Vec<(String, String)> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let reference = if line.starts_with("#EXT-X-STREAM-INF") {
+            let stream = attributes(line);
+            let bandwidth = stream["BANDWIDTH"].parse::<u64>().unwrap();
+            let average = stream["AVERAGE-BANDWIDTH"].parse::<u64>().unwrap();
+            assert!(bandwidth >= average, "{asset}: BANDWIDTH is a peak");
+            assert_ne!(stream["CODECS"], "", "{asset}: a variant names its codecs");
+            lines[index + 1].to_owned()
+        } else if line.starts_with("#EXT-X-MEDIA") {
+            let media = attributes(line);
+            assert_eq!(media["TYPE"], "AUDIO", "{asset}");
+            media["URI"].clone()
+        } else {
+            continue;
+        };
+        let name = reference.split('/').next().unwrap().to_owned();
+        if !targets.iter().any(|(existing, _)| *existing == name) {
+            targets.push((name, reference));
+        }
+    }
+    assert!(
+        !targets.is_empty(),
+        "{asset}: the master lists no playlists"
+    );
+
+    let mut result = HashMap::new();
+    for (name, reference) in targets {
+        let playlist_url = resolve(&master_url, &reference);
+        let body = get_ok(server, &playlist_url).text();
+        let lines = body.lines().collect::<Vec<_>>();
+        let context = format!("{asset}/{name}");
+        assert_eq!(lines[0], "#EXTM3U", "{context}");
+        assert_eq!(lines.last(), Some(&"#EXT-X-ENDLIST"), "{context}");
+        assert!(lines.contains(&"#EXT-X-PLAYLIST-TYPE:VOD"), "{context}");
+        assert!(lines.contains(&"#EXT-X-INDEPENDENT-SEGMENTS"), "{context}");
+
+        // Each `EXT-X-MAP` starts a clip; a discontinuity separates clips, and only clips.
+        let mut clips: Vec<(String, Vec<(String, f64)>)> = Vec::new();
+        let mut discontinuity = false;
+        for (index, line) in lines.iter().enumerate() {
+            if *line == "#EXT-X-DISCONTINUITY" {
+                discontinuity = true;
+            } else if let Some(map) = line.strip_prefix("#EXT-X-MAP:") {
+                assert_eq!(
+                    discontinuity,
+                    !clips.is_empty(),
+                    "{context}: a discontinuity precedes every clip but the first, and nothing else"
+                );
+                discontinuity = false;
+                clips.push((attributes(&format!("#X:{map}"))["URI"].clone(), Vec::new()));
+            } else if let Some(duration) = line.strip_prefix("#EXTINF:") {
+                let seconds = duration.trim_end_matches(',').parse::<f64>().unwrap();
+                clips
+                    .last_mut()
+                    .expect("a map comes before any segment")
+                    .1
+                    .push((lines[index + 1].to_owned(), seconds));
+            }
+        }
+        assert!(!discontinuity, "{context}: a discontinuity before nothing");
+        let target = lines
+            .iter()
+            .find_map(|line| line.strip_prefix("#EXT-X-TARGETDURATION:"))
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+
+        let mut audits = Vec::new();
+        let mut next_segment = None;
+        for (position, (init_reference, segments)) in clips.iter().enumerate() {
+            assert!(
+                !segments.is_empty(),
+                "{context}: clip {position} has no segments"
+            );
+            assert_init_reference(&context, init_reference, position, clips.len());
+            let first_segment = segment_number(&segments[0].0);
+            if let Some(expected) = next_segment {
+                assert_eq!(
+                    first_segment, expected,
+                    "{context}: segment numbers continue across clips"
+                );
+            }
+            for (offset, (uri, seconds)) in segments.iter().enumerate() {
+                assert_eq!(
+                    segment_number(uri),
+                    first_segment + u32::try_from(offset).unwrap(),
+                    "{context}: clip {position} numbers its segments in order"
+                );
+                assert!(
+                    seconds.round() <= target,
+                    "{context}: EXTINF within TARGETDURATION"
+                );
+            }
+            next_segment = Some(first_segment + u32::try_from(segments.len()).unwrap());
+            let init = get_ok(server, &resolve(&playlist_url, init_reference)).body;
+            let bytes = segments
+                .iter()
+                .map(|(uri, _)| get_ok(server, &resolve(&playlist_url, uri)).body)
+                .collect::<Vec<_>>();
+            let audited = audit_track(
+                &name,
+                &init,
+                bytes,
+                None,
+                first_segment + 1,
+                |index, timescale| (segments[index].1 * f64::from(timescale)).round() as u64,
+            );
+            audits.push(clip_audit(audited, first_segment));
+        }
+        result.insert(name, audits);
+    }
+    result
+}
+
+/// Audits one asset's DASH presentation period by period: each `Period` is a clip, and every
+/// `Representation` in it is audited the way a whole presentation's is.
+fn audit_dash_clips(server: &Server, asset: &str) -> HashMap<String, Vec<ClipAudit>> {
+    let manifest_url = format!("/dash/{asset}/manifest.mpd");
+    let manifest = get_ok(server, &manifest_url);
+    assert_eq!(manifest.headers["content-type"], "application/dash+xml");
+    let all = tags(&manifest.text());
+    let mpd = &all[0];
+    assert_eq!(mpd.name, "MPD");
+    assert_eq!(mpd.attributes["type"], "static");
+    let presentation = parse_iso_seconds(&mpd.attributes["mediaPresentationDuration"]);
+    let periods = all.iter().filter(|tag| tag.name == "Period").count();
+    assert!(periods >= 1, "{asset}: a manifest has a period");
+
+    let mut result: HashMap<String, Vec<ClipAudit>> = HashMap::new();
+    let mut ids_by_period: Vec<Vec<String>> = Vec::new();
+    let mut period_start_ms = 0;
+    let mut representation: Option<&Tag> = None;
+    for (index, tag) in all.iter().enumerate() {
+        match tag.name.as_str() {
+            "Period" => {
+                period_start_ms =
+                    (parse_iso_seconds(&tag.attributes["start"]) * 1000.0).round() as u64;
+                ids_by_period.push(Vec::new());
+            }
+            "Representation" => {
+                representation = Some(tag);
+                ids_by_period
+                    .last_mut()
+                    .unwrap()
+                    .push(tag.attributes["id"].clone());
+            }
+            "SegmentTemplate" => {
+                let id = representation
+                    .expect("a template sits in a representation")
+                    .attributes["id"]
+                    .clone();
+                let position = ids_by_period.len() - 1;
+                let context = format!("{asset}/{id} period {position}");
+                let start_number = tag.attributes["startNumber"].parse::<u32>().unwrap();
+                let entries = all[index + 1..]
+                    .iter()
+                    .take_while(|candidate| candidate.name != "Representation")
+                    .filter(|candidate| candidate.name == "S")
+                    .collect::<Vec<_>>();
+                let durations = entries
+                    .iter()
+                    .map(|entry| entry.attributes["d"].parse::<u64>().unwrap())
+                    .collect::<Vec<_>>();
+                assert!(
+                    !durations.is_empty(),
+                    "{context}: a timeline lists segments"
+                );
+                let declared_start = entries[0]
+                    .attributes
+                    .get("t")
+                    .map(|t| t.parse::<u64>().unwrap());
+                let initialization =
+                    tag.attributes["initialization"].replace("$RepresentationID$", &id);
+                assert_init_reference(&context, &initialization, position, periods);
+                let init = get_ok(server, &resolve(&manifest_url, &initialization)).body;
+                let segments = (0..durations.len())
+                    .map(|offset| {
+                        let media = tag.attributes["media"]
+                            .replace("$RepresentationID$", &id)
+                            .replace("$Number$", &(start_number as usize + offset).to_string());
+                        get_ok(server, &resolve(&manifest_url, &media)).body
+                    })
+                    .collect::<Vec<_>>();
+                let audited = audit_track(
+                    &id,
+                    &init,
+                    segments,
+                    declared_start,
+                    start_number + 1,
+                    |segment, _| durations[segment],
+                );
+                if let Some(offset) = tag.attributes.get("presentationTimeOffset") {
+                    let offset = offset.parse::<u64>().unwrap();
+                    // A video clip starts exactly at the offset; an audio clip starts at its first
+                    // frame at or after it, which can be a frame later.
+                    let late = audited.start_ticks.checked_sub(offset).unwrap_or_else(|| {
+                        panic!("{context}: the first fragment starts before the offset")
+                    });
+                    assert!(
+                        late * 1000 / u64::from(audited.timescale) <= 50,
+                        "{context}: the first fragment starts {late} ticks after the offset"
+                    );
+                    assert!(
+                        (offset * 1000 / u64::from(audited.timescale)).abs_diff(period_start_ms)
+                            <= 1,
+                        "{context}: the offset is where the period starts"
+                    );
+                }
+                result
+                    .entry(id)
+                    .or_default()
+                    .push(clip_audit(audited, start_number));
+            }
+            _ => {}
+        }
+    }
+    for (position, ids) in ids_by_period.iter().enumerate().skip(1) {
+        let (mut first, mut here) = (ids_by_period[0].clone(), ids.clone());
+        first.sort();
+        here.sort();
+        assert_eq!(
+            first, here,
+            "{asset}: period {position} has the representations of period 0"
+        );
+    }
+    for (id, audits) in &result {
+        let last = audits.last().unwrap();
+        let end = (last.start_ms + last.length_ms) as f64 / 1000.0;
+        assert!(
+            end <= presentation + 0.1,
+            "{asset}/{id}: ends at {end}s, past mediaPresentationDuration ({presentation}s)"
+        );
+    }
+    result
+}
+
+/// What must hold between the tracks of one presentation, and between its two protocols.
+fn check_presentation(
+    asset: &str,
+    hls: &HashMap<String, Vec<ClipAudit>>,
+    dash: &HashMap<String, Vec<ClipAudit>>,
+) {
+    assert_eq!(
+        hls.keys().collect::<std::collections::BTreeSet<_>>(),
+        dash.keys().collect::<std::collections::BTreeSet<_>>(),
+        "{asset}: HLS and DASH expose the same tracks"
+    );
+    for (track, clips) in hls {
+        let other = &dash[track];
+        assert_eq!(
+            clips.len(),
+            other.len(),
+            "{asset}/{track}: clips in HLS and DASH"
+        );
+        for (position, (a, b)) in clips.iter().zip(other).enumerate() {
+            assert_eq!(
+                a.audited.init, b.audited.init,
+                "{asset}/{track} clip {position}: init"
+            );
+            assert_eq!(
+                a.audited.segments, b.audited.segments,
+                "{asset}/{track} clip {position}: segments differ between protocols"
+            );
+            assert_eq!(
+                a.first_segment, b.first_segment,
+                "{asset}/{track} clip {position}"
+            );
+        }
+        // A clip starts where the one before ended: the audio may overlap by under a frame.
+        for (position, pair) in clips.windows(2).enumerate() {
+            let end = pair[0].start_ms + pair[0].length_ms;
+            assert!(
+                end.abs_diff(pair[1].start_ms) <= 40,
+                "{asset}/{track}: clip {} ends at {end} ms and clip {} starts at {} ms",
+                position,
+                position + 1,
+                pair[1].start_ms
+            );
+        }
+    }
+
+    let mut videos = hls
+        .iter()
+        .filter(|(track, _)| track.starts_with("video"))
+        .collect::<Vec<_>>();
+    videos.sort_by_key(|(track, _)| (*track).clone());
+    let (reference_track, reference) = videos[0];
+    for (track, clips) in &videos[1..] {
+        assert_eq!(clips.len(), reference.len(), "{asset}/{track}: clips");
+        for (position, (clip, first)) in clips.iter().zip(reference).enumerate() {
+            let context = format!("{asset} clip {position}: {track} against {reference_track}");
+            assert_eq!(
+                clip.audited.segments.len(),
+                first.audited.segments.len(),
+                "{context}: segments"
+            );
+            assert!(
+                clip.start_ms.abs_diff(first.start_ms) <= 40,
+                "{context}: start"
+            );
+        }
+    }
+    for (track, clips) in hls.iter().filter(|(track, _)| track.starts_with("audio")) {
+        assert_eq!(clips.len(), reference.len(), "{asset}/{track}: clips");
+        for (position, (clip, video)) in clips.iter().zip(reference).enumerate() {
+            let context = format!("{asset} clip {position}: {track} against {reference_track}");
+            assert!(
+                clip.start_ms.abs_diff(video.start_ms) <= 50,
+                "{context}: start"
+            );
+            // An audio clip cut from a different instant of its source than the video's is the
+            // same length only by luck; a different length is what shows it.
+            assert!(
+                clip.length_ms.abs_diff(video.length_ms) <= 100,
+                "{context}: the audio is {} ms long, the video {} ms",
+                clip.length_ms,
+                video.length_ms
+            );
+        }
+    }
+}
