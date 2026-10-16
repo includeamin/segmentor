@@ -96,5 +96,7 @@ class Mapper(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     load_catalog()  # fail fast on a broken catalog rather than on the first request
-    print(f"mapper: serving {CATALOG_PATH} on 0.0.0.0:{PORT}", flush=True)
-    HTTPServer(("0.0.0.0", PORT), Mapper).serve_forever()
+    server = HTTPServer(("0.0.0.0", PORT), Mapper)
+    # PORT=0 picks a free port, which is how the conformance tests start it; the line says which.
+    print(f"mapper: serving {CATALOG_PATH} on 0.0.0.0:{server.server_address[1]}", flush=True)
+    server.serve_forever()
