@@ -72,6 +72,7 @@ impl AppState {
                         mapper,
                         LocationPolicy::new(remote),
                         config.limits.max_clips,
+                        config.limits.max_sequence_files,
                     )?)),
                     Duration::from_millis(mapper.negative_ttl_ms),
                     Duration::from_millis(mapper.error_ttl_ms),

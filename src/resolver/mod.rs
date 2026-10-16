@@ -66,11 +66,19 @@ pub(crate) struct SubtitleLocation {
 pub(crate) struct RenditionLocation {
     /// A short URL-safe label, unique within the asset. Appears in URLs as `video-{id}`.
     pub(crate) id: String,
-    pub(crate) location: AssetLocation,
+    /// One file, or a sequence of clips (TDD 0016).
+    pub(crate) source: RenditionSource,
     /// Which tracks of the file this rendition serves; all of them when absent (TDD 0015).
     pub(crate) tracks: Option<crate::media::TrackSelection>,
     /// The language, label and default of the audio it brings, in place of the file's.
     pub(crate) audio: Option<crate::media::AudioOverrides>,
+}
+
+/// What a rendition plays: one file, or several clips back to back (TDD 0016).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RenditionSource {
+    Location(AssetLocation),
+    Clips(Vec<ClipLocation>),
 }
 
 /// One clip of a sequence: a file, and the window of it to play.
@@ -93,6 +101,8 @@ pub(crate) enum LocationKey {
     Main,
     Rendition(String),
     Clip(usize),
+    /// One clip of one rendition that is a sequence (TDD 0016).
+    RenditionClip(String, usize),
 }
 
 impl fmt::Display for LocationKey {
@@ -101,6 +111,7 @@ impl fmt::Display for LocationKey {
             Self::Main => formatter.write_str("-"),
             Self::Rendition(id) => formatter.write_str(id),
             Self::Clip(position) => write!(formatter, "clip-{position}"),
+            Self::RenditionClip(id, position) => write!(formatter, "{id}/clip-{position}"),
         }
     }
 }
@@ -152,11 +163,20 @@ impl ResolvedAsset {
         }
         self.renditions
             .iter()
-            .map(|rendition| {
-                (
-                    LocationKey::Rendition(rendition.id.clone()),
-                    &rendition.location,
-                )
+            .flat_map(|rendition| match &rendition.source {
+                RenditionSource::Location(location) => {
+                    vec![(LocationKey::Rendition(rendition.id.clone()), location)]
+                }
+                RenditionSource::Clips(clips) => clips
+                    .iter()
+                    .enumerate()
+                    .map(|(position, clip)| {
+                        (
+                            LocationKey::RenditionClip(rendition.id.clone(), position),
+                            &clip.location,
+                        )
+                    })
+                    .collect(),
             })
             .collect()
     }
@@ -170,7 +190,19 @@ impl ResolvedAsset {
                 .renditions
                 .iter()
                 .find(|candidate| &candidate.id == id)
-                .map(|candidate| &candidate.location),
+                .and_then(|candidate| match &candidate.source {
+                    RenditionSource::Location(location) => Some(location),
+                    RenditionSource::Clips(_) => None,
+                }),
+            LocationKey::RenditionClip(id, position) => self
+                .renditions
+                .iter()
+                .find(|candidate| &candidate.id == id)
+                .and_then(|candidate| match &candidate.source {
+                    RenditionSource::Clips(clips) => clips.get(*position),
+                    RenditionSource::Location(_) => None,
+                })
+                .map(|clip| &clip.location),
             LocationKey::Clip(position) => self.clips.get(*position).map(|clip| &clip.location),
         }
     }
