@@ -29,6 +29,13 @@
           "type": "file",
           "path": "rendition-audio-en.m4a"
         }
+      },
+      {
+        "id": "es",
+        "location": {
+          "type": "file",
+          "path": "rendition-audio-es.m4a"
+        }
       }
     ]
   },

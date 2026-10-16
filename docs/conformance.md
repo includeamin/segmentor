@@ -49,7 +49,8 @@ The fixtures above come from a static catalog of single files, which cannot expr
 
 | Asset | What it is |
 | --- | --- |
-| `ladder` | Two video renditions and an audio rendition ([TDD 0006](technical-design/0006-trick-play-subtitles-and-renditions.md)) |
+| `single` | One file, resolved through the mapper |
+| `ladder` | Two video renditions and two audio-only renditions, one per language ([TDD 0006](technical-design/0006-trick-play-subtitles-and-renditions.md)) |
 | `preroll` | A sequence of two clips of different files ([TDD 0008](technical-design/0008-clipping-and-concatenation.md)) |
 | `grid` | Renditions that are sequences ([TDD 0016](technical-design/0016-adaptive-clips.md)), each cut at 1000 ms, which is before the second keyframe because a video clip starts on the keyframe at or before its window |
 | `trimmed` | A ladder with one clip per rendition |
@@ -57,23 +58,36 @@ The fixtures above come from a static catalog of single files, which cannot expr
 Both protocols are followed clip by clip: each `EXT-X-MAP` in a playlist and each `Period` in a manifest is a clip. On top of the per-track rules above:
 
 - segment numbers continue across clips, every clip has its own init segment, and a presentation of one clip has a plain one;
-- a discontinuity precedes every clip but the first, and nothing else;
-- each clip starts where the one before ended, within 40 ms;
-- the video renditions have the same clips, the same number of segments in each, and start each clip together, within 40 ms;
-- each audio track has the video's clips, starts each within 50 ms of the video, and is within 100 ms of its length, which is what shows an audio clip cut from a different instant of its source than the video's;
-- every period has the same representations, and a period's `presentationTimeOffset` is where its first fragment starts (an audio clip may start up to 50 ms later, at its first frame);
+- a discontinuity precedes every clip but the first, and nowhere else;
+- each clip starts where the one before ended, to within a sample;
+- the video renditions are cut alike: the same clips, the same segments starting at the same instants, and each clip starting and ending together, each to within a sample;
+- a video clip holds at least the window it was asked for (it may start earlier, never later or shorter);
+- each audio track has the video's clips, starts each within one audio frame of the video, and is the video's length to within a video sample and an audio frame, which is what shows an audio clip cut from a different instant of its source than the video's. Only the last clip may run longer, by up to 100 ms of trailing audio;
+- every period has the same representations, and a period's `presentationTimeOffset` is where its first fragment starts, or up to one sample before an audio clip's first frame;
 - HLS and DASH serve byte-identical init and media segments for every clip of every track;
 - FFmpeg decodes every clip of every track on its own, since it cannot judge a sequence as one stream.
 
+The tolerances are not fixed numbers: they come from the first sample duration of the clips being compared, so a coarser frame rate loosens them and a finer one tightens them.
+
+Every rule between tracks and clips is a plain function over a clip's shape in milliseconds, and each has a synthetic test with a known-bad input that must be refused, so a rule cannot go vacuous without a test failing. A playlist's clip structure has the same.
+
+### Known deviation: a sequence's duration
+
+A sequence states the end of its video as `mediaPresentationDuration`, and its last clip keeps the audio that runs past the video ([TDD 0008](technical-design/0008-clipping-and-concatenation.md)), so an audio track can end after the stated duration: by 21 ms in `grid` and 66 ms in `preroll` today. A single file states its longest track instead and is held to 2 ms. The mapper-driven audit allows 100 ms, which is a little over the worst case seen; it is there to catch a larger overrun, not to excuse this one. Whether the duration should cover the longest track, as for a single file, is open.
+
 ### Mutation checks
 
-Each audit was checked by breaking the server and confirming that the suite fails, then restoring it (2026-10-16):
+Each audit was checked by breaking the server and confirming that the suite fails, then restoring it (2026-10-16). Some faults are also refused by the server's own validation, which makes the asset fail to load; those are marked, because in that case the audit is not what caught them.
 
 | Mutation | Caught by |
 | --- | --- |
-| The fragment sequence numbers start at 2 | The fixture audit, the mapper-driven audit, and both decode tests |
-| Audio-only clips are cut from the mapper's own window instead of the video's span (the bug found in the review of TDD 0016) | `a_grid_cut_mid_gop_conforms` and the mapper decode test |
-| The second DASH period lacks a representation | `a_grid_cut_mid_gop_conforms` |
+| The fragment sequence numbers start at 2 | The fixture audit and the mapper-driven audit, and both decode tests |
+| Audio-only clips are cut from the mapper's own window instead of the video's span, and the server's own audio length check is removed (the bug found in the review of TDD 0016, as it first shipped) | The clip-continuity rule in `a_grid_cut_mid_gop_conforms`: "clip 0 ends at 1002 ms and clip 1 starts at 933 ms". The decode test does **not** catch it. With the server's check left in, the server refuses the asset |
+| The second DASH period lacks a representation | The period-representation rule in `a_grid_cut_mid_gop_conforms` |
+| No discontinuity before the second clip | The discontinuity rule, on `grid` and `preroll` |
+| The DASH `startNumber` is one too high in later periods | The media requests of the DASH audit (the segment does not exist) |
+| Audio-only clips are placed 100 ms late on the timeline | The server's own length check refuses the asset. The audit's audio-start rule is covered by its synthetic test only |
+| The grid's second clip asks for a window from 2100 ms, past the next keyframe | The window rule: "clip 1 is 1000 ms long, but its window holds at least 2000 ms" |
 
 ## What is not covered
 
@@ -83,6 +97,7 @@ The suite verifies structural rules the code can be held to. It is not a certifi
 | --- | --- | --- |
 | Apple HLS validation (`mediastreamvalidator`, `hlsreport`) | Not run | Requires macOS and Apple's HTTP Live Streaming Tools. Point the validator at `http://<host>/hls/<asset>/master.m3u8` before a release |
 | DASH-IF conformance (`DASH-IF-Conformance` tool or web validator) | Not run | Needs Java or the hosted validator. Run it on a served MPD before a release |
+| Encrypted (`drm-clearkey`) and subtitled assets through a mapper | Not covered | They have in-process tests only; the mapper-driven audit has no key handling or subtitle playlists yet |
 | CMAF (ISO/IEC 23000-19) profile conformance | Not claimed | The layout is CMAF-style but no CMAF validator has been run. Do not claim conformance |
 | Browser playback with hls.js and dash.js (start, seek, play) | Not implemented | Needs Node, `npm`, and a browser driver such as Playwright. Neither `npm` nor a driver was available where this suite was written |
 | Device and player matrix (Safari, tvOS, Android ExoPlayer, smart TVs) | Not covered | Manual |
