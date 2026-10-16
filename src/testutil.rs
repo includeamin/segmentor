@@ -51,6 +51,10 @@ async fn serve(app: Router) -> SocketAddr {
 /// `encryption` override.
 pub(crate) type EncryptedClip = (Value, Option<u64>, Option<u64>, Option<Value>);
 
+/// A rendition that is a sequence (TDD 0016): its id and its clips, each a location with an
+/// optional `from_ms` and `to_ms`.
+pub(crate) type RenditionClips<'a> = (&'a str, &'a [(Value, Option<u64>, Option<u64>)]);
+
 #[derive(Debug, Clone)]
 pub(crate) struct Answer {
     pub(crate) version: String,
@@ -164,6 +168,42 @@ impl Answer {
             renditions: renditions
                 .iter()
                 .map(|(id, path)| json!({ "id": id, "location": { "type": "file", "path": path } }))
+                .collect(),
+            clips: Vec::new(),
+            ttl_seconds: Some(300),
+            expires_at: None,
+            subtitles: Vec::new(),
+            encryption: None,
+            hls_aes128: None,
+            source_encryption: None,
+            tracks: None,
+        }
+    }
+
+    /// An adaptive sequence (TDD 0016): each rendition has an id and clips, each clip a location
+    /// with an optional `from_ms` and `to_ms`.
+    pub(crate) fn renditions_with_clips(version: &str, renditions: &[RenditionClips<'_>]) -> Self {
+        Self {
+            version: version.to_owned(),
+            location: Value::Null,
+            renditions: renditions
+                .iter()
+                .map(|(id, clips)| {
+                    let clips = clips
+                        .iter()
+                        .map(|(location, from_ms, to_ms)| {
+                            let mut clip = json!({ "location": location });
+                            if let Some(from_ms) = from_ms {
+                                clip["from_ms"] = json!(from_ms);
+                            }
+                            if let Some(to_ms) = to_ms {
+                                clip["to_ms"] = json!(to_ms);
+                            }
+                            clip
+                        })
+                        .collect::<Vec<_>>();
+                    json!({ "id": id, "clips": clips })
+                })
                 .collect(),
             clips: Vec::new(),
             ttl_seconds: Some(300),
