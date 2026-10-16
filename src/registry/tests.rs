@@ -2263,6 +2263,287 @@ async fn a_rotated_signature_reaches_every_clip_cut_from_that_file() {
     );
 }
 
+/// Two renditions of two clips each: the first second of each file, then the rest.
+fn two_clip_ladder(version: &str) -> Answer {
+    Answer::renditions_with_clips(
+        version,
+        &[
+            (
+                "720p",
+                &[
+                    clip("rendition-720p.mp4", None, Some(1000)),
+                    clip("rendition-720p.mp4", Some(1000), None),
+                ],
+            ),
+            (
+                "480p",
+                &[
+                    clip("rendition-480p.mp4", None, Some(1000)),
+                    clip("rendition-480p.mp4", Some(1000), None),
+                ],
+            ),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn an_adaptive_clips_answer_serves_hls_and_dash() {
+    let h = harness().await;
+    h.mapper.state.set("grid", two_clip_ladder("v1"));
+
+    let master = text(&fetch(&h.app, "/hls/grid/master.m3u8").await.2);
+
+    assert_eq!(master.matches("#EXT-X-STREAM-INF").count(), 2, "{master}");
+    for track in ["video-720p", "video-480p", "audio-1"] {
+        let playlist = text(
+            &fetch(&h.app, &format!("/hls/grid/{track}/index.m3u8"))
+                .await
+                .2,
+        );
+        assert_eq!(
+            playlist.matches("#EXT-X-DISCONTINUITY").count(),
+            1,
+            "{track}: {playlist}"
+        );
+        assert_eq!(
+            playlist.matches("#EXT-X-MAP").count(),
+            2,
+            "{track}: {playlist}"
+        );
+    }
+    let manifest = text(&fetch(&h.app, "/dash/grid/manifest.mpd").await.2);
+    assert_eq!(manifest.matches("<Period ").count(), 2, "{manifest}");
+}
+
+#[tokio::test]
+async fn each_rendition_and_clip_has_its_own_init_segment() {
+    let h = harness().await;
+    h.mapper.state.set("grid", two_clip_ladder("v1"));
+    let version = version_in(&fetch(&h.app, "/hls/grid/master.m3u8").await.2);
+
+    let found = |path: &str| {
+        let url = format!("{path}?v={version}");
+        let app = h.app.clone();
+        async move { status(&app, &url).await }
+    };
+
+    assert_eq!(
+        found("/hls/grid/video-720p/clips/1/init.mp4").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        found("/dash/grid/audio-1/clips/0/init.mp4").await,
+        StatusCode::OK
+    );
+    for missing in [
+        "/hls/grid/video-720p/init.mp4",
+        "/hls/grid/video-720p/clips/9/init.mp4",
+        "/hls/grid/video-nope/clips/0/init.mp4",
+    ] {
+        assert_eq!(found(missing).await, StatusCode::NOT_FOUND, "{missing}");
+    }
+}
+
+#[tokio::test]
+async fn segments_are_numbered_across_clips_in_every_rendition() {
+    let h = harness().await;
+    h.mapper.state.set("grid", two_clip_ladder("v1"));
+    let version = version_in(&fetch(&h.app, "/hls/grid/master.m3u8").await.2);
+
+    let mut counts = Vec::new();
+    for rendition in ["720p", "480p"] {
+        let playlist = text(
+            &fetch(&h.app, &format!("/hls/grid/video-{rendition}/index.m3u8"))
+                .await
+                .2,
+        );
+        let count = playlist.matches("#EXTINF:").count();
+        counts.push(count);
+        let segment = |number: usize| {
+            format!("/hls/grid/video-{rendition}/segments/{number}/media.m4s?v={version}")
+        };
+        assert_eq!(
+            status(&h.app, &segment(count - 1)).await,
+            StatusCode::OK,
+            "{rendition}"
+        );
+        assert_eq!(
+            status(&h.app, &segment(count)).await,
+            StatusCode::NOT_FOUND,
+            "{rendition}"
+        );
+    }
+    assert_eq!(
+        counts[0], counts[1],
+        "every rendition has the same segments"
+    );
+    assert!(counts[0] >= 2, "two clips make at least two segments");
+}
+
+#[tokio::test]
+async fn a_rotated_signature_reaches_every_pair_cut_from_the_file() {
+    let (h, origin) = signed_harness(|_| {}).await;
+    let answer = |signature: &str| {
+        let url = signed(&origin, signature);
+        let clips = [
+            (http_location(&url), None, Some(1500)),
+            (http_location(&url), Some(1500), None),
+        ];
+        short_ttl(Answer::renditions_with_clips(
+            "v1",
+            &[("a", &clips), ("b", &clips)],
+        ))
+    };
+    h.mapper.state.set("grid", answer("1"));
+    let version = version_in(&fetch(&h.app, "/hls/grid/master.m3u8").await.2);
+    let playlist = text(&fetch(&h.app, "/hls/grid/video-a/index.m3u8").await.2);
+    let last = playlist.matches("#EXTINF:").count() - 1;
+
+    // The mapper re-signs the same object and the old signature stops working.
+    *origin.state.required_query.lock().unwrap() = Some("sig=2".to_owned());
+    h.mapper.state.set("grid", answer("2"));
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let before = origin.state.queries.lock().unwrap().len();
+
+    for rendition in ["a", "b"] {
+        for segment in [0, last] {
+            assert_eq!(
+                status(
+                    &h.app,
+                    &format!(
+                        "/hls/grid/video-{rendition}/segments/{segment}/media.m4s?v={version}"
+                    )
+                )
+                .await,
+                StatusCode::OK,
+                "{rendition} segment {segment}"
+            );
+        }
+    }
+
+    let used = origin.state.queries.lock().unwrap()[before..].to_vec();
+    assert!(
+        !used.is_empty() && used.iter().all(|query| query == "sig=2"),
+        "{used:?}"
+    );
+    assert!(
+        metric(&h.state, "vod_asset_loads_total{outcome=\"ok\"} 1"),
+        "the asset must not reload"
+    );
+}
+
+#[tokio::test]
+async fn one_bad_file_fails_the_whole_asset_naming_rendition_and_clip() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "grid",
+        Answer::renditions_with_clips(
+            "v1",
+            &[
+                (
+                    "720p",
+                    &[
+                        clip("rendition-720p.mp4", None, Some(1000)),
+                        clip("does-not-exist.mp4", Some(1000), None),
+                    ],
+                ),
+                (
+                    "480p",
+                    &[
+                        clip("rendition-480p.mp4", None, Some(1000)),
+                        clip("rendition-480p.mp4", Some(1000), None),
+                    ],
+                ),
+            ],
+        ),
+    );
+
+    assert_eq!(
+        status(&h.app, "/hls/grid/master.m3u8").await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "the reason, naming rendition `720p` clip 1, is in the asset_load_failed log line"
+    );
+}
+
+#[tokio::test]
+async fn the_status_endpoint_counts_renditions_and_clips() {
+    let h = harness().await;
+    h.mapper.state.set("grid", two_clip_ladder("v1"));
+    assert_eq!(
+        status(&h.app, "/hls/grid/master.m3u8").await,
+        StatusCode::OK
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&fetch(&h.app, "/admin/status").await.2).unwrap();
+
+    assert_eq!(json["cache"]["assets"][0]["clips"], 2);
+}
+
+#[tokio::test]
+async fn a_ladder_of_one_clip_each_serves_as_a_trimmed_ladder() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "grid",
+        Answer::renditions_with_clips(
+            "v1",
+            &[
+                ("720p", &[clip("rendition-720p.mp4", None, Some(2000))]),
+                ("480p", &[clip("rendition-480p.mp4", None, Some(2000))]),
+            ],
+        ),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/grid/master.m3u8").await.2);
+
+    let playlist = text(&fetch(&h.app, "/hls/grid/video-720p/index.m3u8").await.2);
+
+    assert!(!playlist.contains("#EXT-X-DISCONTINUITY"), "{playlist}");
+    assert_eq!(
+        status(
+            &h.app,
+            &format!("/hls/grid/video-720p/init.mp4?v={version}")
+        )
+        .await,
+        StatusCode::OK,
+        "a trimmed ladder keeps the plain init URL"
+    );
+}
+
+#[test]
+fn a_file_named_by_several_pairs_gets_one_entry() {
+    use crate::registry::distinct_locations;
+    use crate::resolver::{
+        AssetLocation, ClipLocation, LocationKey, RenditionLocation, RenditionSource,
+    };
+
+    let location = |path: &str| AssetLocation::File(std::path::PathBuf::from(path));
+    let clip_at = |path: &str| ClipLocation {
+        location: location(path),
+        window: crate::clip::ClipWindow {
+            from_ms: 0,
+            to_ms: None,
+        },
+        encryption: None,
+        tracks: None,
+    };
+    let rendition = |id: &str, paths: &[&str]| RenditionLocation {
+        id: id.to_owned(),
+        source: RenditionSource::Clips(paths.iter().map(|path| clip_at(path)).collect()),
+        tracks: None,
+        audio: None,
+    };
+    let renditions = [
+        rendition("720p", &["ad.mp4", "movie-720.mp4"]),
+        rendition("480p", &["ad.mp4", "movie-480.mp4"]),
+    ];
+
+    let (files, indices) = distinct_locations(&renditions);
+
+    assert_eq!(files.len(), 3, "the shared ad is one entry");
+    assert_eq!(files[0].0, LocationKey::RenditionClip("720p".to_owned(), 0));
+    assert_eq!(indices, vec![vec![0, 1], vec![0, 2]]);
+}
+
 /// Reassembles each clip from its init segment and media segments under `base`, and returns how
 /// many video frames `ffmpeg` decodes from each, failing on any decode error.
 async fn decode_each(
