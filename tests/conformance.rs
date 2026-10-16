@@ -560,12 +560,15 @@ struct Audited {
 }
 
 /// Checks a track's init and media segments against the declared segment durations (in track
-/// timescale ticks) and returns the raw bytes for further comparison.
+/// timescale ticks) and returns the raw bytes for further comparison. `first_sequence` is the
+/// `mfhd` number the first segment must carry: 1 for a whole presentation, and the clip's first
+/// global segment number plus one for a clip of a sequence.
 fn audit_track(
     kind: &str,
     init: &[u8],
     segments: Vec<Vec<u8>>,
     declared_start: Option<u64>,
+    first_sequence: u32,
     declared_ticks: impl Fn(usize, u32) -> u64,
 ) -> Audited {
     let init_info = parse_init(init);
@@ -587,14 +590,14 @@ fn audit_track(
         );
         assert_eq!(
             fragment.sequence as usize,
-            index + 1,
+            first_sequence as usize + index,
             "{kind} segment {index} sequence"
         );
         assert_eq!(
             fragment.decode_time, expected_start,
             "{kind} segment {index} must start where the previous one ended"
         );
-        if kind == "video" {
+        if kind.starts_with("video") {
             assert!(
                 fragment.first_sample_is_sync,
                 "video segment {index} must begin on a keyframe"
@@ -792,7 +795,7 @@ fn audit_hls(server: &Server, asset: &str) -> HashMap<String, Audited> {
             .iter()
             .map(|url| get_ok(server, url).body)
             .collect::<Vec<_>>();
-        let audit = audit_track(&kind, &init, segments, None, |index, timescale| {
+        let audit = audit_track(&kind, &init, segments, None, 1, |index, timescale| {
             (extinf[index] * f64::from(timescale)).round() as u64
         });
         audited.insert(kind, audit);
@@ -914,7 +917,7 @@ fn audit_dash(server: &Server, asset: &str) -> HashMap<String, Audited> {
                     get_ok(server, &resolve(&manifest_url, &media)).body
                 })
                 .collect::<Vec<_>>();
-            let audit = audit_track(&id, &init, segments, declared_start, |segment, _| {
+            let audit = audit_track(&id, &init, segments, declared_start, 1, |segment, _| {
                 durations[segment]
             });
             let seconds =
@@ -1409,4 +1412,39 @@ fn a_server_fed_by_a_mapper_serves_a_single_file() {
     let master = get_ok(&server, "/hls/single/master.m3u8");
 
     assert!(master.text().starts_with("#EXTM3U"));
+}
+
+#[test]
+fn a_track_audit_can_start_at_a_later_sequence_number() {
+    let server = start_server();
+    let tracks = audit_hls(&server, "aac");
+    let video = &tracks["video"];
+    let durations = video
+        .segments
+        .iter()
+        .map(|segment| parse_fragment(segment).duration())
+        .collect::<Vec<_>>();
+
+    // A segment numbered from 1 passes when it is expected to start at 1.
+    audit_track(
+        "video",
+        &video.init,
+        video.segments.clone(),
+        None,
+        1,
+        |index, _| durations[index],
+    );
+
+    // The same segments are refused when the clip they belong to would start at sequence 5.
+    let refused = std::panic::catch_unwind(|| {
+        audit_track(
+            "video",
+            &video.init,
+            video.segments.clone(),
+            None,
+            5,
+            |index, _| durations[index],
+        );
+    });
+    assert!(refused.is_err(), "a wrong first sequence number must fail");
 }
