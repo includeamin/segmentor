@@ -3,7 +3,7 @@
 CARGO ?= cargo
 MDBOOK ?= mdbook
 
-.PHONY: bench-compare unused-deps admin dev-up dev-down bench test-scripts bench-enforce conformance book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve demo site test deny
+.PHONY: browser-test bench-compare unused-deps admin dev-up dev-down bench test-scripts bench-enforce conformance book book-serve book-test build check ci clean doc doc-open fixtures fmt fmt-check fuzz fuzz-check install-doc-tools lint serve demo site test deny
 
 help: ## Show the available targets
 	@printf '%s\n' \
@@ -11,6 +11,7 @@ help: ## Show the available targets
 		'bench-enforce Like bench, but fail when a budget is missed' \
 		'bench-compare Compare vodnik with nginx-vod-module (needs Docker)' \
 		'conformance Run the black-box HLS/DASH conformance suite' \
+		'browser-test Play the harness assets in Chrome with hls.js and dash.js (needs Node and Google Chrome)' \
 		'test-scripts Test the release automation scripts and install.sh' \
 		'book       Build the mdBook documentation' \
 		'book-serve Build, serve, and watch the documentation' \
@@ -54,6 +55,10 @@ bench-enforce: ## Measure the performance budgets and fail on a miss
 
 conformance: ## Run the black-box HLS/DASH conformance suite
 	$(CARGO) test --test conformance
+
+browser-test: ## Play the harness assets in Chrome with hls.js and dash.js (needs Node and Google Chrome)
+	$(CARGO) build --locked --bin vodnik
+	cd tests/browser && npm ci --no-audit --no-fund && npx playwright test
 
 book: ## Build the mdBook documentation
 	$(MDBOOK) build
