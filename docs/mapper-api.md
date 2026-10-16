@@ -214,6 +214,41 @@ The server does not ask what kind a rendition is; it loads every one exactly as 
 
 A video rendition's own URL is `video-{id}`, for example `/hls/{asset}/video-{id}/index.m3u8`; the shared audio group stays `audio-{n}`, exactly as for a single-file asset. The HLS master playlist gains one `#EXT-X-STREAM-INF` per video rendition, sorted by bandwidth, all pointing at the shared audio group; the DASH manifest gains one `Representation` per video rendition. Sidecar subtitles and HLS I-frame playlists (the latter built from the lowest-bandwidth rendition only) both work the same as for a single-file asset.
 
+### Renditions that are sequences
+
+A rendition may give `clips` instead of `location`, so a pre-roll and a movie, or two programmes back to back, can be offered at several qualities and in several audio languages as one asset. Each clip is as in [Clips](#clips); `id`, `language`, `label` and `default` stay on the rendition. A player switches quality at any segment boundary, including across a clip boundary.
+
+```json
+{
+  "asset_id": "movie",
+  "version": "2026-10-16-a",
+  "renditions": [
+    { "id": "1080p", "clips": [
+      { "location": { "type": "http", "url": "https://origin.example.net/ad/1080.mp4" } },
+      { "location": { "type": "http", "url": "https://origin.example.net/m/1080.mp4" }, "from_ms": 0, "to_ms": 600000 }
+    ] },
+    { "id": "720p", "clips": [
+      { "location": { "type": "http", "url": "https://origin.example.net/ad/720.mp4" } },
+      { "location": { "type": "http", "url": "https://origin.example.net/m/720.mp4" }, "from_ms": 0, "to_ms": 600000 }
+    ] },
+    { "id": "audio-en", "language": "eng", "label": "English", "default": true, "clips": [
+      { "location": { "type": "http", "url": "https://origin.example.net/ad/en.m4a" } },
+      { "location": { "type": "http", "url": "https://origin.example.net/m/en.m4a" }, "from_ms": 0, "to_ms": 600000 }
+    ] }
+  ]
+}
+```
+
+- A rendition sets exactly one of `location` or `clips`, and an answer cannot mix the two kinds: every rendition has `clips`, or none does.
+- Every rendition lists the same number of clips, at most `limits.max_clips`, and together they name at most `limits.max_sequence_files` (default 256: the renditions times the clips). A larger answer is refused before any file is opened.
+- `tracks` goes on each clip, not on the rendition.
+- Clip *k* must be cut alike in every video rendition, as for a ladder: the same number of segments starting at the same instants, and the same length within one sample. A rendition must also have the same kind (video or audio only) and the same tracks and codecs in every clip. A mismatch fails the whole asset, naming the rendition and the clip.
+- Every rendition's clip *k* starts at the same position on the timeline, taken from the first video rendition listed, so a switch at a boundary lands on the same time.
+- To play one file in several clips or renditions, name it each time: a file is read once however many times it is named.
+- **Trimmed ladders.** A ladder whose renditions each have one clip is served as an ordinary adaptive asset with the usual URLs: this is how to trim an adaptive asset.
+- **Output.** The master playlist has one variant per video rendition, sorted by bandwidth. Each media playlist lists every clip with its own `#EXT-X-MAP` and an `#EXT-X-DISCONTINUITY` between clips, and the DASH manifest has one `Period` per clip. Init segments are `video-{id}/clips/{n}/init.mp4` and `audio-{n}/clips/{n}/init.mp4`, and the plain `{track}/init.mp4` does not exist. There are no I-frame playlists, as for any sequence.
+- **Not yet supported,** and refused with a message that points to [TDD 0016](technical-design/0016-adaptive-clips.md): `encryption`, `hls_aes128`, `source_encryption` and `subtitles` on such an answer, and a clip's own `encryption`.
+
 ## Clips
 
 Instead of a single `location`, an answer may list clips: each a file and an optional window of it. One clip trims a file. Two or more play back to back as one stream, even when they were encoded differently, for example a pre-roll ad followed by part of a movie.

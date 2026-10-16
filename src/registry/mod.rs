@@ -32,8 +32,8 @@ use crate::error::{Error, Result};
 use crate::mp4;
 use crate::observability::metrics::{CacheEvent, Metrics, ResolverOutcome};
 use crate::resolver::{
-    AssetLocation, AssetResolver, LocationKey, Resolution, ResolveError, ResolvedAsset,
-    SubtitleLocation,
+    AssetLocation, AssetResolver, LocationKey, RenditionSource, Resolution, ResolveError,
+    ResolvedAsset, SubtitleLocation,
 };
 use crate::sequence::{self, ClipFile};
 use crate::source::LocationRefresher;
@@ -830,10 +830,15 @@ impl AssetRegistry {
                         key: LocationKey::Rendition(rendition.id.clone()),
                         armed: AtomicBool::new(false),
                     });
+                    let RenditionSource::Location(location) = &rendition.source else {
+                        return Err(Error::InvalidMedia(
+                            "renditions with clips are not served yet".to_owned(),
+                        ));
+                    };
                     let source = registry
                         .opener
                         .open(
-                            &rendition.location,
+                            location,
                             Arc::clone(&refresher) as Arc<dyn LocationRefresher>,
                         )
                         .await?;

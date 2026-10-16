@@ -16,8 +16,8 @@ use tokio::time::sleep;
 
 use super::policy::{LocationPolicy, validate_relative_path};
 use super::{
-    AssetLocation, ClipLocation, RenditionLocation, Resolution, ResolveError, ResolvedAsset,
-    SubtitleLocation,
+    AssetLocation, ClipLocation, RenditionLocation, RenditionSource, Resolution, ResolveError,
+    ResolvedAsset, SubtitleLocation,
 };
 use crate::clip::{ClipWindow, MAX_CLIP_MS};
 use crate::config::Secret;
@@ -95,6 +95,8 @@ pub(crate) struct HttpResolver {
     policy: LocationPolicy,
     /// `limits.max_clips`: an answer listing more is malformed.
     max_clips: usize,
+    /// `limits.max_sequence_files`: renditions times clips may not exceed it (TDD 0016).
+    max_sequence_files: usize,
 }
 
 /// The JSON body of a `200` answer. Unknown fields are ignored so the contract can grow.
@@ -147,7 +149,12 @@ struct WireClip {
 #[derive(Debug, Deserialize)]
 struct WireRendition {
     id: String,
-    location: WireLocation,
+    /// One file; mutually exclusive with `clips` (TDD 0016).
+    #[serde(default)]
+    location: Option<WireLocation>,
+    /// A sequence of clips instead of one file (TDD 0016).
+    #[serde(default)]
+    clips: Vec<WireClip>,
     /// Which tracks of the file to serve (TDD 0015).
     #[serde(default)]
     tracks: Option<String>,
@@ -200,6 +207,7 @@ impl HttpResolver {
         settings: &MapperConfig,
         policy: LocationPolicy,
         max_clips: usize,
+        max_sequence_files: usize,
     ) -> crate::error::Result<Self> {
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -217,6 +225,7 @@ impl HttpResolver {
             settings: settings.clone(),
             policy,
             max_clips,
+            max_sequence_files,
         })
     }
 
@@ -493,6 +502,34 @@ impl HttpResolver {
                     ResolveError::Rejected(format!("rendition `{}`: {message}", entry.id))
                 })?;
             let audio = Self::interpret_audio_overrides(entry)?;
+            let source = match (&entry.location, entry.clips.is_empty()) {
+                (Some(location), true) => {
+                    RenditionSource::Location(self.interpret_location(location)?)
+                }
+                (None, false) => {
+                    if entry.tracks.is_some() {
+                        return reject(format!(
+                            "rendition `{}`: tracks belongs on each clip of a rendition that has clips",
+                            entry.id
+                        ));
+                    }
+                    RenditionSource::Clips(self.interpret_clips(&entry.clips).map_err(|error| {
+                        match error {
+                            ResolveError::Rejected(message) => ResolveError::Rejected(format!(
+                                "rendition `{}`: {message}",
+                                entry.id
+                            )),
+                            other => other,
+                        }
+                    })?)
+                }
+                _ => {
+                    return reject(format!(
+                        "rendition `{}` must set exactly one of location or clips",
+                        entry.id
+                    ));
+                }
+            };
             if audio.as_ref().is_some_and(|audio| audio.default)
                 && renditions.iter().any(|known: &RenditionLocation| {
                     known.audio.as_ref().is_some_and(|audio| audio.default)
@@ -502,12 +539,49 @@ impl HttpResolver {
             }
             renditions.push(RenditionLocation {
                 id: entry.id.clone(),
-                location: self.interpret_location(&entry.location)?,
+                source,
                 tracks,
                 audio,
             });
         }
+        self.check_rendition_clips(&renditions)?;
         Ok(renditions)
+    }
+
+    /// Renditions that are sequences (TDD 0016): none may sit beside one that is a single file,
+    /// all have the same number of clips, and together they name at most
+    /// `limits.max_sequence_files` files.
+    fn check_rendition_clips(&self, renditions: &[RenditionLocation]) -> Result<(), ResolveError> {
+        let counts = renditions
+            .iter()
+            .filter_map(|rendition| match &rendition.source {
+                RenditionSource::Clips(clips) => Some((rendition.id.as_str(), clips.len())),
+                RenditionSource::Location(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let Some(&(first_id, first_count)) = counts.first() else {
+            return Ok(());
+        };
+        if counts.len() != renditions.len() {
+            return Err(ResolveError::Rejected(
+                "renditions that have clips cannot be mixed with renditions that have a location"
+                    .to_owned(),
+            ));
+        }
+        if let Some(&(id, count)) = counts.iter().find(|&&(_, count)| count != first_count) {
+            return Err(ResolveError::Rejected(format!(
+                "rendition `{id}` has {count} clips but `{first_id}` has {first_count}"
+            )));
+        }
+        let files = counts.len().saturating_mul(first_count);
+        if files > self.max_sequence_files {
+            return Err(ResolveError::Rejected(format!(
+                "mapper listed {files} files across renditions and clips, more than \
+                 limits.max_sequence_files ({})",
+                self.max_sequence_files
+            )));
+        }
+        Ok(())
     }
 
     /// A rendition's `language`, `label` and `default`, checked; `None` when it sets none.
@@ -629,6 +703,53 @@ impl HttpResolver {
         Ok(encryption)
     }
 
+    /// What stage 1 of TDD 0016 does not serve with renditions that have clips: encryption of any
+    /// kind, and subtitles. Each is refused with a message that points to the design.
+    fn refuse_unsupported_with_rendition_clips(
+        wire: &Wire,
+        renditions: &[RenditionLocation],
+    ) -> Result<(), ResolveError> {
+        if !renditions
+            .iter()
+            .any(|rendition| matches!(rendition.source, RenditionSource::Clips(_)))
+        {
+            return Ok(());
+        }
+        let refuse = |what: &str| {
+            Err(ResolveError::Rejected(format!(
+                "{what} is not supported yet with renditions that have clips (TDD 0016)"
+            )))
+        };
+        if !wire.subtitles.is_empty() {
+            return refuse("subtitles");
+        }
+        if wire.encryption.is_some() {
+            return refuse("encryption");
+        }
+        if wire.hls_aes128.is_some() {
+            return refuse("hls_aes128");
+        }
+        if wire.source_encryption.is_some() {
+            return refuse("source_encryption");
+        }
+        let encrypted_clip = renditions
+            .iter()
+            .find_map(|rendition| match &rendition.source {
+                RenditionSource::Clips(clips) => clips
+                    .iter()
+                    .position(|clip| clip.encryption.is_some())
+                    .map(|position| (rendition.id.as_str(), position)),
+                RenditionSource::Location(_) => None,
+            });
+        if let Some((id, position)) = encrypted_clip {
+            return Err(ResolveError::Rejected(format!(
+                "rendition `{id}`: clip {position}: encryption is not supported yet with \
+                 renditions that have clips (TDD 0016)"
+            )));
+        }
+        Ok(())
+    }
+
     /// Validates a `200` answer against the request and the location policy.
     fn interpret(
         &self,
@@ -667,6 +788,7 @@ impl HttpResolver {
             // begins; cues written for it would drift by up to a GOP (TDD 0008, "Deferred").
             return reject("subtitles cannot be combined with clips");
         }
+        Self::refuse_unsupported_with_rendition_clips(&wire, &renditions)?;
         let subtitles = self.interpret_subtitles(&wire.subtitles)?;
 
         let now = Instant::now();
@@ -803,5 +925,213 @@ mod tests {
 
         assert!(!message.contains(key), "{message}");
         assert!(message.contains("line"), "{message}");
+    }
+
+    use serde_json::{Value, json};
+
+    use crate::config::RemoteMediaConfig;
+
+    const KEY_ID: &str = "0123456789abcdef0123456789abcdef";
+    const KEY: &str = "00112233445566778899aabbccddeeff";
+
+    fn resolver(max_clips: usize, max_sequence_files: usize) -> HttpResolver {
+        let settings = MapperConfig {
+            base_url: "https://mapper.invalid".to_owned(),
+            bearer_token: None,
+            bearer_token_file: None,
+            bearer_token_reload_ms: 0,
+            connect_timeout_ms: 1000,
+            request_timeout_ms: 1000,
+            max_retries: 0,
+            max_response_bytes: 65536,
+            default_ttl_ms: 300_000,
+            min_ttl_ms: 1000,
+            max_ttl_ms: 3_600_000,
+            negative_ttl_ms: 1000,
+            error_ttl_ms: 1000,
+            stale_if_error_ms: 0,
+            refresh_margin_ms: 30_000,
+            readiness_probe_interval_ms: 0,
+        };
+        HttpResolver::new(
+            &settings,
+            LocationPolicy::new(&RemoteMediaConfig::default()),
+            max_clips,
+            max_sequence_files,
+        )
+        .expect("the test settings are valid")
+    }
+
+    fn clip(path: &str) -> Value {
+        json!({ "location": { "type": "file", "path": path } })
+    }
+
+    fn clips_rendition(id: &str, paths: &[&str]) -> Value {
+        json!({ "id": id, "clips": paths.iter().map(|path| clip(path)).collect::<Vec<_>>() })
+    }
+
+    fn answer(renditions: &[Value]) -> Value {
+        json!({ "asset_id": "movie", "version": "v1", "renditions": renditions })
+    }
+
+    fn interpret(resolver: &HttpResolver, answer: &Value) -> Result<ResolvedAsset, ResolveError> {
+        let wire = parse_answer(answer.to_string().as_bytes())?;
+        resolver.interpret("movie", wire, None)
+    }
+
+    fn rejected(result: Result<ResolvedAsset, ResolveError>) -> String {
+        match result {
+            Err(ResolveError::Rejected(message)) => message,
+            other => panic!("expected the answer to be rejected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_rendition_may_have_clips_instead_of_a_location() {
+        let mut english = clips_rendition("en", &["ad-en.m4a", "movie-en.m4a"]);
+        english["language"] = json!("eng");
+        english["label"] = json!("English");
+        english["default"] = json!(true);
+        let answer = answer(&[clips_rendition("720p", &["ad.mp4", "movie.mp4"]), english]);
+
+        let resolved = interpret(&resolver(64, 256), &answer).unwrap();
+
+        assert_eq!(resolved.renditions.len(), 2);
+        for rendition in &resolved.renditions {
+            let RenditionSource::Clips(clips) = &rendition.source else {
+                panic!("rendition `{}` should have clips", rendition.id);
+            };
+            assert_eq!(clips.len(), 2);
+        }
+        let audio = resolved.renditions[1].audio.as_ref().unwrap();
+        assert_eq!(audio.language.as_deref(), Some("eng"));
+        assert_eq!(audio.label.as_deref(), Some("English"));
+        assert!(audio.default);
+    }
+
+    #[test]
+    fn a_rendition_with_both_or_neither_of_location_and_clips_is_rejected() {
+        let mut both = clips_rendition("a", &["x.mp4"]);
+        both["location"] = json!({ "type": "file", "path": "x.mp4" });
+        let message = rejected(interpret(&resolver(64, 256), &answer(&[both])));
+        assert!(
+            message.contains("rendition `a` must set exactly one of location or clips"),
+            "{message}"
+        );
+
+        let message = rejected(interpret(
+            &resolver(64, 256),
+            &answer(&[json!({ "id": "a" })]),
+        ));
+        assert!(
+            message.contains("rendition `a` must set exactly one of location or clips"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn renditions_with_clips_and_renditions_with_a_location_cannot_mix() {
+        let located = json!({ "id": "b", "location": { "type": "file", "path": "b.mp4" } });
+        let message = rejected(interpret(
+            &resolver(64, 256),
+            &answer(&[clips_rendition("a", &["x.mp4"]), located]),
+        ));
+        assert!(message.contains("cannot be mixed"), "{message}");
+    }
+
+    #[test]
+    fn renditions_with_clips_must_have_equal_clip_counts() {
+        let message = rejected(interpret(
+            &resolver(64, 256),
+            &answer(&[
+                clips_rendition("a", &["x.mp4", "y.mp4"]),
+                clips_rendition("b", &["z.mp4"]),
+            ]),
+        ));
+        assert!(
+            message.contains("rendition `b` has 1 clips but `a` has 2"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn tracks_on_a_rendition_with_clips_is_rejected() {
+        let mut rendition = clips_rendition("a", &["x.mp4"]);
+        rendition["tracks"] = json!("v1");
+        let message = rejected(interpret(&resolver(64, 256), &answer(&[rendition])));
+        assert!(message.contains("tracks belongs on each clip"), "{message}");
+    }
+
+    #[test]
+    fn more_files_than_max_sequence_files_is_rejected_before_any_fetch() {
+        let renditions: Vec<Value> = ["a", "b", "c"]
+            .iter()
+            .map(|id| clips_rendition(id, &["x.mp4", "y.mp4"]))
+            .collect();
+        let message = rejected(interpret(&resolver(64, 4), &answer(&renditions)));
+        assert!(
+            message.contains(
+                "mapper listed 6 files across renditions and clips, more than \
+                 limits.max_sequence_files (4)"
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn clips_per_rendition_obey_max_clips() {
+        let message = rejected(interpret(
+            &resolver(1, 256),
+            &answer(&[clips_rendition("a", &["x.mp4", "y.mp4"])]),
+        ));
+        assert!(message.contains("rendition `a`: "), "{message}");
+        assert!(message.contains("limits.max_clips"), "{message}");
+    }
+
+    #[test]
+    fn stage_one_refuses_encryption_and_subtitles_with_rendition_clips() {
+        let base = || answer(&[clips_rendition("a", &["x.mp4"])]);
+        let encryption = json!({
+            "scheme": "cbcs",
+            "keys": [{ "key_id": KEY_ID, "key": KEY }],
+            "systems": [{ "system_id": "e2719d58-a985-b3c9-781a-b030af78d30e", "license_url": "https://l.example.net/ck" }],
+        });
+        let mut cases = Vec::new();
+        let mut answer_encryption = base();
+        answer_encryption["encryption"] = encryption.clone();
+        cases.push(("encryption", answer_encryption));
+        let mut aes128 = base();
+        aes128["hls_aes128"] = json!({ "key": KEY, "key_uri": "https://keys.example.com/k" });
+        cases.push(("hls_aes128", aes128));
+        let mut source = base();
+        source["source_encryption"] = json!({ "keys": [{ "key_id": KEY_ID, "key": KEY }] });
+        cases.push(("source_encryption", source));
+        let mut subtitles = base();
+        subtitles["subtitles"] = json!([{
+            "language": "en",
+            "label": "EN",
+            "location": { "type": "file", "path": "s.vtt" },
+        }]);
+        cases.push(("subtitles", subtitles));
+        let mut clip_encryption = base();
+        clip_encryption["renditions"][0]["clips"][0]["encryption"] = encryption;
+        cases.push(("a clip's encryption", clip_encryption));
+
+        for (name, answer) in cases {
+            let message = rejected(interpret(&resolver(64, 256), &answer));
+            assert!(message.contains("TDD 0016"), "{name}: {message}");
+        }
+    }
+
+    #[test]
+    fn a_clip_error_names_its_rendition() {
+        let mut second = clips_rendition("b", &["x.mp4", "y.mp4"]);
+        second["clips"][1]["from_ms"] = json!(500);
+        second["clips"][1]["to_ms"] = json!(100);
+        let message = rejected(interpret(
+            &resolver(64, 256),
+            &answer(&[clips_rendition("a", &["x.mp4", "y.mp4"]), second]),
+        ));
+        assert!(message.contains("rendition `b`: clip 1"), "{message}");
     }
 }
