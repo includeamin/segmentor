@@ -1,0 +1,14 @@
+{
+  "name": "vodnik-browser-tests",
+  "private": true,
+  "description": "Plays vodnik's HLS and DASH output in a real browser with hls.js and dash.js (docs/technical-design/0017-verification-harness.md).",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "dashjs": "5.2.1",
+    "hls.js": "1.7.3"
+  }
+}
