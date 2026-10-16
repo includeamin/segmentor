@@ -383,30 +383,30 @@ fn index_duration_seconds(index: &crate::media::MediaIndex) -> f64 {
 
 /// One video rendition, holding its own fully-loaded, independently cacheable asset.
 #[derive(Debug)]
-struct VideoEntry {
-    id: String,
-    asset: Arc<PackagedAsset>,
+pub(crate) struct VideoEntry {
+    pub(crate) id: String,
+    pub(crate) asset: Arc<PackagedAsset>,
 }
 
 /// One audio-only rendition, contributing one or more tracks to the shared audio group.
 #[derive(Debug)]
-struct AudioOnlyEntry {
-    id: String,
-    asset: Arc<PackagedAsset>,
+pub(crate) struct AudioOnlyEntry {
+    pub(crate) id: String,
+    pub(crate) asset: Arc<PackagedAsset>,
 }
 
 /// Where one member of the external `audio-{n}` group actually lives.
 #[derive(Debug, Clone, Copy)]
-enum AudioOwner {
+pub(crate) enum AudioOwner {
     Video(usize),
     Dedicated(usize),
 }
 
 #[derive(Debug)]
-struct AudioEntry {
-    owner: AudioOwner,
+pub(crate) struct AudioEntry {
+    pub(crate) owner: AudioOwner,
     /// That owner's own internal key for this track (its own `audio-{m}`, not renumbered).
-    internal_key: TrackKey,
+    pub(crate) internal_key: TrackKey,
 }
 
 #[derive(Debug, Default)]
@@ -634,15 +634,39 @@ fn pick_iframe_source(video: &[VideoEntry], version: &str) -> usize {
         .map_or(0, |(index, _)| index)
 }
 
+/// The renditions of one adaptive asset, or of one clip of an adaptive sequence (TDD 0016),
+/// checked and sorted: the video renditions, the audio-only renditions, and the shared audio group.
+#[derive(Debug)]
+pub(crate) struct ClipGrid {
+    pub(crate) video: Vec<VideoEntry>,
+    pub(crate) audio_only: Vec<AudioOnlyEntry>,
+    pub(crate) audio: Vec<AudioEntry>,
+}
+
+/// Classifies every loaded rendition, checks that the video renditions can be switched between,
+/// and builds the shared audio group. Rendering is left to the caller.
+pub(crate) fn prepare_clip(renditions: Vec<(String, PackagedAsset)>) -> Result<ClipGrid> {
+    let (video, audio_only) = classify_renditions(renditions)?;
+    check_alignment(&video)?;
+    check_key_periods(&video)?;
+    let audio = build_audio_group(&video, &audio_only);
+    Ok(ClipGrid {
+        video,
+        audio_only,
+        audio,
+    })
+}
+
 pub(crate) fn assemble(
     renditions: Vec<(String, PackagedAsset)>,
     subtitles: Vec<Subtitle>,
     mapper_version: &str,
 ) -> Result<CompositeAsset> {
-    let (video, audio_only) = classify_renditions(renditions)?;
-    check_alignment(&video)?;
-    check_key_periods(&video)?;
-    let audio = build_audio_group(&video, &audio_only);
+    let ClipGrid {
+        video,
+        audio_only,
+        audio,
+    } = prepare_clip(renditions)?;
     let version = version_of(&video, &audio_only, &subtitles, mapper_version);
     let iframe_source = pick_iframe_source(&video, &version);
     let rendered = render(
@@ -754,7 +778,7 @@ fn periods_agree(starts: &[(&str, Vec<u32>)]) -> Result<()> {
 
 /// The longest single sample of a rendition's video track, in milliseconds: the tolerance one
 /// segment boundary is allowed to drift by against another rendition's.
-fn sample_tolerance_ms(entry: &VideoEntry) -> Result<i128> {
+pub(crate) fn sample_tolerance_ms(entry: &VideoEntry) -> Result<i128> {
     let track = entry
         .asset
         .presentation()
@@ -1010,6 +1034,37 @@ fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn loaded(name: &str) -> PackagedAsset {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        PackagedAsset::load_local(path, 1000, &crate::config::LimitsConfig::default())
+            .await
+            .expect("the fixture loads")
+    }
+
+    #[tokio::test]
+    async fn prepare_clip_checks_alignment_and_builds_the_audio_group() {
+        let grid = prepare_clip(vec![
+            ("720p".to_owned(), loaded("rendition-720p.mp4").await),
+            ("480p".to_owned(), loaded("rendition-480p.mp4").await),
+            ("en".to_owned(), loaded("rendition-audio-en.m4a").await),
+        ])
+        .unwrap();
+
+        assert_eq!(grid.video.len(), 2);
+        assert_eq!(grid.audio_only.len(), 1);
+        assert_eq!(grid.audio.len(), 1);
+
+        let error = prepare_clip(vec![
+            ("720p".to_owned(), loaded("rendition-720p.mp4").await),
+            ("odd".to_owned(), loaded("rendition-misaligned.mp4").await),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("720p") && error.contains("odd"), "{error}");
+    }
 
     #[test]
     fn renditions_that_start_every_period_together_agree() {
