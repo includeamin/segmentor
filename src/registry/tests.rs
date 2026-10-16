@@ -6594,3 +6594,41 @@ async fn a_label_that_cannot_be_written_into_xml_is_a_bad_answer() {
         );
     }
 }
+
+/// The audio group is numbered `audio-1`, `audio-2`, ... across the audio renditions, but each
+/// audio rendition holds its track under its own key, so the init segment of the second one has to
+/// be looked up under the key it has inside, as its segments are.
+#[tokio::test]
+async fn the_init_segment_of_a_second_audio_rendition_is_served() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "languages",
+        Answer::renditions(
+            "v1",
+            &[
+                ("720p", "rendition-720p.mp4"),
+                ("en", "rendition-audio-en.m4a"),
+                ("es", "rendition-audio-es.m4a"),
+            ],
+        ),
+    );
+    let version = version_in(&fetch(&h.app, "/hls/languages/master.m3u8").await.2);
+
+    for protocol in ["hls", "dash"] {
+        for audio in ["audio-1", "audio-2"] {
+            let init = fetch(
+                &h.app,
+                &format!("/{protocol}/languages/{audio}/init.mp4?v={version}"),
+            )
+            .await;
+            assert_eq!(init.0, StatusCode::OK, "{protocol} {audio} init");
+            assert_eq!(&init.2[4..8], b"ftyp", "{protocol} {audio} init");
+        }
+        let segment = status(
+            &h.app,
+            &format!("/{protocol}/languages/audio-2/segments/0/media.m4s?v={version}"),
+        )
+        .await;
+        assert_eq!(segment, StatusCode::OK, "{protocol} audio-2 segment");
+    }
+}

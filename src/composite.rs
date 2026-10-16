@@ -152,7 +152,12 @@ impl ServedAsset {
                 }
                 asset.init_segment(key)
             }
-            Self::Composite(asset) => asset.resolve(rendition, key)?.0.init_segment(key),
+            Self::Composite(asset) => {
+                // The track is asked for under the key it has inside the asset that holds it,
+                // which differs from the external `audio-{n}` for all but the first audio rendition.
+                let (source, key) = asset.resolve(rendition, key)?;
+                source.init_segment(key)
+            }
             Self::Sequence(_) | Self::AdaptiveSequence(_) => {
                 Err(Error::NotFound("a sequence's init segments are per clip"))
             }
