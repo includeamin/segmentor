@@ -40,6 +40,9 @@ pub(crate) struct LimitsConfig {
     pub(crate) max_renditions: usize,
     /// Clips one answer may list (TDD 0008).
     pub(crate) max_clips: usize,
+    /// Files one answer may name across all renditions that are sequences, which is the number of
+    /// renditions times the number of clips (TDD 0016).
+    pub(crate) max_sequence_files: usize,
 }
 
 impl LimitsConfig {
@@ -69,6 +72,7 @@ impl LimitsConfig {
             || self.max_subtitles_total_bytes == 0
             || self.max_renditions == 0
             || self.max_clips == 0
+            || self.max_sequence_files == 0
         {
             return Err(Error::Configuration(
                 "all resource limits must be greater than zero".to_owned(),
@@ -107,6 +111,7 @@ impl Default for LimitsConfig {
             max_subtitles_total_bytes: 8 * 1024 * 1024,
             max_renditions: 8,
             max_clips: 64,
+            max_sequence_files: 256,
         }
     }
 }
