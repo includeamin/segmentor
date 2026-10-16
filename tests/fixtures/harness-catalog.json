@@ -1,6 +1,144 @@
 {
   "single": {
     "version": "v1",
-    "location": { "type": "file", "path": "h264-aac.mp4" }
+    "location": {
+      "type": "file",
+      "path": "h264-aac.mp4"
+    }
+  },
+  "ladder": {
+    "version": "v1",
+    "renditions": [
+      {
+        "id": "720p",
+        "location": {
+          "type": "file",
+          "path": "rendition-720p.mp4"
+        }
+      },
+      {
+        "id": "480p",
+        "location": {
+          "type": "file",
+          "path": "rendition-480p.mp4"
+        }
+      },
+      {
+        "id": "en",
+        "location": {
+          "type": "file",
+          "path": "rendition-audio-en.m4a"
+        }
+      }
+    ]
+  },
+  "preroll": {
+    "version": "v1",
+    "clips": [
+      {
+        "location": {
+          "type": "file",
+          "path": "rendition-480p.mp4"
+        }
+      },
+      {
+        "location": {
+          "type": "file",
+          "path": "rendition-720p.mp4"
+        },
+        "from_ms": 1500
+      }
+    ]
+  },
+  "grid": {
+    "version": "v1",
+    "renditions": [
+      {
+        "id": "720p",
+        "clips": [
+          {
+            "location": {
+              "type": "file",
+              "path": "rendition-720p.mp4"
+            },
+            "to_ms": 1000
+          },
+          {
+            "location": {
+              "type": "file",
+              "path": "rendition-720p.mp4"
+            },
+            "from_ms": 1000
+          }
+        ]
+      },
+      {
+        "id": "480p",
+        "clips": [
+          {
+            "location": {
+              "type": "file",
+              "path": "rendition-480p.mp4"
+            },
+            "to_ms": 1000
+          },
+          {
+            "location": {
+              "type": "file",
+              "path": "rendition-480p.mp4"
+            },
+            "from_ms": 1000
+          }
+        ]
+      },
+      {
+        "id": "en",
+        "clips": [
+          {
+            "location": {
+              "type": "file",
+              "path": "rendition-audio-en.m4a"
+            },
+            "to_ms": 1000
+          },
+          {
+            "location": {
+              "type": "file",
+              "path": "rendition-audio-en.m4a"
+            },
+            "from_ms": 1000
+          }
+        ]
+      }
+    ]
+  },
+  "trimmed": {
+    "version": "v1",
+    "renditions": [
+      {
+        "id": "720p",
+        "clips": [
+          {
+            "location": {
+              "type": "file",
+              "path": "rendition-720p.mp4"
+            },
+            "to_ms": 2000
+          }
+        ]
+      },
+      {
+        "id": "480p",
+        "clips": [
+          {
+            "location": {
+              "type": "file",
+              "path": "rendition-480p.mp4"
+            },
+            "to_ms": 2000
+          }
+        ]
+      }
+    ]
   }
 }
