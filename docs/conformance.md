@@ -4,7 +4,7 @@ The service's HLS and DASH output is checked by an automated black-box suite, an
 
 ## The automated suite
 
-`tests/conformance.rs` starts the real binary against every fixture below and audits what a player would fetch. Run it with `make conformance` (it also runs under `make test` and in CI).
+`tests/conformance.rs` starts the real binary against every fixture below, and against assets served through a mapper, and audits what a player would fetch. Run it with `make conformance` (it also runs under `make test` and in CI).
 
 Fixtures: the main H.264/AAC file, the same with `moov` after `mdat`, video only, 44.1 kHz stereo audio, and variable frame timing; FFmpeg's default edit lists and a delayed audio track; two audio tracks; non-square pixels with tagged colour; a QuickTime file; HEVC, VP9, AV1; AC-3, E-AC-3, Opus, and FLAC audio; and audio-only files with one and two tracks. Every reassembled track is decoded by FFmpeg without errors and its packet count compared with the source.
 
@@ -43,7 +43,37 @@ Byte ranges (`bytes=a-b`, suffix `bytes=-n`), `Accept-Ranges`, `ETag`, `If-None-
 
 When FFprobe and FFmpeg are installed, each track is reassembled (init plus segments), decoded with `ffmpeg -v error` with no errors, and its packet count is compared with the source file's.
 
-The suite was mutation-checked: making the fragment sequence numbers start at 2 fails it immediately.
+### Assets served through a mapper
+
+The fixtures above come from a static catalog of single files, which cannot express renditions or clips. A second set of tests starts `examples/mapper` on a free port, with `tests/fixtures/harness-catalog.json`, and a server that resolves its assets from it, so these are audited out of process too:
+
+| Asset | What it is |
+| --- | --- |
+| `ladder` | Two video renditions and an audio rendition ([TDD 0006](technical-design/0006-trick-play-subtitles-and-renditions.md)) |
+| `preroll` | A sequence of two clips of different files ([TDD 0008](technical-design/0008-clipping-and-concatenation.md)) |
+| `grid` | Renditions that are sequences ([TDD 0016](technical-design/0016-adaptive-clips.md)), each cut at 1000 ms, which is before the second keyframe because a video clip starts on the keyframe at or before its window |
+| `trimmed` | A ladder with one clip per rendition |
+
+Both protocols are followed clip by clip: each `EXT-X-MAP` in a playlist and each `Period` in a manifest is a clip. On top of the per-track rules above:
+
+- segment numbers continue across clips, every clip has its own init segment, and a presentation of one clip has a plain one;
+- a discontinuity precedes every clip but the first, and nothing else;
+- each clip starts where the one before ended, within 40 ms;
+- the video renditions have the same clips, the same number of segments in each, and start each clip together, within 40 ms;
+- each audio track has the video's clips, starts each within 50 ms of the video, and is within 100 ms of its length, which is what shows an audio clip cut from a different instant of its source than the video's;
+- every period has the same representations, and a period's `presentationTimeOffset` is where its first fragment starts (an audio clip may start up to 50 ms later, at its first frame);
+- HLS and DASH serve byte-identical init and media segments for every clip of every track;
+- FFmpeg decodes every clip of every track on its own, since it cannot judge a sequence as one stream.
+
+### Mutation checks
+
+Each audit was checked by breaking the server and confirming that the suite fails, then restoring it (2026-10-16):
+
+| Mutation | Caught by |
+| --- | --- |
+| The fragment sequence numbers start at 2 | The fixture audit, the mapper-driven audit, and both decode tests |
+| Audio-only clips are cut from the mapper's own window instead of the video's span (the bug found in the review of TDD 0016) | `a_grid_cut_mid_gop_conforms` and the mapper decode test |
+| The second DASH period lacks a representation | `a_grid_cut_mid_gop_conforms` |
 
 ## What is not covered
 

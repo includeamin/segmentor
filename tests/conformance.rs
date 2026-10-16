@@ -1871,3 +1871,53 @@ fn check_presentation(
         }
     }
 }
+
+/// FFmpeg cannot judge a sequence as one stream (its HLS demuxer keeps the first init segment's
+/// settings across an `EXT-X-MAP` change), so every clip of every track is reassembled from its own
+/// init segment and segments and decoded on its own, as the in-process tests do.
+#[test]
+fn every_clip_of_every_mapper_asset_decodes() {
+    if Command::new("ffprobe").arg("-version").output().is_err() {
+        eprintln!("skipping: ffprobe is not installed");
+        return;
+    }
+    let server = start_server_with_mapper();
+    let directory = root().join("target/conformance/mapper-reassembled");
+    fs::create_dir_all(&directory).unwrap();
+    let mut decoded = 0;
+    for (asset, _, _) in MAPPER_ASSETS {
+        for (track, clips) in audit_hls_clips(&server, asset) {
+            for (position, clip) in clips.iter().enumerate() {
+                let path = directory.join(format!("{asset}-{track}-{position}.mp4"));
+                let mut bytes = clip.audited.init.clone();
+                for segment in &clip.audited.segments {
+                    bytes.extend_from_slice(segment);
+                }
+                fs::write(&path, bytes).unwrap();
+                let output = Command::new("ffmpeg")
+                    .args(["-v", "error", "-i"])
+                    .arg(&path)
+                    .args(["-f", "null", "-"])
+                    .output()
+                    .expect("ffmpeg should run next to ffprobe");
+                assert!(
+                    output.stderr.is_empty(),
+                    "{asset}/{track} clip {position} decode errors: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let selector = if track.starts_with("video") {
+                    "v:0"
+                } else {
+                    "a:0"
+                };
+                assert!(
+                    probe_frames(&path, selector) > 0,
+                    "{asset}/{track} clip {position} decodes to nothing"
+                );
+                decoded += 1;
+            }
+        }
+    }
+    // ladder 3 tracks x 1 clip, preroll 2 x 2, grid 3 x 2, trimmed 3 x 1.
+    assert_eq!(decoded, 3 + 4 + 6 + 3);
+}
