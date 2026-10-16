@@ -1,12 +1,13 @@
 import { test, expect } from '@playwright/test';
-import { ASSETS, PLAYERS, errors, manifestDuration, play, reach, reachEnd, reachNearEnd, state } from './helpers.js';
+import { ASSETS, FAST, PLAYERS, errors, manifestDuration, play, reach, reachEnd, reachNearEnd, state } from './helpers.js';
 
 // What a viewer does: press play, let it run, jump around. Each is checked for every kind of
 // asset the server can serve, under both players, and none may raise a player error.
 //
-// KNOWN: what these specs found, and have left failing on purpose. A test listed here is marked
-// as an expected failure, so it fails the run if it ever starts passing, and the entry must go.
-// Evidence and what was ruled out are in docs/conformance.md ("Found by the browser suite").
+// KNOWN: what these specs found, and have left unfixed on purpose. A listed test checks that the
+// specific symptom is still there, and passes only then: any other failure (it does not start, a
+// player error, a fatal 404) still fails the run, and so does the symptom going away, when the
+// entry must go. A blanket expected failure would absorb every one of those. Evidence and what was ruled out are in docs/conformance.md ("Found by the browser suite").
 const KNOWN = {
   'hls preroll ends':
     'hls.js never fires `ended` on a sequence of files: it stops 35 ms short of the end with a bufferStalledError, and its main stream never reaches ENDED',
@@ -23,10 +24,8 @@ const KNOWN = {
 const INTERMITTENT = new Set(['hls grid ends', 'hls grid plays all of it']);
 const tag = (player, asset, name) => (INTERMITTENT.has(`${player} ${asset} ${name}`) ? ' @intermittent' : '');
 
-function expectKnown(test, player, asset, name) {
-  const reason = KNOWN[`${player} ${asset} ${name}`];
-  if (reason) test.fail(true, reason);
-}
+const knownReason = (player, asset, name) => KNOWN[`${player} ${asset} ${name}`];
+const gone = (reason) => `the known problem is gone, so remove its entry from KNOWN: ${reason}`;
 
 for (const player of Object.keys(PLAYERS)) {
   for (const [asset, clips] of Object.entries(ASSETS)) {
@@ -38,18 +37,25 @@ for (const player of Object.keys(PLAYERS)) {
       });
 
       test(`ends for the length the manifest states${tag(player, asset, 'ends')}`, async ({ page, request }) => {
-        expectKnown(test, player, asset, 'ends');
+        const known = knownReason(player, asset, 'ends');
         const expected = await manifestDuration(request, asset);
         await play(page, player, asset);
+        if (known) {
+          // The symptom: it gets to the end and never says so.
+          await reachNearEnd(page);
+          await page.waitForTimeout(3000);
+          expect((await state(page)).everEnded, gone(known)).toBe(false);
+          return;
+        }
         await reachEnd(page);
 
         const end = await state(page);
-        expect(Math.abs(end.duration - expected), `duration ${end.duration} against ${expected}`).toBeLessThan(0.25);
+        expect(Math.abs(end.duration - expected), `duration ${end.duration} against ${expected}`).toBeLessThan(0.2);
         expect(await errors(page)).toEqual([]);
       });
 
       test(`plays all of it${tag(player, asset, 'plays all of it')}`, async ({ page }) => {
-        expectKnown(test, player, asset, 'plays all of it');
+        const known = knownReason(player, asset, 'plays all of it');
         await play(page, player, asset);
         await reach(page, 0.5);
         const { duration } = await state(page);
@@ -61,8 +67,13 @@ for (const player of Object.keys(PLAYERS)) {
         const { played } = await state(page);
         const covered = played.reduce((total, [from, to]) => total + (to - from), 0);
         const allowed = 0.15 + 0.08 * (clips - 1);
-        expect(duration - covered, `played ${JSON.stringify(played)} of ${duration}`).toBeLessThan(allowed);
         expect(await errors(page)).toEqual([]);
+        const missing = duration - covered;
+        if (known) {
+          expect(missing, gone(known)).toBeGreaterThanOrEqual(allowed);
+          return;
+        }
+        expect(missing, `played ${JSON.stringify(played)} of ${duration}`).toBeLessThan(allowed);
       });
 
       test('seeks to the middle and near the end', async ({ page }) => {
@@ -75,6 +86,11 @@ for (const player of Object.keys(PLAYERS)) {
         for (const target of [duration * 0.6, duration - 0.5]) {
           await page.evaluate(() => window.harness.pause());
           await page.evaluate((seconds) => window.harness.seek(seconds), target);
+          // The seek has to land where it was sent, not merely be followed by playback: a short
+          // asset reaches any target soon enough on its own.
+          await expect
+            .poll(async () => Math.abs((await state(page)).time - target), { message: `the seek lands on ${target}`, intervals: FAST })
+            .toBeLessThan(0.25);
           await page.evaluate(() => window.harness.resume());
           await reach(page, target + 0.2);
         }
