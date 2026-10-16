@@ -120,7 +120,7 @@ The version hashes the mapper's `version` with every (rendition, clip) pair's co
 
 ### The mapping adapter
 
-[TDD 0015](0015-vod-module-mapping-adapter.md) refuses "several sequences, any with several pieces or a window". With this design that row becomes: several sequences with the **same number of pieces** become renditions with `clips`; the set-level `durations` apply to every sequence, as they already do for one, and a differing piece count is refused with the JSON path of the second sequence. `language`, `label` and `default` stay rendition overrides. Captions beside clips remain refused, because subtitles cannot be combined with clips.
+The translator of [TDD 0015](0015-vod-module-mapping-adapter.md) is not built yet; this is what it will do once it is. It refuses "several sequences, any with several pieces or a window". With this design that row becomes: several sequences with the **same number of pieces** become renditions with `clips`; the set-level `durations` apply to every sequence, as they already do for one, and a differing piece count is refused with the JSON path of the second sequence. `language`, `label` and `default` stay rendition overrides. Captions beside clips remain refused, because subtitles cannot be combined with clips.
 
 ## Security and limits
 
@@ -139,14 +139,14 @@ The version hashes the mapper's `version` with every (rendition, clip) pair's co
 - **Unit.** Wire parsing and every rejection above, one test each. Clip count mismatch, mixed `location` and `clips`, a clip's length or segment starts disagreeing across renditions, a rendition that is video in one clip and audio-only in the next, an audio group that differs between clips, and the total-files cap.
 - **Golden.** HLS master, media and DASH output for a 2 renditions by 2 clips ladder with a separate audio rendition, checked in as text; the output is byte-stable.
 - **Decode.** With `FFmpeg`, as the conformance suite does: every rendition decodes end to end with the frame count of its clips added up, and a stream stitched from one rendition's first clip and another's second clip decodes, which is what a player switching at the boundary does.
-- **Adapter.** An nginx-style set of two sequences of two clips with `durations`, language and label translates and serves **byte for byte** like the same asset given natively, which is the test TDD 0015 sets for every translation.
+- **Adapter, once the TDD 0015 translator exists.** An nginx-style set of two sequences of two clips with `durations`, language and label translates and serves **byte for byte** like the same asset given natively, which is the test TDD 0015 sets for every translation.
 - **Compatibility.** A ladder of one clip per rendition serves exactly as a ladder with each file trimmed, and existing single, ladder and sequence answers serve unchanged byte for byte.
 - **Performance.** Load time and memory for 4 renditions by 4 clips against 4 renditions of one clip each, recorded in [benchmarks](../benchmarks.md).
 - The vendor validators and the browser suite are a separate roadmap item and run on this output when they exist.
 
 ## Rollout
 
-1. **Stage 1, clear content.** Wire format and validation, loading, `AdaptiveSequence`, HLS and DASH output, the adapter row, and the docs (mapper API, usage, roadmap, TDD index). Answers with encryption are refused.
+1. **Stage 1, clear content.** Wire format and validation, loading, `AdaptiveSequenceAsset`, HLS and DASH output, and the docs (mapper API, usage, limits, roadmap, TDD index). Answers with encryption are refused. The nginx-vod-module translator of TDD 0015 (its stages 2 and 3) is not built yet; when it is, it emits this shape, so nothing here waits on it.
 2. **Stage 2, whole-asset encryption.** The answer's `encryption` (`cbcs`, one key set for every clip and rendition) and `hls_aes128`, which TDD 0012 already defines as covering every clip of a sequence and every rendition of a ladder.
 3. **Stage 3, per-clip keys and key rotation** across the grid. This needs every rendition to start each key period at the same segment, which `check_key_periods` already requires of ladders.
 
