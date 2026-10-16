@@ -52,7 +52,7 @@ impl TimelinePosition {
     }
 
     /// The position `ticks` of `timescale` later.
-    fn after(self, ticks: u64, timescale: u32) -> Result<Self> {
+    pub(crate) fn after(self, ticks: u64, timescale: u32) -> Result<Self> {
         let nanos = (u128::from(ticks) * NANOS_PER_SECOND)
             .checked_div(u128::from(timescale))
             .ok_or_else(overflow)?;
@@ -86,6 +86,14 @@ pub(crate) struct Trimmed {
     /// The window actually served, on the file's own clock, for the `clip_trimmed` log line.
     pub(crate) served_from_ms: u64,
     pub(crate) served_to_ms: u64,
+    /// The span of the reference track's decode times that was kept, in milliseconds on the
+    /// file's own clock: what audio from another file has to be cut to play in sync with it,
+    /// as the audio of the same file is (`follower_window`).
+    pub(crate) span_from_ms: u64,
+    pub(crate) span_to_ms: u64,
+    /// How much later than the requested start the clip was moved, so that no frame shows before
+    /// it (negative composition offsets), in milliseconds. Audio from another file moves with it.
+    pub(crate) lead_ms: u64,
 }
 
 /// Cuts `index` down to `window` and moves every kept sample so the clip starts at `start`
@@ -152,6 +160,9 @@ pub(crate) fn trim(
         served_from_ms: ticks_to_ms(u64::try_from(earliest).unwrap_or(0), timescale)
             .saturating_sub(offset),
         served_to_ms: ticks_to_ms(kept_end, timescale).saturating_sub(offset),
+        span_from_ms: ticks_to_ms(origin, timescale),
+        span_to_ms: ticks_to_ms(kept_end, timescale),
+        lead_ms: ticks_to_ms(lead, timescale),
     })
 }
 

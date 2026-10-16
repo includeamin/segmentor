@@ -12,7 +12,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 
 use crate::asset::{Extras, PackagedAsset};
-use crate::clip::{self, TimelinePosition, Trailing};
+use crate::clip::{self, ClipWindow, TimelinePosition, Trailing};
 use crate::composite::{self, ClipGrid, ServedAsset, audio_ordinal, sample_tolerance_ms};
 use crate::config::LimitsConfig;
 use crate::error::{Error, Result};
@@ -75,9 +75,11 @@ pub(crate) fn build(
         ));
     }
     let has_video = video_kinds(files, renditions)?;
-    let reference = has_video.iter().position(|&video| video).ok_or_else(|| {
-        Error::InvalidMedia("an adaptive asset needs at least one video rendition".to_owned())
-    })?;
+    if !has_video.iter().any(|&video| video) {
+        return Err(Error::InvalidMedia(
+            "an adaptive asset needs at least one video rendition".to_owned(),
+        ));
+    }
     let version = version_of(files, renditions, mapper_version);
     let cutter = Cutter {
         asset_id,
@@ -97,23 +99,11 @@ pub(crate) fn build(
         } else {
             Trailing::Cut
         };
-        let mut next = start;
-        let mut row = Vec::with_capacity(renditions.len());
-        let mut row_ends = Vec::new();
-        for (index, rendition) in renditions.iter().enumerate() {
-            let (asset, end) = cutter.cut(rendition, position, start, trailing)?;
-            if index == reference {
-                next = end;
-            }
-            if has_video[index] {
-                row_ends.push((rendition.id.as_str(), end));
-            }
-            row.push((rendition.id.clone(), asset));
-        }
+        let cut = cutter.cut_row(renditions, &has_video, position, start, trailing)?;
         starts.push(start);
-        rows.push(row);
-        ends.push(row_ends);
-        start = next;
+        start = cut.next;
+        rows.push(cut.row);
+        ends.push((cut.video_ends, cut.audio_ends));
     }
 
     // A rendition keeps the same tracks and codecs in every clip.
@@ -144,7 +134,9 @@ pub(crate) fn build(
             .into_iter()
             .max()
             .unwrap_or(0);
-        check_clip_lengths(position, &ends[position], tolerance_ms)?;
+        let (video_ends, audio_ends) = &ends[position];
+        check_clip_lengths(position, video_ends, tolerance_ms)?;
+        check_audio_lengths(position, video_ends[0], audio_ends, tolerance_ms)?;
         grids.push(grid);
     }
     Ok(ServedAsset::AdaptiveSequence(Box::new(assemble(
@@ -161,25 +153,112 @@ struct Cutter<'a> {
     limits: &'a LimitsConfig,
 }
 
+/// One clip of one rendition, cut and assembled as an asset of its own.
+struct CutClip {
+    asset: PackagedAsset,
+    /// Where the clip ends on the timeline.
+    end: TimelinePosition,
+    /// The span of decode times kept, on the file's own clock, and how far the clip was moved
+    /// later; audio from another file follows both.
+    span_from_ms: u64,
+    span_to_ms: u64,
+    lead_ms: u64,
+    /// The longest audio frame, in milliseconds; zero when the clip has no audio.
+    frame_ms: i128,
+}
+
+/// One clip of every rendition.
+struct CutRow<'r> {
+    row: Vec<(String, PackagedAsset)>,
+    /// Where each video rendition's clip ends; the first is the reference rendition's.
+    video_ends: Vec<(&'r str, TimelinePosition)>,
+    /// Where each audio-only rendition's clip ends, with its longest audio frame.
+    audio_ends: Vec<(&'r str, TimelinePosition, i128)>,
+    /// Where the next clip starts: where the reference rendition's clip ends.
+    next: TimelinePosition,
+}
+
 impl Cutter<'_> {
-    /// Cuts clip `position` of `rendition` to start at `start`, and assembles it as an asset of
-    /// its own. Also returns where the clip ends on the timeline.
+    /// Cuts clip `position` of every rendition to start at `start`. The video renditions are cut
+    /// from the mapper's windows, and the first of them is the reference: an audio-only rendition
+    /// has no keyframes to snap to, so it is cut to the span of decode times the reference
+    /// actually kept, and moved by the same lead, as the audio of a muxed file is. Otherwise it
+    /// would play from a different instant of the source than the video does.
+    fn cut_row<'r>(
+        &self,
+        renditions: &'r [RenditionPlan],
+        has_video: &[bool],
+        position: usize,
+        start: TimelinePosition,
+        trailing: Trailing,
+    ) -> Result<CutRow<'r>> {
+        let mut cuts = renditions
+            .iter()
+            .map(|_| None)
+            .collect::<Vec<Option<CutClip>>>();
+        let mut reference = None;
+        for (index, rendition) in renditions.iter().enumerate() {
+            if has_video[index] {
+                let window = rendition.clips[position].1;
+                let cut = self.cut(rendition, position, window, start, trailing)?;
+                reference.get_or_insert((window, cut.span_from_ms, cut.span_to_ms, cut.lead_ms));
+                cuts[index] = Some(cut);
+            }
+        }
+        let (window, from_ms, to_ms, lead_ms) =
+            reference.expect("a video rendition was checked for");
+        let audio_start = start.after(lead_ms, 1000)?;
+        for (index, rendition) in renditions.iter().enumerate() {
+            if !has_video[index] {
+                let followed = ClipWindow {
+                    from_ms,
+                    to_ms: window.to_ms.map(|_| to_ms),
+                };
+                cuts[index] =
+                    Some(self.cut(rendition, position, followed, audio_start, trailing)?);
+            }
+        }
+        let mut result = CutRow {
+            row: Vec::with_capacity(renditions.len()),
+            video_ends: Vec::new(),
+            audio_ends: Vec::new(),
+            next: start,
+        };
+        for (index, (rendition, cut)) in renditions.iter().zip(cuts).enumerate() {
+            let cut = cut.expect("every rendition was cut");
+            if has_video[index] {
+                if result.video_ends.is_empty() {
+                    result.next = cut.end;
+                }
+                result.video_ends.push((&rendition.id, cut.end));
+            } else {
+                result
+                    .audio_ends
+                    .push((&rendition.id, cut.end, cut.frame_ms));
+            }
+            result.row.push((rendition.id.clone(), cut.asset));
+        }
+        Ok(result)
+    }
+
+    /// Cuts `window` of clip `position` of `rendition` to start at `start`, and assembles it as
+    /// an asset of its own.
     fn cut(
         &self,
         rendition: &RenditionPlan,
         position: usize,
+        window: ClipWindow,
         start: TimelinePosition,
         trailing: Trailing,
-    ) -> Result<(PackagedAsset, TimelinePosition)> {
+    ) -> Result<CutClip> {
         let named = |error: Error| {
             Error::InvalidMedia(format!(
                 "rendition `{}`: clip {position}: {error}",
                 rendition.id
             ))
         };
-        let (file, window, _, tracks) = &rendition.clips[position];
-        let (file, window, tracks) = (*file, *window, *tracks);
-        let file = &self.files[file];
+        let (file, _, _, tracks) = &rendition.clips[position];
+        let (file, tracks) = (&self.files[*file], *tracks);
         let narrowed = sequence::narrow(&file.parsed.index, tracks).map_err(named)?;
         let cut = clip::trim(&narrowed, window, start, trailing).map_err(named)?;
         tracing::info!(
@@ -212,8 +291,32 @@ impl Cutter<'_> {
             },
         )
         .map_err(named)?;
-        Ok((asset, cut.end))
+        Ok(CutClip {
+            frame_ms: longest_audio_frame_ms(&asset),
+            asset,
+            end: cut.end,
+            span_from_ms: cut.span_from_ms,
+            span_to_ms: cut.span_to_ms,
+            lead_ms: cut.lead_ms,
+        })
     }
+}
+
+/// The longest audio frame of a clip, in milliseconds; zero when it has no audio.
+fn longest_audio_frame_ms(asset: &PackagedAsset) -> i128 {
+    asset
+        .presentation()
+        .audio_tracks()
+        .next()
+        .map_or(0, |track| {
+            let longest = track
+                .samples
+                .iter()
+                .map(|sample| sample.duration)
+                .max()
+                .unwrap_or(0);
+            i128::from(longest) * 1000 / i128::from(track.timescale)
+        })
 }
 
 /// Whether each rendition has video, read from the tracks its first clip serves. It must be the
@@ -312,6 +415,25 @@ fn check_clip_lengths(
                  ({first_ms} ms vs {end_ms} ms)"
             )));
         }
+    }
+    Ok(())
+}
+
+/// An audio-only rendition's clip must end where the video's does, within a video sample and its
+/// own longest audio frame (`audio` pairs each with that frame, in milliseconds), or its playlist
+/// would carry a gap or an overlap that players resolve by drifting.
+fn check_audio_lengths(
+    position: usize,
+    reference: (&str, TimelinePosition),
+    audio: &[(&str, TimelinePosition, i128)],
+    video_tolerance_ms: i128,
+) -> Result<()> {
+    for &(id, end, frame_ms) in audio {
+        check_clip_lengths(
+            position,
+            &[reference, (id, end)],
+            video_tolerance_ms + frame_ms,
+        )?;
     }
     Ok(())
 }
@@ -649,7 +771,6 @@ impl AdaptiveSequenceAsset {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clip::ClipWindow;
     use crate::source::{LocalMediaSource, MediaSourceKind};
     use crate::testutil::fixture;
 
@@ -820,6 +941,57 @@ mod tests {
             adaptive.prepare_segment(Some("nope"), TrackKey::VIDEO, 0),
             Err(Error::NotFound(_))
         ));
+    }
+
+    /// The end of the reference track of one clip's asset, in milliseconds on the timeline.
+    fn clip_end_ms(asset: &PackagedAsset) -> i128 {
+        let presentation = asset.presentation();
+        let track = presentation
+            .video()
+            .or_else(|| presentation.audio_tracks().next())
+            .unwrap();
+        let last = presentation.track_segments(track.id).last().unwrap();
+        i128::from(last.decode_time + last.duration) * 1000 / i128::from(track.timescale)
+    }
+
+    /// A clip that starts mid-GOP snaps back to a keyframe; the audio-only rendition has to follow
+    /// that cut, or it plays from a different instant of the source than the video does.
+    #[tokio::test]
+    async fn an_audio_only_rendition_follows_the_video_cut_when_a_clip_starts_mid_gop() {
+        let files = files().await;
+        let asset = build_from(&files, &ladder()).unwrap();
+
+        for (position, grid) in adaptive(&asset).grids.iter().enumerate() {
+            let video = clip_end_ms(&grid.video[0].asset);
+            let audio = clip_end_ms(&grid.audio_only[0].asset);
+            assert!(
+                (video - audio).abs() <= 100,
+                "clip {position}: the video ends at {video} ms, the audio at {audio} ms"
+            );
+        }
+    }
+
+    #[test]
+    fn an_audio_only_clip_far_shorter_than_the_video_is_refused() {
+        let reference = ("720p", TimelinePosition::from_nanos(3_000_000_000));
+        let audio = [("en", TimelinePosition::from_nanos(2_300_000_000), 21)];
+
+        let message = check_audio_lengths(1, reference, &audio, 34)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            message.contains("`720p` and `en`") && message.contains("clip 1"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn an_audio_only_clip_within_a_frame_of_the_video_is_accepted() {
+        let reference = ("720p", TimelinePosition::from_nanos(3_000_000_000));
+        let audio = [("en", TimelinePosition::from_nanos(3_040_000_000), 21)];
+
+        check_audio_lengths(0, reference, &audio, 34).unwrap();
     }
 
     #[tokio::test]

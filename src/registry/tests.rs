@@ -2509,6 +2509,95 @@ async fn a_ladder_of_one_clip_each_serves_as_a_trimmed_ladder() {
     );
 }
 
+#[tokio::test]
+async fn max_renditions_applies_to_renditions_that_are_sequences() {
+    let h = harness_with(|config| config.limits.max_renditions = 1).await;
+    h.mapper.state.set("grid", two_clip_ladder("v1"));
+
+    assert_eq!(
+        status(&h.app, "/hls/grid/master.m3u8").await,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "two renditions are more than limits.max_renditions (1)"
+    );
+}
+
+#[tokio::test]
+async fn a_rotated_signature_reaches_a_trimmed_ladder() {
+    let (h, origin) = signed_harness(|_| {}).await;
+    let answer = |signature: &str| {
+        let url = signed(&origin, signature);
+        let clips = [(http_location(&url), None, Some(2000))];
+        short_ttl(Answer::renditions_with_clips(
+            "v1",
+            &[("a", &clips), ("b", &clips)],
+        ))
+    };
+    h.mapper.state.set("grid", answer("1"));
+    let version = version_in(&fetch(&h.app, "/hls/grid/master.m3u8").await.2);
+
+    // The mapper re-signs the same object and the old signature stops working.
+    *origin.state.required_query.lock().unwrap() = Some("sig=2".to_owned());
+    h.mapper.state.set("grid", answer("2"));
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let before = origin.state.queries.lock().unwrap().len();
+
+    assert_eq!(
+        status(
+            &h.app,
+            &format!("/hls/grid/video-a/segments/0/media.m4s?v={version}")
+        )
+        .await,
+        StatusCode::OK
+    );
+
+    let used = origin.state.queries.lock().unwrap()[before..].to_vec();
+    assert!(
+        !used.is_empty() && used.iter().all(|query| query == "sig=2"),
+        "the rotation must reach the asset before a read is rejected: {used:?}"
+    );
+}
+
+#[tokio::test]
+async fn changing_a_rendition_clips_window_under_the_same_version_reloads_the_asset() {
+    let h = harness().await;
+    let answer = |first_to_ms: u64| {
+        let mut answer = Answer::renditions_with_clips(
+            "v1",
+            &[
+                (
+                    "720p",
+                    &[
+                        clip("rendition-720p.mp4", None, Some(first_to_ms)),
+                        clip("rendition-720p.mp4", Some(2000), None),
+                    ],
+                ),
+                (
+                    "480p",
+                    &[
+                        clip("rendition-480p.mp4", None, Some(first_to_ms)),
+                        clip("rendition-480p.mp4", Some(2000), None),
+                    ],
+                ),
+            ],
+        );
+        answer.ttl_seconds = Some(0);
+        answer
+    };
+    h.mapper.state.always_full.store(true, Ordering::SeqCst);
+    h.mapper.state.set("grid", answer(1000));
+    let before = text(&fetch(&h.app, "/hls/grid/video-720p/index.m3u8").await.2);
+
+    h.mapper.state.set("grid", answer(2000));
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let after = text(&fetch(&h.app, "/hls/grid/video-720p/index.m3u8").await.2);
+
+    assert_ne!(before, after, "the new window must be served");
+    assert!(
+        metric(&h.state, "vod_asset_loads_total{outcome=\"ok\"} 2"),
+        "reloaded"
+    );
+}
+
 #[test]
 fn a_file_named_by_several_pairs_gets_one_entry() {
     use crate::registry::distinct_locations;
