@@ -286,7 +286,11 @@ impl ServedAsset {
             (Self::AdaptiveSequence(asset), LocationKey::RenditionClip(id, position)) => {
                 asset.update_location(id, *position, url);
             }
-            (Self::Composite(asset), LocationKey::Rendition(id)) => {
+            // A ladder of one clip per rendition is served as an ordinary composite (TDD 0016).
+            (
+                Self::Composite(asset),
+                LocationKey::Rendition(id) | LocationKey::RenditionClip(id, 0),
+            ) => {
                 if let Some(entry) = asset.video.iter().find(|entry| &entry.id == id) {
                     entry.asset.update_location(url);
                 } else if let Some(entry) = asset.audio_only.iter().find(|entry| &entry.id == id) {
