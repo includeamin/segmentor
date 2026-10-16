@@ -1,4 +1,4 @@
-//! `segmentor`: a video-on-demand origin that packages MP4 files as HLS and DASH on demand.
+//! `vodnik`: a video-on-demand origin that packages MP4 files as HLS and DASH on demand.
 //!
 //! The crate is a library plus a thin binary. The library's public surface is deliberately
 //! small: [`run`] is the binary's entry point, and hidden helper modules expose the media pipeline
@@ -36,11 +36,11 @@ mod testutil;
 pub mod benchmarking;
 pub mod fuzzing;
 
-const APP_NAME: &str = "segmentor";
+const APP_NAME: &str = "vodnik";
 
 /// Runs the command-line application with the process arguments.
 ///
-/// Prints `segmentor: <error>` to standard error and returns a failure exit code if the
+/// Prints `vodnik: <error>` to standard error and returns a failure exit code if the
 /// command fails.
 pub async fn run() -> ExitCode {
     match cli::run(std::env::args_os().skip(1)).await {
@@ -58,6 +58,6 @@ mod tests {
 
     #[test]
     fn application_name_is_stable() {
-        assert_eq!(APP_NAME, "segmentor");
+        assert_eq!(APP_NAME, "vodnik");
     }
 }

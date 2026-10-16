@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Runs the segmentor vs nginx-vod-module comparison and writes a report.
+# Runs the vodnik vs nginx-vod-module comparison and writes a report.
 #
 #   ./run.sh                      # both servers, default settings
 #   VUS=256 DURATION=60s ./run.sh
-#   SERVERS=segmentor ./run.sh    # just one (segmentor, segmentor-separate, nginx, nginx-cached)
+#   SERVERS=vodnik ./run.sh    # just one (vodnik, vodnik-separate, nginx, nginx-cached)
 #
 # For each server, one at a time on the same pinned cores:
 #   1. cold start: restart, then time the first master playlist, media playlist, and segment;
@@ -16,7 +16,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SERVERS=${SERVERS:-"segmentor segmentor-separate nginx nginx-cached"}
+SERVERS=${SERVERS:-"vodnik vodnik-separate nginx nginx-cached"}
 VUS=${VUS:-64}
 DURATION=${DURATION:-30s}
 COLD_REPS=${COLD_REPS:-5}
@@ -43,14 +43,14 @@ for i in 1 2 3 4 5; do
 done
 
 echo "building images..."
-docker compose build segmentor nginx >"$out/build.log" 2>&1
+docker compose build vodnik nginx >"$out/build.log" 2>&1
 
 # nginx-cached is the same nginx-vod-module image with its response cache on.
-# segmentor-separate is the segmentor image with packaging.hls_mux_audio off.
-declare -A port=([segmentor]=18080 [segmentor-separate]=18083 [nginx]=18081 [nginx-cached]=18082)
-declare -A internal=([segmentor]=http://segmentor:3000 [segmentor-separate]=http://segmentor-separate:3000 [nginx]=http://nginx:80 [nginx-cached]=http://nginx-cached:80)
-declare -A asset=([segmentor]=long [segmentor-separate]=long [nginx]=long.mp4 [nginx-cached]=long.mp4)
-declare -A master=([segmentor]=/hls/long/master.m3u8 [segmentor-separate]=/hls/long/master.m3u8 [nginx]=/hls/long.mp4/master.m3u8 [nginx-cached]=/hls/long.mp4/master.m3u8)
+# vodnik-separate is the vodnik image with packaging.hls_mux_audio off.
+declare -A port=([vodnik]=18080 [vodnik-separate]=18083 [nginx]=18081 [nginx-cached]=18082)
+declare -A internal=([vodnik]=http://vodnik:3000 [vodnik-separate]=http://vodnik-separate:3000 [nginx]=http://nginx:80 [nginx-cached]=http://nginx-cached:80)
+declare -A asset=([vodnik]=long [vodnik-separate]=long [nginx]=long.mp4 [nginx-cached]=long.mp4)
+declare -A master=([vodnik]=/hls/long/master.m3u8 [vodnik-separate]=/hls/long/master.m3u8 [nginx]=/hls/long.mp4/master.m3u8 [nginx-cached]=/hls/long.mp4/master.m3u8)
 
 wait_healthy() {
   for _ in $(seq 1 100); do

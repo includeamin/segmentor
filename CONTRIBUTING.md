@@ -63,7 +63,7 @@ state otherwise, anything you contribute is licensed the same way, without addit
 [Kaltura's nginx-vod-module](https://github.com/kaltura/nginx-vod-module) is a well-known
 packager and the [research notes](docs/research/nginx-vod-module.md) describe how it works from its
 public documentation. **It is licensed under the AGPL-3.0**, which this project's licence is not
-compatible with, so segmentor must not contain code derived from it.
+compatible with, so vodnik must not contain code derived from it.
 
 Please do not copy, translate, or adapt its source, and do not implement a change while reading
 its source alongside. Its documentation, its observable behaviour, and the public specifications

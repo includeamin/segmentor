@@ -1,19 +1,19 @@
-# Head-to-head benchmark: segmentor and nginx-vod-module serving the same file, one at a time,
+# Head-to-head benchmark: vodnik and nginx-vod-module serving the same file, one at a time,
 # on the same pinned cores, driven by k6 on the other cores. Run it through ./run.sh, which
-# starts one server at a time; see docs/benchmarks.md#segmentor-vs-nginx-vod-module.
+# starts one server at a time; see docs/benchmarks.md#vodnik-vs-nginx-vod-module.
 #
 # SERVER_CPUS and LOAD_CPUS pin the server and the load generator to disjoint cores, so the
 # client never competes with the server it measures.
 services:
-  segmentor:
+  vodnik:
     build:
       context: ../..
-    image: segmentor-bench
+    image: vodnik-bench
     cpuset: "${SERVER_CPUS:-0-3}"
     environment:
       TOKIO_WORKER_THREADS: "4"
     volumes:
-      - ./segmentor.toml:/etc/vod/vod.toml:ro
+      - ./vodnik.toml:/etc/vod/vod.toml:ro
       - ./media:/srv/vod:ro
     ports:
       - "18080:3000"
@@ -21,14 +21,14 @@ services:
       nofile: 65536
     read_only: true
 
-  # segmentor with HLS audio as its own rendition instead of inside the video segments.
-  segmentor-separate:
-    image: segmentor-bench
+  # vodnik with HLS audio as its own rendition instead of inside the video segments.
+  vodnik-separate:
+    image: vodnik-bench
     cpuset: "${SERVER_CPUS:-0-3}"
     environment:
       TOKIO_WORKER_THREADS: "4"
     volumes:
-      - ./segmentor-separate.toml:/etc/vod/vod.toml:ro
+      - ./vodnik-separate.toml:/etc/vod/vod.toml:ro
       - ./media:/srv/vod:ro
     ports:
       - "18083:3000"

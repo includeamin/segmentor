@@ -1,7 +1,7 @@
-# Runs segmentor against a real mapper instead of a static [assets.*] catalog, so the mapper API
+# Runs vodnik against a real mapper instead of a static [assets.*] catalog, so the mapper API
 # and the control panel can be tried out without writing a mapper or configuring anything by hand.
 # Unlike deploy/docker-compose.yml (the production example, which runs the published image), this
-# builds segmentor from the local source tree, so it also doubles as a quick way to try local
+# builds vodnik from the local source tree, so it also doubles as a quick way to try local
 # changes end to end.
 #
 #   docker compose -f docker-compose.dev.yml up --build
@@ -24,7 +24,7 @@ services:
       - ./examples/mapper/catalog.json:/app/catalog.json:ro
     restart: unless-stopped
 
-  segmentor:
+  vodnik:
     build: .
     ports:
       - "3000:3000"

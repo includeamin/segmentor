@@ -6,7 +6,7 @@
 
 - [Architecture](architecture.md)
 - [Roadmap](roadmap.md)
-- [Using segmentor](usage.md)
+- [Using vodnik](usage.md)
 - [Supported input](supported-input.md)
 - [Deploying](deployment.md)
 - [Operating the origin](operations.md)

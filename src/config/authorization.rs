@@ -60,7 +60,7 @@ fn default_query_parameter() -> String {
 }
 
 fn default_cookie_name() -> String {
-    "segmentor_auth".to_owned()
+    "vodnik_auth".to_owned()
 }
 
 const fn default_clock_skew_secs() -> u64 {

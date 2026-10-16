@@ -1,11 +1,11 @@
-# segmentor
+# vodnik
 
 **On-demand HLS and DASH packaging for MP4 files, in Rust.**
 
-[![CI](https://github.com/includeamin/segmentor/actions/workflows/ci.yml/badge.svg)](https://github.com/includeamin/segmentor/actions/workflows/ci.yml)
+[![CI](https://github.com/vodnik-rs/vodnik/actions/workflows/ci.yml/badge.svg)](https://github.com/vodnik-rs/vodnik/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-segmentor is an HTTP origin. Point it at MP4 files, on disk or on an HTTP origin that a small
+vodnik is an HTTP origin. Point it at MP4 files, on disk or on an HTTP origin that a small
 *mapper* service tells it about, and it serves them as HLS and DASH, packaging each segment when
 it is requested. Nothing is pre-generated, transcoded, or stored: the encoded audio and video are
 re-wrapped as fragmented MP4 and streamed straight from the source, so the work per request is
@@ -52,19 +52,19 @@ proportional to the segment asked for, not to the length of the video.
 | If you want to... | Consider |
 | --- | --- |
 | Convert files to HLS/DASH once and host static files | FFmpeg, [Shaka Packager](https://github.com/shaka-project/shaka-packager), or Bento4 |
-| Serve HLS/DASH without storing packaged output, as a standalone service, with strict resource limits | **segmentor** |
+| Serve HLS/DASH without storing packaged output, as a standalone service, with strict resource limits | **vodnik** |
 | Live streaming or MPEG-TS output today | Shaka Packager |
 | A mature on-demand packager that runs inside nginx | Kaltura's [nginx-vod-module](https://github.com/kaltura/nginx-vod-module) (AGPL-3.0) |
 
-segmentor takes its idea, packaging on demand instead of ahead of time, from nginx-vod-module but
+vodnik takes its idea, packaging on demand instead of ahead of time, from nginx-vod-module but
 contains none of its code; see [the research notes](docs/research/nginx-vod-module.md). Check each
 project's own documentation for what it supports today; this table is a rough guide.
 
 ## Quick start
 
 ```sh
-git clone https://github.com/includeamin/segmentor
-cd segmentor
+git clone https://github.com/vodnik-rs/vodnik
+cd vodnik
 make serve        # serves tests/fixtures/h264-aac.mp4 as the asset "sample" on :3000
 ```
 
@@ -75,7 +75,7 @@ ffplay http://127.0.0.1:3000/hls/sample/master.m3u8
 ```
 
 `make demo` starts a web player with live server metrics, and `make help` lists everything else; see
-[Using segmentor](docs/usage.md).
+[Using vodnik](docs/usage.md).
 
 ## Screenshots
 
@@ -86,19 +86,19 @@ ffplay http://127.0.0.1:3000/hls/sample/master.m3u8
 
 ## Install
 
-- **Release binaries.** Each [GitHub release](https://github.com/includeamin/segmentor/releases)
+- **Release binaries.** Each [GitHub release](https://github.com/vodnik-rs/vodnik/releases)
   attaches Linux binaries for x86-64 and arm64 with checksums and build attestations.
   [`install.sh`](install.sh) downloads one, verifies its checksum, and copies it into place
  ).
-- **Container image.** `ghcr.io/includeamin/segmentor`, for the same architectures:
+- **Container image.** `ghcr.io/vodnik-rs/vodnik`, for the same architectures:
 
   ```sh
   docker run --rm -p 3000:3000 --read-only --cap-drop=ALL \
     -v "$PWD/vod.toml:/etc/vod/vod.toml:ro" -v "$PWD/media:/srv/vod:ro" \
-    ghcr.io/includeamin/segmentor:latest
+    ghcr.io/vodnik-rs/vodnik:latest
   ```
 
-- **From source.** `cargo install --git https://github.com/includeamin/segmentor`, which needs a
+- **From source.** `cargo install --git https://github.com/vodnik-rs/vodnik`, which needs a
   recent stable Rust toolchain and a C compiler.
 
 See [Deploying](docs/deployment.md) for Compose, Kubernetes and systemd files, and
@@ -108,7 +108,7 @@ See [Deploying](docs/deployment.md) for Compose, Kubernetes and systemd files, a
 
 The handbook, built with mdBook, covers everything beyond this page:
 
-- [Using segmentor](docs/usage.md): endpoints, the web player demo, the packaging command
+- [Using vodnik](docs/usage.md): endpoints, the web player demo, the packaging command
 - [Supported input](docs/supported-input.md), [Deploying](docs/deployment.md), and
   [Operating the origin](docs/operations.md)
 - [Mapper API](docs/mapper-api.md), [architecture](docs/architecture.md), and the

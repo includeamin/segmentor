@@ -33,9 +33,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use segmentor::benchmarking::{BenchAsset, BenchServer, ServerOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use vodnik::benchmarking::{BenchAsset, BenchServer, ServerOptions};
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -523,7 +523,7 @@ fn main() {
         .build()
         .unwrap();
 
-    println!("segmentor performance budgets");
+    println!("vodnik performance budgets");
     println!(
         "host: {} logical CPUs, {workers} Tokio workers",
         std::thread::available_parallelism().map_or(0, |n| n.get())

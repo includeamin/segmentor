@@ -1,23 +1,23 @@
 # Runs a release binary as a hardened system service.
 #
-#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin segmentor
-#   sudo install -m 0755 segmentor /usr/local/bin/segmentor
-#   sudo install -d /etc/segmentor && sudo cp vod.toml /etc/segmentor/vod.toml
-#   sudo cp deploy/systemd/segmentor.service /etc/systemd/system/
-#   sudo systemctl daemon-reload && sudo systemctl enable --now segmentor
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin vodnik
+#   sudo install -m 0755 vodnik /usr/local/bin/vodnik
+#   sudo install -d /etc/vodnik && sudo cp vod.toml /etc/vodnik/vod.toml
+#   sudo cp deploy/systemd/vodnik.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now vodnik
 #
-# Logs go to the journal: `journalctl -u segmentor -f`.
+# Logs go to the journal: `journalctl -u vodnik -f`.
 [Unit]
-Description=segmentor on-demand HLS and DASH origin
-Documentation=https://github.com/includeamin/segmentor
+Description=vodnik on-demand HLS and DASH origin
+Documentation=https://github.com/vodnik-rs/vodnik
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=segmentor
-Group=segmentor
-ExecStart=/usr/local/bin/segmentor serve --config /etc/segmentor/vod.toml
+User=vodnik
+Group=vodnik
+ExecStart=/usr/local/bin/vodnik serve --config /etc/vodnik/vod.toml
 Restart=on-failure
 RestartSec=2
 

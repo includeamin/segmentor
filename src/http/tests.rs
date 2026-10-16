@@ -1425,7 +1425,7 @@ mod authorization {
             ),
             transports,
             query_parameter: "auth".to_owned(),
-            cookie_name: "segmentor_auth".to_owned(),
+            cookie_name: "vodnik_auth".to_owned(),
         }
     }
 
@@ -1581,10 +1581,7 @@ mod authorization {
     async fn the_three_transports_each_carry_a_token_and_only_enabled_ones_count() {
         let token = mint_for("sample");
         let header = bearer(&token);
-        let cookie = vec![(
-            COOKIE,
-            format!("theme=dark; segmentor_auth={token}; other=1"),
-        )];
+        let cookie = vec![(COOKIE, format!("theme=dark; vodnik_auth={token}; other=1"))];
         let query = format!("/hls/sample/master.m3u8?v=x&auth={token}");
 
         let app = authorized(ALL);
@@ -1680,7 +1677,7 @@ mod authorization {
         // The header is checked first; if it is wrong, a good cookie does not help.
         let headers = vec![
             (AUTHORIZATION, "Bearer junk".to_owned()),
-            (COOKIE, format!("segmentor_auth={good}")),
+            (COOKIE, format!("vodnik_auth={good}")),
         ];
         assert_eq!(
             status_with(&app, "/hls/sample/master.m3u8", &headers)
@@ -1832,7 +1829,7 @@ mod authorization {
             (
                 "hls cookie",
                 "/hls/sample/master.m3u8".to_owned(),
-                vec!["-cookies".to_owned(), format!("segmentor_auth={token}\r\n")],
+                vec!["-cookies".to_owned(), format!("vodnik_auth={token}\r\n")],
             ),
         ] {
             let output = frames(format!("http://{address}{path}"), options)

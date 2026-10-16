@@ -1,4 +1,4 @@
-# Using segmentor
+# Using vodnik
 
 ## Run the example
 
@@ -60,7 +60,7 @@ make admin   # terminal 2: the panel on http://127.0.0.1:8081
 
 `/admin/status` has no authentication of its own, the same as `/metrics`; see [Operating the origin](operations.md) for what to put in front of it before this page is reachable by anyone but you.
 
-To see the panel with a mapper resolver instead of the static catalog, `docker compose -f docker-compose.dev.yml up --build` runs segmentor, an [example mapper](https://github.com/includeamin/segmentor/tree/main/examples/mapper), and both web pages together; see [Try it](mapper-api.md#try-it).
+To see the panel with a mapper resolver instead of the static catalog, `docker compose -f docker-compose.dev.yml up --build` runs vodnik, an [example mapper](https://github.com/vodnik-rs/vodnik/tree/main/examples/mapper), and both web pages together; see [Try it](mapper-api.md#try-it).
 
 ## Packaging from the command line
 

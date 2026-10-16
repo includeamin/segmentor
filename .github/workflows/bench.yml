@@ -12,8 +12,8 @@ on:
         options: [compare, budgets, both]
         default: compare
       servers:
-        description: Servers to compare (segmentor, segmentor-separate, nginx, nginx-cached)
-        default: segmentor segmentor-separate nginx nginx-cached
+        description: Servers to compare (vodnik, vodnik-separate, nginx, nginx-cached)
+        default: vodnik vodnik-separate nginx nginx-cached
       duration:
         description: Length of each load scenario
         default: 30s
@@ -43,7 +43,7 @@ jobs:
         run: ulimit -n 65536 && make bench-enforce
 
   compare:
-    name: segmentor vs nginx-vod-module
+    name: vodnik vs nginx-vod-module
     if: inputs.job != 'budgets'
     runs-on: ubuntu-latest
     timeout-minutes: 90

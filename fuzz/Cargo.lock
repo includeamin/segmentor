@@ -1366,47 +1366,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "segmentor"
-version = "0.1.0"
-dependencies = [
- "aes",
- "aws-lc-rs",
- "axum",
- "base64 0.23.1",
- "blake3",
- "brotli",
- "bytes",
- "flate2",
- "hyper-util",
- "mimalloc",
- "quick-xml",
- "reqwest",
- "rustls-pki-types",
- "serde",
- "serde_json",
- "sha2",
- "thiserror",
- "time",
- "tokio",
- "tokio-rustls",
- "tokio-stream",
- "toml",
- "tower-http 0.7.1",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "segmentor-fuzz"
-version = "0.0.0"
-dependencies = [
- "libfuzzer-sys",
- "segmentor",
- "tempfile",
-]
-
-[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2015,6 +1974,47 @@ name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
+
+[[package]]
+name = "vodnik"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "aws-lc-rs",
+ "axum",
+ "base64 0.23.1",
+ "blake3",
+ "brotli",
+ "bytes",
+ "flate2",
+ "hyper-util",
+ "mimalloc",
+ "quick-xml",
+ "reqwest",
+ "rustls-pki-types",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "toml",
+ "tower-http 0.7.1",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "vodnik-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "tempfile",
+ "vodnik",
+]
 
 [[package]]
 name = "walkdir"

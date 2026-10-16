@@ -113,14 +113,14 @@ jobs:
       - name: Build the release binary
         run: |
           "$RUNNER_TEMP/scripts/stamp-version.sh" "${TAG#v}"
-          cargo build --release --locked --bin segmentor
+          cargo build --release --locked --bin vodnik
 
       - name: Package
         run: |
           set -euo pipefail
-          name="segmentor-${TAG}-${TARGET}"
+          name="vodnik-${TAG}-${TARGET}"
           mkdir -p "dist/$name"
-          cp target/release/segmentor README.md vod.example.toml "dist/$name/"
+          cp target/release/vodnik README.md vod.example.toml "dist/$name/"
           cp "$RUNNER_TEMP/legal/LICENSE-MIT" "$RUNNER_TEMP/legal/LICENSE-APACHE" "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           (cd dist && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")

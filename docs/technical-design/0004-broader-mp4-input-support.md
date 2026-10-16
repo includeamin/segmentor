@@ -34,7 +34,7 @@ Phase 3, and what was verified where:
 | HE-AAC, HE-AACv2 | No real file: no HE-AAC encoder was available | Synthetic `esds` tests for object types 5 and 29 | Unverified; Chrome reports both codec strings as supported |
 | AC-3, E-AC-3 | Yes | Matches FFmpeg's DASH muxer | Cannot decode on this machine |
 | Opus | Yes | Matches FFmpeg's DASH muxer | Plays |
-| FLAC | Yes | FFmpeg writes `flac`; segmentor writes `fLaC`, the sample entry tag. Chrome accepts both | Plays |
+| FLAC | Yes | FFmpeg writes `flac`; vodnik writes `fLaC`, the sample entry tag. Chrome accepts both | Plays |
 | Audio only, one track and two | Yes | | Plays over HLS and DASH |
 
 HEVC, AC-3, and E-AC-3 are therefore verified through FFmpeg and the unit tests but not in a browser, and HE-AAC only through synthetic entries. The README says so.
@@ -67,7 +67,7 @@ Phase 1:
 
 ## Summary
 
-segmentor accepts a deliberately narrow slice of MP4: progressive files with one H.264 video track, at most one AAC-LC audio track, no edit lists, and one sample description per track. That slice was right for a first core, but it excludes most files that real encoders produce. A plain `ffmpeg -c:v libx264 -c:a aac` output is rejected today, because ffmpeg writes an edit list by default.
+vodnik accepts a deliberately narrow slice of MP4: progressive files with one H.264 video track, at most one AAC-LC audio track, no edit lists, and one sample description per track. That slice was right for a first core, but it excludes most files that real encoders produce. A plain `ffmpeg -c:v libx264 -c:a aac` output is rejected today, because ffmpeg writes an edit list by default.
 
 This design lists what is unsupported, ranks it by how many real files it blocks, and proposes a staged plan:
 
@@ -82,7 +82,7 @@ Nothing here transcodes. Every addition must keep the property that the hot path
 
 ### How the current support was measured
 
-The input contract in [TDD 0001](0001-on-demand-mp4-packaging-core.md#input-contract) lists what is rejected. This design tests that list against files produced by a real encoder (ffmpeg n9.0.1, libx264, libx265, libvpx-vp9, SVT-AV1, native AAC, AC-3, libopus) and against the source. Each result below is from starting `segmentor serve` on the file and reading the load error, unless marked *code* (read from the source, not run) or *unverified*.
+The input contract in [TDD 0001](0001-on-demand-mp4-packaging-core.md#input-contract) lists what is rejected. This design tests that list against files produced by a real encoder (ffmpeg n9.0.1, libx264, libx265, libvpx-vp9, SVT-AV1, native AAC, AC-3, libopus) and against the source. Each result below is from starting `vodnik serve` on the file and reading the load error, unless marked *code* (read from the source, not run) or *unverified*.
 
 ### Compatibility stance
 
@@ -264,7 +264,7 @@ Box sizes and offsets are validated by the same bounded walker the preflight use
 
 ### 5. Owning the container parsing
 
-Replace the `mp4` crate's reader with an in-tree parser for the boxes segmentor uses: `mvhd`, `tkhd`, `mdhd`, `hdlr`, `elst`, `stsd` (entry headers and the codec configuration boxes), `stts`, `ctts` (versions 0 and 1), `stss`, `stsc`, `stsz`, `stz2`, `stco`, `co64`. All are small fixed layouts, and the preflight already contains the safe box walker with size checks. The existing fuzz target covers the new code with no changes.
+Replace the `mp4` crate's reader with an in-tree parser for the boxes vodnik uses: `mvhd`, `tkhd`, `mdhd`, `hdlr`, `elst`, `stsd` (entry headers and the codec configuration boxes), `stts`, `ctts` (versions 0 and 1), `stss`, `stsc`, `stsz`, `stz2`, `stco`, `co64`. All are small fixed layouts, and the preflight already contains the safe box walker with size checks. The existing fuzz target covers the new code with no changes.
 
 This removes three current failures together: QuickTime `mp4a` entries, `stz2`, and codecs the crate does not model. It lands as one step. A partial version that keeps the crate for sample tables would leave two parsers in the tree for a short time and still fail on `.mov`. Since compatibility is not a constraint, the crate is removed from the runtime dependencies. It may stay as a dev-dependency for cross-checking in tests.
 
@@ -387,4 +387,4 @@ Update the matrix in [TDD 0001](0001-on-demand-mp4-packaging-core.md) and [media
 - **`hev1` versus `hvc1`.** Settled: the entry's tag is passed through and not rewritten (see the Phase 3 findings). Whether to warn when an `hev1` asset is served is open.
 - **Ordering of new codecs.** The order above is by expected usage, but HEVC and AV1 have the widest player-support variance. Should AV1 wait for evidence that target players decode it through the protocols in use?
 - **Rotation and HDR signaling.** `tkhd` matrix and HDR boxes will be preserved by pass-through, but HLS and DASH have their own attributes (`VIDEO-RANGE`, for example). Should the manifest advertise them, and how much of this is in scope here?
-- **Lenient track handling.** Should an operator be able to serve the tracks segmentor understands from a file that also has an unsupported audio track (for example AC-3 next to AAC), and if so, per asset or globally?
+- **Lenient track handling.** Should an operator be able to serve the tracks vodnik understands from a file that also has an unsupported audio track (for example AC-3 next to AAC), and if so, per asset or globally?

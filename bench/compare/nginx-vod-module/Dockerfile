@@ -1,7 +1,7 @@
 # nginx with Kaltura's nginx-vod-module, built from the upstream release tarballs.
 #
 # Only used by the comparison benchmark in bench/compare. nginx-vod-module is AGPL-3.0; nothing
-# here copies or links its source into segmentor. It is downloaded at build time and run as a
+# here copies or links its source into vodnik. It is downloaded at build time and run as a
 # separate program, as any operator would run it.
 ARG DEBIAN_IMAGE=debian:bookworm-slim
 

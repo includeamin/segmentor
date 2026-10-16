@@ -22,15 +22,15 @@ H.264, HEVC, AAC, AC-3, and E-AC-3 are encrypted; different keys per clip is imp
 
 ## Summary
 
-segmentor encrypts what it serves with Common Encryption (ISO/IEC 23001-7) in the `cbcs` scheme, and signals DRM systems in HLS and DASH, so one set of segments plays under Widevine, FairPlay, PlayReady, and Clear Key. The mapper supplies the content keys and each DRM system's data in an optional `encryption` object of its answer. segmentor never talks to a licence server: players fetch licences from the operator's DRM vendor, and segmentor only encrypts and signals where to go.
+vodnik encrypts what it serves with Common Encryption (ISO/IEC 23001-7) in the `cbcs` scheme, and signals DRM systems in HLS and DASH, so one set of segments plays under Widevine, FairPlay, PlayReady, and Clear Key. The mapper supplies the content keys and each DRM system's data in an optional `encryption` object of its answer. vodnik never talks to a licence server: players fetch licences from the operator's DRM vendor, and vodnik only encrypts and signals where to go.
 
-Encryption happens per request, like everything else segmentor serves. An encrypted segment is read into memory, encrypted, and returned; its output is deterministic, so immutable URLs, ETags, and CDN caching work unchanged. Assets without `encryption` are served byte for byte as today.
+Encryption happens per request, like everything else vodnik serves. An encrypted segment is read into memory, encrypted, and returned; its output is deterministic, so immutable URLs, ETags, and CDN caching work unchanged. Assets without `encryption` are served byte for byte as today.
 
 This is the first stage of DRM: the shared core. It deliberately leaves out AV1 and VP9, key rotation, whole-segment HLS AES-128, encrypted source files, and a SPEKE adapter (see [Deferred](#deferred)). Different keys per clip was added afterwards (see [Different keys per clip](#different-keys-per-clip)).
 
 ## Context
 
-Premium content cannot be licensed without studio-grade DRM, and nginx-vod-module offers DRM, so its absence is the largest remaining reason to choose vod-module over segmentor. `cbcs` is the one scheme every major DRM system accepts on both HLS and DASH, which is what lets one set of segments serve every player.
+Premium content cannot be licensed without studio-grade DRM, and nginx-vod-module offers DRM, so its absence is the largest remaining reason to choose vod-module over vodnik. `cbcs` is the one scheme every major DRM system accepts on both HLS and DASH, which is what lets one set of segments serve every player.
 
 Two properties of the current pipeline shape this design:
 
@@ -80,7 +80,7 @@ The mapper answer gains an optional `encryption` object. It applies to the whole
 | `scheme` | `cbcs`. Anything else is rejected |
 | `keys` | One entry with `"tracks": "all"` (or no `tracks`), or one `"video"` and one `"audio"` entry. Every track of the asset must end up with exactly one key. Separate video and audio keys cannot be combined with FairPlay, whose HLS key line carries no key ID: the answer is rejected with "FairPlay needs one key for all tracks" |
 | `key_id`, `key` | 16 bytes each, as 32 hex digits |
-| `iv` | Optional, 16 bytes as 32 hex digits: the constant IV declared in the init segment. When absent, it is the first 16 bytes of SHA-256(`"segmentor cbcs iv"` ‖ `key_id`), so every replica derives the same one. It is never derived from the key |
+| `iv` | Optional, 16 bytes as 32 hex digits: the constant IV declared in the init segment. When absent, it is the first 16 bytes of SHA-256(`"vodnik cbcs iv"` ‖ `key_id`), so every replica derives the same one. It is never derived from the key |
 | `systems` | At most 8. Each names a DRM system by its standard system ID (a UUID) |
 | `pssh` | Optional base64 of a complete, well-formed `pssh` box whose system ID matches, at most 16 KiB |
 | `license_url` | Optional `https` URL, written into the DASH manifest (and used as Clear Key's HLS URI) |
@@ -117,7 +117,7 @@ The cipher is AES-128 from the RustCrypto `aes` crate (pure Rust, constant time,
 
 Everything after that is unchanged: range requests slice the finished bytes, `If-None-Match` and ETags work as before, and the response carries the same headers. A `HEAD` of an encrypted segment also reads and encrypts it, because the `senc` size depends on the sample bytes. I-frame fragments of an encrypted video track take the same path, one sample each.
 
-Nothing encrypted is cached inside segmentor; a CDN caches it, as it caches everything else. Output depends only on the source bytes, the key, and the IV, so it is deterministic: two replicas, or two requests, produce identical bytes.
+Nothing encrypted is cached inside vodnik; a CDN caches it, as it caches everything else. Output depends only on the source bytes, the key, and the IV, so it is deterministic: two replicas, or two requests, produce identical bytes.
 
 ### Composites and sequences
 

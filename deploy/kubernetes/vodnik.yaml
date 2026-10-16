@@ -1,19 +1,19 @@
-# A starting point for running segmentor on Kubernetes: a ConfigMap, a Deployment with probes and a
+# A starting point for running vodnik on Kubernetes: a ConfigMap, a Deployment with probes and a
 # hardened security context, a Service, and a PodDisruptionBudget.
 #
 # Before using it:
-#   * Create a PersistentVolumeClaim named `segmentor-media` holding your files, or remove the volume
+#   * Create a PersistentVolumeClaim named `vodnik-media` holding your files, or remove the volume
 #     and the [assets.*] table and resolve assets through a mapper (docs/mapper-api.md).
 #   * Pin the image by digest.
-#   * Put an Ingress or CDN that provides TLS in front of the Service; segmentor has none.
+#   * Put an Ingress or CDN that provides TLS in front of the Service; vodnik has none.
 #
-#   kubectl apply -f deploy/kubernetes/segmentor.yaml
+#   kubectl apply -f deploy/kubernetes/vodnik.yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: segmentor-config
+  name: vodnik-config
   labels:
-    app.kubernetes.io/name: segmentor
+    app.kubernetes.io/name: vodnik
 data:
   vod.toml: |
     [server]
@@ -44,18 +44,18 @@ data:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: segmentor
+  name: vodnik
   labels:
-    app.kubernetes.io/name: segmentor
+    app.kubernetes.io/name: vodnik
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app.kubernetes.io/name: segmentor
+      app.kubernetes.io/name: vodnik
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: segmentor
+        app.kubernetes.io/name: vodnik
     spec:
       # Longer than shutdown_delay_ms plus shutdown_grace_ms (35 s), so a rolling update drains
       # in-flight streams before the pod is killed.
@@ -65,8 +65,8 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: segmentor
-          image: ghcr.io/includeamin/segmentor:latest   # pin by digest in production
+        - name: vodnik
+          image: ghcr.io/vodnik-rs/vodnik:latest   # pin by digest in production
           ports:
             - name: http
               containerPort: 3000
@@ -112,21 +112,21 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: segmentor-config
+            name: vodnik-config
         - name: media
           persistentVolumeClaim:
-            claimName: segmentor-media
+            claimName: vodnik-media
             readOnly: true
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: segmentor
+  name: vodnik
   labels:
-    app.kubernetes.io/name: segmentor
+    app.kubernetes.io/name: vodnik
 spec:
   selector:
-    app.kubernetes.io/name: segmentor
+    app.kubernetes.io/name: vodnik
   ports:
     - name: http
       port: 80
@@ -135,9 +135,9 @@ spec:
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: segmentor
+  name: vodnik
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: segmentor
+      app.kubernetes.io/name: vodnik

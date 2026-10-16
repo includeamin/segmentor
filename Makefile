@@ -9,7 +9,7 @@ help: ## Show the available targets
 	@printf '%s\n' \
 		'bench      Measure the performance budgets (generates a 60-minute asset on first run)' \
 		'bench-enforce Like bench, but fail when a budget is missed' \
-		'bench-compare Compare segmentor with nginx-vod-module (needs Docker)' \
+		'bench-compare Compare vodnik with nginx-vod-module (needs Docker)' \
 		'conformance Run the black-box HLS/DASH conformance suite' \
 		'test-scripts Test the release automation scripts and install.sh' \
 		'book       Build the mdBook documentation' \
@@ -32,7 +32,7 @@ help: ## Show the available targets
 		'serve      Run the example HLS service' \
 		'demo       Serve the web player demo on http://127.0.0.1:8080' \
 		'admin      Serve the control panel on http://127.0.0.1:8081' \
-		'dev-up     Run segmentor, an example mapper, and both web pages in Docker Compose' \
+		'dev-up     Run vodnik, an example mapper, and both web pages in Docker Compose' \
 		'dev-down   Stop and remove the docker-compose.dev.yml stack' \
 		'unused-deps Fail on dependencies that nothing uses (needs cargo-machete)' \
 		'deny       Check dependencies for advisories and licences (needs cargo-deny)' \
@@ -43,7 +43,7 @@ test-scripts: ## Test the release automation scripts and install.sh
 	.github/scripts/test.sh
 	.github/scripts/test-install.sh
 
-bench-compare: ## Compare segmentor with nginx-vod-module (needs Docker)
+bench-compare: ## Compare vodnik with nginx-vod-module (needs Docker)
 	bench/compare/run.sh
 
 bench: ## Measure the performance budgets
@@ -124,7 +124,7 @@ demo: ## Serve the web player demo on http://127.0.0.1:8080
 admin: ## Serve the control panel (cache, resolver, and metrics) on http://127.0.0.1:8081
 	python3 -m http.server 8081 --bind 127.0.0.1 --directory admin
 
-dev-up: ## Run segmentor, an example mapper, and both web pages in Docker Compose
+dev-up: ## Run vodnik, an example mapper, and both web pages in Docker Compose
 	docker compose -f docker-compose.dev.yml up --build
 
 dev-down: ## Stop and remove the docker-compose.dev.yml stack

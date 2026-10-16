@@ -1,4 +1,4 @@
-//! The `segmentor` binary: a thin wrapper around the library's [`run`](segmentor::run).
+//! The `vodnik` binary: a thin wrapper around the library's [`run`](vodnik::run).
 
 #![forbid(unsafe_code)]
 
@@ -14,5 +14,5 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    segmentor::run().await
+    vodnik::run().await
 }

@@ -33,7 +33,7 @@ A loaded track keeps its sample tables in their compact form, with one 4-byte si
 
 ## Context
 
-[TDD 0001](0001-on-demand-mp4-packaging-core.md) expands a track's tables into `Vec<Sample>`, one record per sample with its offset, size, decode time, duration, composition offset, and sync flag. On the 60-minute benchmark asset (278,400 samples), that is 8.9 MB written before the first playlist can be answered. Writing it is most of the remaining parse time: 3 to 5 ms of an 8 ms load on the benchmark laptop, bound by memory traffic rather than code ([benchmarks](../benchmarks.md#segmentor-vs-nginx-vod-module)). nginx-vod-module answers a master playlist in 4.5 ms because it reads only track headers and sums sample sizes.
+[TDD 0001](0001-on-demand-mp4-packaging-core.md) expands a track's tables into `Vec<Sample>`, one record per sample with its offset, size, decode time, duration, composition offset, and sync flag. On the 60-minute benchmark asset (278,400 samples), that is 8.9 MB written before the first playlist can be answered. Writing it is most of the remaining parse time: 3 to 5 ms of an 8 ms load on the benchmark laptop, bound by memory traffic rather than code ([benchmarks](../benchmarks.md#vodnik-vs-nginx-vod-module)). nginx-vod-module answers a master playlist in 4.5 ms because it reads only track headers and sums sample sizes.
 
 The tables hold the same facts far more compactly. `stts` and `ctts` are runs, `stss` lists the few sync samples, and `stsc` with `stco` gives offsets per chunk. Only `stsz` has an entry per sample.
 

@@ -8,16 +8,16 @@
 
 ## Summary
 
-The mapper can tell segmentor that a source file is already CENC-encrypted, and what to do about it:
+The mapper can tell vodnik that a source file is already CENC-encrypted, and what to do about it:
 
-- **Decrypt.** The answer carries the source key. Segmentor decrypts the samples in memory and serves the result clear, or encrypted again under the answer's own `encryption` or `hls_aes128`.
-- **Passthrough.** The answer carries no key. Segmentor re-segments the file and keeps its original encryption, key ID and IVs, so the key never reaches segmentor.
+- **Decrypt.** The answer carries the source key. Vodnik decrypts the samples in memory and serves the result clear, or encrypted again under the answer's own `encryption` or `hls_aes128`.
+- **Passthrough.** The answer carries no key. Vodnik re-segments the file and keeps its original encryption, key ID and IVs, so the key never reaches vodnik.
 
 All four common protection schemes (`cenc`, `cens`, `cbc1`, `cbcs`) are read, from progressive and fragmented files. Today an `encv` or `enca` track fails the asset at load.
 
 ## Context
 
-[TDD 0009](0009-common-encryption-and-drm.md) protects clear sources and left "encrypted source passthrough" as deferred. Catalogs stored encrypted at rest, and catalogs delivered by a vendor already protected, cannot move to segmentor until the source can be read. nginx-vod-module repackages encrypted MP4s when given the key; this is the matching capability, plus a passthrough mode it does not have.
+[TDD 0009](0009-common-encryption-and-drm.md) protects clear sources and left "encrypted source passthrough" as deferred. Catalogs stored encrypted at rest, and catalogs delivered by a vendor already protected, cannot move to vodnik until the source can be read. nginx-vod-module repackages encrypted MP4s when given the key; this is the matching capability, plus a passthrough mode it does not have.
 
 Two facts about the code shape the design:
 
@@ -34,8 +34,8 @@ Two facts about the code shape the design:
 
 ## Non-goals
 
-- Deriving or fetching keys. The mapper supplies them; segmentor never talks to a licence server.
-- Sources with more than one key inside a track (`seig` sample groups), or encryption of a codec segmentor cannot already encrypt (TDD 0009).
+- Deriving or fetching keys. The mapper supplies them; vodnik never talks to a licence server.
+- Sources with more than one key inside a track (`seig` sample groups), or encryption of a codec vodnik cannot already encrypt (TDD 0009).
 - Passthrough on sequences, for I-frame playlists, and for muxed HLS audio. Decrypted I-frame playlists work, since their samples are decrypted by the same path.
 - Codecs outside TDD 0004. The original codec (`frma`) goes through the usual classification, so an encrypted track of an unsupported codec fails as a clear one does.
 - Changing a passthrough asset's protection. Combining it with `encryption` or `hls_aes128` is a rejected answer.
@@ -95,7 +95,7 @@ The four schemes follow ISO/IEC 23001-7:
 
 The exact chain and reset rule of each scheme is fixed by a published test vector in the implementation, and recorded under Implementation status.
 
-**A wrong key is noticed only where it can be.** CTR and CBC turn any key into random bytes without complaint, and a CDN would keep them. The first sample of every video track is decrypted at load, and if its NAL unit length prefixes do not tile the sample exactly the asset fails, naming the track and never the key. That works only when the length prefixes are themselves encrypted, which is rare: real encoders leave each NAL unit's length and header clear and protect the rest, and decrypted slice data looks like random bytes whether or not the key was right. So for those files, and for audio and codecs without NAL units, the only check is that the key ID matches `tenc`, and a wrong key that carries the right key ID decrypts to garbage that segmentor cannot tell from video. The mapper is trusted to give the key that belongs to the key ID; changing a key gives new URLs, so a corrected key replaces cached output.
+**A wrong key is noticed only where it can be.** CTR and CBC turn any key into random bytes without complaint, and a CDN would keep them. The first sample of every video track is decrypted at load, and if its NAL unit length prefixes do not tile the sample exactly the asset fails, naming the track and never the key. That works only when the length prefixes are themselves encrypted, which is rare: real encoders leave each NAL unit's length and header clear and protect the rest, and decrypted slice data looks like random bytes whether or not the key was right. So for those files, and for audio and codecs without NAL units, the only check is that the key ID matches `tenc`, and a wrong key that carries the right key ID decrypts to garbage that vodnik cannot tell from video. The mapper is trusted to give the key that belongs to the key ID; changing a key gives new URLs, so a corrected key replaces cached output.
 
 The URL version hashes a fingerprint of the source keys (SHA-256, as `encryption` does). Changing a source key gives new URLs, so a CDN never mixes output decrypted under two keys.
 
@@ -157,7 +157,7 @@ Stage 1 is implemented: decrypt, on a single progressive file, for all four sche
 - **Aux data** is read from `senc` under `stbl` only. A file that locates its IVs with `saiz` and `saio` and has no `senc` fails with a message naming sample auxiliary information, as does a `seig` sample group. Reading outside `moov` (and the `limits.max_source_aux_bytes` limit that goes with it) arrives with the first stage that needs it: `moov` is already bounded by `limits.max_metadata_bytes`.
 - **Mapper answer.** `source_encryption` takes `keys` for a single file. `passthrough`, renditions and clips are refused with a `502`, and a key entry may name `tracks` (`all`, `video`, `audio`) to restrict it to that kind of track.
 - **Stage 2, fragmented sources.** A track's table is the entries of the `senc` in each of its `traf`s, in order; each `senc` must list exactly the samples of that `traf`'s `trun` boxes, and the fragments together exactly the track's samples, or the asset fails at load naming the track. A `traf` with `saiz` and no `senc`, or none and no constant IV, fails the same way, as does a `seig` group in any `traf` (even when `tenc` says unprotected). Counts are bounded by the track's own sample count before anything is allocated.
-- **FFmpeg's fragmented output is not conformant for audio.** From the second fragment on, each audio `senc` lists every sample so far instead of the fragment's own (FFmpeg cannot decode that audio itself). Segmentor refuses the file rather than guess which entries are the fragment's: a wrong IV would decrypt to garbage. A test keeps the real file as the negative case; its video-only copy is the positive one.
+- **FFmpeg's fragmented output is not conformant for audio.** From the second fragment on, each audio `senc` lists every sample so far instead of the fragment's own (FFmpeg cannot decode that audio itself). Vodnik refuses the file rather than guess which entries are the fragment's: a wrong IV would decrypt to garbage. A test keeps the real file as the negative case; its video-only copy is the positive one.
 - **Not offered for a decrypted source:** I-frame playlists and fragments, and muxed HLS audio (`packaging.hls_mux_audio` is ignored for it). Both come back when a stage needs them.
 - **The wrong-key check** is the best-effort one described under [Decrypting](#decrypting).
 - **`/admin/status`** lists `source_key_ids` for a decrypted asset; the mode and the scheme are not reported yet, since decrypt is the only mode.
@@ -166,13 +166,13 @@ Stage 1 is implemented: decrypt, on a single progressive file, for all four sche
 - **Metrics.** Decrypting a segment is counted with the encrypted segments, since it takes the same route.
 - **Not built yet:** the decrypt benchmark in `make bench-compare` (the cost of losing zero-copy is **unmeasured**, and no document may quote a number for it), and the mode in the `asset_loaded` log line (it logs `media.encrypted`, which is about the output).
 - **HEVC** is read, decrypted and announced with its real codec string, checked end to end against the clear file. `tests/fixtures/protect-fixture.py` handles `hvcC` as well as `avcC`.
-- **`segmentor package`**, the development command, has no keys and refuses a protected source instead of writing it out.
+- **`vodnik package`**, the development command, has no keys and refuses a protected source instead of writing it out.
 - **A `seig` sample group is refused even when `tenc` says the track is unprotected** (a clear lead), and `default_isProtected` may be only 0 or 1.
 - **The key check reads no sample larger than `limits.max_segment_bytes`**, which is when its segment would be refused anyway.
 
 ## Open questions
 
 - **Telling a wrong key from a right one.** No structural check works for the usual layout. Is trusting the mapper enough, or should the mapper be able to give something to check against (for example, a hash of the first decrypted sample, or the PlayReady key checksum when the file carries a PlayReady header)?
-- **The trailing partial block of a `cens` range.** Segmentor leaves it clear, as the pattern schemes do for `cbcs` (checked against FFmpeg for `cbcs`) and as Shaka Packager's pattern encryptor does. No independent decoder reads `cens` (FFmpeg does not apply its pattern), so this rests on the reference encryptor and on that reading of ISO/IEC 23001-7; confirm it against a real `cens` file before relying on it.
+- **The trailing partial block of a `cens` range.** Vodnik leaves it clear, as the pattern schemes do for `cbcs` (checked against FFmpeg for `cbcs`) and as Shaka Packager's pattern encryptor does. No independent decoder reads `cens` (FFmpeg does not apply its pattern), so this rests on the reference encryptor and on that reading of ISO/IEC 23001-7; confirm it against a real `cens` file before relying on it.
 - **Zero-copy passthrough.** Worth building once the in-memory version has numbers?
 - **A key ID shared by audio and video.** Some files protect both tracks under one key ID. A key entry with `tracks: all` covers both; confirm that is how the target catalogs' files and mappers describe them.

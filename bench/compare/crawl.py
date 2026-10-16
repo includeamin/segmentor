@@ -2,7 +2,7 @@
 
 Used by run.sh to check both servers serve a comparable presentation: the same duration, and
 roughly the same payload, however they split it into requests (nginx-vod-module muxes audio into
-the video segments by default; segmentor serves audio as its own rendition).
+the video segments by default; vodnik serves audio as its own rendition).
 """
 import json
 import sys

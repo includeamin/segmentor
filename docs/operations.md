@@ -1,6 +1,6 @@
 # Operating the origin
 
-This guide covers what an operator needs to run `segmentor serve` behind a load balancer or CDN. Every setting named here is documented in `vod.example.toml`.
+This guide covers what an operator needs to run `vodnik serve` behind a load balancer or CDN. Every setting named here is documented in `vod.example.toml`.
 
 ## Deployment shape
 
@@ -92,9 +92,9 @@ Each loaded asset keeps its sample index in memory in compact form, about 16 byt
 
 ## Viewer authorization
 
-With an `[authorization]` table, every media request needs a signed playback token (a JWT) that your own system mints; segmentor only verifies it, locally, with no network call. The token's `exp` and `asset` claims are required, and `renditions` and `subtitles` can narrow it. `/health`, `/ready`, `/metrics` and `/admin/status` stay open.
+With an `[authorization]` table, every media request needs a signed playback token (a JWT) that your own system mints; vodnik only verifies it, locally, with no network call. The token's `exp` and `asset` claims are required, and `renditions` and `subtitles` can narrow it. `/health`, `/ready`, `/metrics` and `/admin/status` stay open.
 
-A token can arrive as `Authorization: Bearer`, as a cookie (`segmentor_auth`), or as a query parameter (`auth`). The query form works with players that cannot be configured, because playlists and manifests carry it into every URL they list. Those playlists are then per viewer and uncacheable, and every segment URL differs per token, so a CDN shares nothing between viewers. For a shared cache, use the header or cookie and make the CDN key on the URL alone while forwarding the cookie to the origin. A missing or invalid token is `401`, a token for another asset is `403`, and neither says whether the asset exists. Watch `vod_authorization_checks_total{outcome}`. The reasoning is in [TDD 0007](technical-design/0007-viewer-authorization.md).
+A token can arrive as `Authorization: Bearer`, as a cookie (`vodnik_auth`), or as a query parameter (`auth`). The query form works with players that cannot be configured, because playlists and manifests carry it into every URL they list. Those playlists are then per viewer and uncacheable, and every segment URL differs per token, so a CDN shares nothing between viewers. For a shared cache, use the header or cookie and make the CDN key on the URL alone while forwarding the cookie to the origin. A missing or invalid token is `401`, a token for another asset is `403`, and neither says whether the asset exists. Watch `vod_authorization_checks_total{outcome}`. The reasoning is in [TDD 0007](technical-design/0007-viewer-authorization.md).
 
 ## Content encryption
 
@@ -110,7 +110,7 @@ A failed encryption logs a `segment_encryption_failed` event naming the segment 
 
 `/admin/status` reports, per asset, whether it is `encrypted` and its `key_ids`. It never shows keys. Keys are never written to disk or to logs.
 
-Because the mapper's answer carries the keys, the mapper must be reached over `https` and require the bearer token. segmentor never contacts a licence server.
+Because the mapper's answer carries the keys, the mapper must be reached over `https` and require the bearer token. vodnik never contacts a licence server.
 
 ## Resolving assets from a mapper
 
@@ -179,9 +179,9 @@ The `Dockerfile` is a four-stage build optimized for Rust:
 - **Build context.** `.dockerignore` admits only the manifests and `src/`, so unrelated changes do not invalidate layers.
 
 ```sh
-docker build -t segmentor --build-arg VERSION=0.1.0 --build-arg REVISION=$(git rev-parse HEAD) .
+docker build -t vodnik --build-arg VERSION=0.1.0 --build-arg REVISION=$(git rev-parse HEAD) .
 docker run --rm -p 3000:3000 --read-only --cap-drop=ALL \
-  -v "$PWD/vod.toml:/etc/vod/vod.toml:ro" -v "$PWD/media:/srv/vod:ro" segmentor
+  -v "$PWD/vod.toml:/etc/vod/vod.toml:ro" -v "$PWD/media:/srv/vod:ro" vodnik
 ```
 
 Set `server.listen = "0.0.0.0:3000"` and `storage.media_root = "/srv/vod"` in the mounted configuration. The build stage installs `cmake` and a C toolchain because the TLS provider (`aws-lc-sys`) compiles C code. Use `docker stop --time` (or the orchestrator's termination grace period) above `shutdown_delay_ms + shutdown_grace_ms`. The image has no `HEALTHCHECK` because it contains no shell or HTTP client; probe `/health` and `/ready` from the orchestrator.

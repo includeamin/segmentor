@@ -7,7 +7,7 @@
 #              then compiles the application
 #   runtime  - distroless glibc image with only the binary, running as non-root
 #
-# Build:  docker build -t segmentor .
+# Build:  docker build -t vodnik .
 # Pin the bases for reproducible builds, e.g.
 #   --build-arg RUST_IMAGE=rust:<version>-slim-bookworm@sha256:<digest>
 #   --build-arg RUNTIME_IMAGE=gcr.io/distroless/cc-debian12:nonroot@sha256:<digest>
@@ -43,20 +43,20 @@ COPY src ./src
 COPY benches ./benches
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo build --release --locked --bin segmentor \
- && install -D target/release/segmentor /out/segmentor
+    cargo build --release --locked --bin vodnik \
+ && install -D target/release/vodnik /out/vodnik
 
 FROM ${RUNTIME_IMAGE} AS runtime
 ARG VERSION=dev
 ARG REVISION=unknown
-LABEL org.opencontainers.image.title="segmentor" \
+LABEL org.opencontainers.image.title="vodnik" \
       org.opencontainers.image.description="On-demand HLS and DASH origin for MP4 files" \
-      org.opencontainers.image.source="https://github.com/includeamin/segmentor" \
+      org.opencontainers.image.source="https://github.com/vodnik-rs/vodnik" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0" \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${REVISION}"
 
-COPY --from=builder /out/segmentor /usr/local/bin/segmentor
+COPY --from=builder /out/vodnik /usr/local/bin/vodnik
 
 # TLS roots come from the distroless image's CA bundle, so https mappers and origins verify.
 # Runtime contract:
@@ -71,7 +71,7 @@ USER nonroot:nonroot
 # (see server.shutdown_delay_ms and server.shutdown_grace_ms). Give the orchestrator a stop
 # timeout above their sum, for example `docker stop --time 45`.
 STOPSIGNAL SIGTERM
-ENTRYPOINT ["/usr/local/bin/segmentor"]
+ENTRYPOINT ["/usr/local/bin/vodnik"]
 CMD ["serve", "--config", "/etc/vod/vod.toml"]
 
 # No HEALTHCHECK: the image has no shell or curl. Probe GET /health (liveness) and GET /ready

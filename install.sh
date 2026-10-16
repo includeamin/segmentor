@@ -1,7 +1,7 @@
 #!/bin/sh
-# Installs a segmentor release binary for Linux (x86-64 or arm64).
+# Installs a vodnik release binary for Linux (x86-64 or arm64).
 #
-#   curl -fsSL https://raw.githubusercontent.com/includeamin/segmentor/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/vodnik-rs/vodnik/main/install.sh | sh
 #   sh install.sh --version v0.4.0 --prefix /usr/local/bin
 #
 # Read it before you run it: it is short. It downloads one release archive and its checksum from
@@ -13,10 +13,10 @@
 # service manager: see docs/deployment.md, or use the container image instead.
 set -eu
 
-REPO="includeamin/segmentor"
+REPO="vodnik-rs/vodnik"
 # These can be overridden, which is how the script is tested against a local directory.
-DOWNLOAD_BASE="${SEGMENTOR_DOWNLOAD_BASE:-https://github.com/$REPO/releases/download}"
-LATEST_URL="${SEGMENTOR_LATEST_URL:-https://github.com/$REPO/releases/latest}"
+DOWNLOAD_BASE="${VODNIK_DOWNLOAD_BASE:-https://github.com/$REPO/releases/download}"
+LATEST_URL="${VODNIK_LATEST_URL:-https://github.com/$REPO/releases/latest}"
 
 version=""
 prefix=""
@@ -100,10 +100,10 @@ case "$version" in
   *) fail "the version must look like v1.2.3, not '$version'" ;;
 esac
 
-name="segmentor-$version-$target"
-say "Installing segmentor $version for $target into $prefix"
+name="vodnik-$version-$target"
+say "Installing vodnik $version for $target into $prefix"
 if [ "$dry_run" -eq 1 ]; then
-  say "Would download $DOWNLOAD_BASE/$version/$name.tar.gz and its .sha256, verify it, and install '$prefix/segmentor'."
+  say "Would download $DOWNLOAD_BASE/$version/$name.tar.gz and its .sha256, verify it, and install '$prefix/vodnik'."
   exit 0
 fi
 
@@ -137,21 +137,21 @@ else
 fi
 
 tar -xzf "$work/$name.tar.gz" -C "$work"
-[ -f "$work/$name/segmentor" ] || fail "the archive does not contain segmentor"
+[ -f "$work/$name/vodnik" ] || fail "the archive does not contain vodnik"
 
 mkdir -p "$prefix" 2>/dev/null || true
 [ -d "$prefix" ] && [ -w "$prefix" ] || fail "cannot write to $prefix. Choose another with --prefix, or run this as a user that can."
-cp "$work/$name/segmentor" "$prefix/segmentor.new"
-chmod 0755 "$prefix/segmentor.new"
+cp "$work/$name/vodnik" "$prefix/vodnik.new"
+chmod 0755 "$prefix/vodnik.new"
 # Moving into place replaces a running binary safely; copying over it would fail while it runs.
-mv -f "$prefix/segmentor.new" "$prefix/segmentor"
+mv -f "$prefix/vodnik.new" "$prefix/vodnik"
 
-say "Installed $prefix/segmentor"
+say "Installed $prefix/vodnik"
 case ":${PATH:-}:" in
   *":$prefix:"*) ;;
   *) say "Note: $prefix is not on your PATH." ;;
 esac
 say ""
 say "Next: write a configuration (the archive's vod.example.toml lists every setting), then run"
-say "  segmentor serve --config vod.toml"
+say "  vodnik serve --config vod.toml"
 say "To run it as a service, see docs/deployment.md."
