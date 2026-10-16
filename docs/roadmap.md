@@ -130,7 +130,7 @@ Where it stands (2026-10-03, 60-minute asset):
 
 | Step | Status | Notes |
 | --- | --- | --- |
-| Mapping-JSON compatibility layer | Part 1 of 5 in progress: `tracks` and rendition language, label and default done | [TDD 0015](technical-design/0015-vod-module-mapping-adapter.md): a `vod-module` dialect of the HTTP resolver reads the existing mapping service and translates single files, adaptive sets of sequences, clips with durations, captions and track selection. Later parts: adaptive playlists ([TDD 0016](technical-design/0016-adaptive-clips.md), accepted), `cenc` and the DRM bridge, URL compatibility, fallback and the migration guide. [TDD 0008](technical-design/0008-clipping-and-concatenation.md) deferred "vod-module mapping compatibility" |
+| Mapping-JSON compatibility layer | Part 1 of 5 in progress: `tracks` and rendition language, label and default done | [TDD 0015](technical-design/0015-vod-module-mapping-adapter.md): a `vod-module` dialect of the HTTP resolver reads the existing mapping service and translates single files, adaptive sets of sequences, clips with durations, captions and track selection. Later parts: adaptive playlists ([TDD 0016](technical-design/0016-adaptive-clips.md), stage 1 implemented), `cenc` and the DRM bridge, URL compatibility, fallback and the migration guide. [TDD 0008](technical-design/0008-clipping-and-concatenation.md) deferred "vod-module mapping compatibility" |
 | URL compatibility, or a redirect layer | Decide first | nginx-vod-module URLs differ from vodnik's. Players that load URLs from the mapper need nothing; hard-coded URLs need a rewrite at the proxy |
 | Migration guide | To do | Feature mapping, configuration translation, and a shadow-traffic comparison procedure |
 | Shadow comparison in production | To do | Run both behind the same CDN on a sample of traffic, and compare manifests, segment decodes, and error rates before cutover |
@@ -155,7 +155,8 @@ The order below refines [order](#order) with what the review found. Each project
 
 | # | Project | Status | Design |
 | --- | --- | --- | --- |
-| 1 | Adaptive playlists in the mapping adapter | Design accepted; implementation not started. Clear content first, then whole-asset encryption, then per-clip keys | [TDD 0016](technical-design/0016-adaptive-clips.md) |
+| 1 | Adaptive playlists in the mapping adapter | Stage 1 (clear content) implemented; stage 2 (whole-asset encryption) and stage 3 (per-clip keys) to do | [TDD 0016](technical-design/0016-adaptive-clips.md) |
+| 2 | Verification harness: Apple Media Stream Validator, DASH-IF conformance, browser suite | To do. Needs no new design, and gives the evidence every later feature is checked against | Phase 4 |
 | 2 | Verification harness: mapper-driven conformance, browser suite, Apple Media Stream Validator, DASH-IF conformance | Design drafted. It gives the evidence every later feature is checked against | [TDD 0017](technical-design/0017-verification-harness.md) |
 | 3 | The small gaps in the table below | To do, decided item by item | Each needs a decision first |
 | 4 | DRM completion | To do | Phase 1 |
