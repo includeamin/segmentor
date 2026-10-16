@@ -1,6 +1,6 @@
 # TDD 0017: Verification harness
 
-- Status: Draft
+- Status: Accepted; not yet implemented
 - Created: 2026-10-16
 - Updated: 2026-10-16
 - Related ADRs: None
@@ -83,8 +83,10 @@ Each layer is mutation-checked once, by hand, and the mutation recorded in `conf
 2. **Stage 2, the browser suite.** The Node project, the player page, the cases, and `browser.yml`, first as a non-required check.
 3. **Stage 3, the release check.** `make release-check`, the results table, and the DASH-IF spike.
 
-## Open questions
+## Decisions
 
-- **Is a non-required browser workflow acceptable at first**, or should it block merges from the start?
-- **Is a manual Apple check enough?** It cannot be automated without Apple's licence terms allowing it; the alternative is a self-hosted Mac runner, which is a cost and a maintenance burden for one tool.
-- **The DASH-IF spike's outcome.** If the tool cannot run unattended, the release check relies on the hosted validator; confirm that sending the fixture-based assets there is acceptable.
+Settled by the repository owner on 2026-10-16:
+
+- **The browser workflow is not a required check at first.** It becomes required once it has passed consistently.
+- **Apple's validator stays a manual check on a Mac.** No self-hosted Mac runner.
+- **If the DASH-IF spike finds no unattended mode,** the release check uses the hosted validator, and only the fixture-based harness assets are ever sent to it.
