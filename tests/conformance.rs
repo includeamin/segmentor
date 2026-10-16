@@ -21,6 +21,7 @@
     clippy::format_push_string,
     clippy::large_futures,
     clippy::redundant_closure_for_method_calls,
+    clippy::struct_field_names,
     clippy::too_many_lines,
     clippy::trivially_copy_pass_by_ref,
     reason = "harness code, not the production crate"
@@ -1453,35 +1454,74 @@ fn a_track_audit_can_start_at_a_later_sequence_number() {
 // Presentations of several clips and renditions, through a mapper (TDD 0017)
 // ---------------------------------------------------------------------------------------------
 
-/// What the harness catalog serves, how many clips each track has, and the track names a player
-/// sees in the URLs and representation IDs.
-const MAPPER_ASSETS: [(&str, &[&str], usize); 4] = [
-    ("ladder", &["video-720p", "video-480p", "audio-1"], 1),
-    ("preroll", &["video", "audio-1"], 2),
-    ("grid", &["video-720p", "video-480p", "audio-1"], 2),
-    ("trimmed", &["video-720p", "video-480p", "audio-1"], 1),
+/// An asset of the harness catalog: the track names a player sees in the URLs and representation
+/// IDs, how many clips each track has, and, for each clip, the least a video clip must hold, which
+/// is the window it was asked for less what a video clip may lose to the frames shown late.
+struct MapperAsset {
+    id: &'static str,
+    tracks: &'static [&'static str],
+    clips: usize,
+    min_video_ms: &'static [u64],
+}
+
+const MAPPER_ASSETS: [MapperAsset; 5] = [
+    MapperAsset {
+        id: "single",
+        tracks: &["video", "audio-1"],
+        clips: 1,
+        min_video_ms: &[3000],
+    },
+    MapperAsset {
+        id: "ladder",
+        tracks: &["video-720p", "video-480p", "audio-1", "audio-2"],
+        clips: 1,
+        min_video_ms: &[3000],
+    },
+    MapperAsset {
+        id: "preroll",
+        tracks: &["video", "audio-1"],
+        clips: 2,
+        min_video_ms: &[3000, 1500],
+    },
+    MapperAsset {
+        id: "grid",
+        tracks: &["video-720p", "video-480p", "audio-1"],
+        clips: 2,
+        min_video_ms: &[900, 2000],
+    },
+    MapperAsset {
+        id: "trimmed",
+        tracks: &["video-720p", "video-480p", "audio-1"],
+        clips: 1,
+        min_video_ms: &[1900],
+    },
 ];
 
-fn audit_mapper_asset(server: &Server, asset: &str, tracks: &[&str], clips: usize) {
-    let hls = audit_hls_clips(server, asset);
-    let dash = audit_dash_clips(server, asset);
-    let mut expected = tracks.to_vec();
+fn audit_mapper_asset(server: &Server, asset: &MapperAsset) {
+    let hls = audit_hls_clips(server, asset.id);
+    let dash = audit_dash_clips(server, asset.id);
+    let mut expected = asset.tracks.to_vec();
     expected.sort_unstable();
     let mut found = hls.keys().map(String::as_str).collect::<Vec<_>>();
     found.sort_unstable();
-    assert_eq!(found, expected, "{asset}: the tracks a player sees");
+    assert_eq!(found, expected, "{}: the tracks a player sees", asset.id);
     for (track, audits) in &hls {
-        assert_eq!(audits.len(), clips, "{asset}/{track}: clips in HLS");
+        assert_eq!(
+            audits.len(),
+            asset.clips,
+            "{}/{track}: clips in HLS",
+            asset.id
+        );
     }
     check_presentation(asset, &hls, &dash);
 }
 
 #[test]
-fn ladder_preroll_and_trimmed_assets_conform() {
+fn single_ladder_preroll_and_trimmed_assets_conform() {
     let server = start_server_with_mapper();
-    for (asset, tracks, clips) in MAPPER_ASSETS {
-        if asset != "grid" {
-            audit_mapper_asset(&server, asset, tracks, clips);
+    for asset in &MAPPER_ASSETS {
+        if asset.id != "grid" {
+            audit_mapper_asset(&server, asset);
         }
     }
 }
@@ -1491,8 +1531,63 @@ fn ladder_preroll_and_trimmed_assets_conform() {
 #[test]
 fn a_grid_cut_mid_gop_conforms() {
     let server = start_server_with_mapper();
-    let (asset, tracks, clips) = MAPPER_ASSETS[2];
-    audit_mapper_asset(&server, asset, tracks, clips);
+    let grid = MAPPER_ASSETS
+        .iter()
+        .find(|asset| asset.id == "grid")
+        .unwrap();
+    audit_mapper_asset(&server, grid);
+}
+
+/// FFmpeg cannot judge a sequence as one stream (its HLS demuxer keeps the first init segment's
+/// settings across an `EXT-X-MAP` change), so every clip of every track is reassembled from its own
+/// init segment and segments and decoded on its own, as the in-process tests do.
+#[test]
+fn every_clip_of_every_mapper_asset_decodes() {
+    if Command::new("ffprobe").arg("-version").output().is_err() {
+        eprintln!("skipping: ffprobe is not installed");
+        return;
+    }
+    let server = start_server_with_mapper();
+    let directory = root().join("target/conformance/mapper-reassembled");
+    fs::create_dir_all(&directory).unwrap();
+    let mut decoded = 0;
+    for asset in &MAPPER_ASSETS {
+        for (track, clips) in audit_hls_clips(&server, asset.id) {
+            for (position, clip) in clips.iter().enumerate() {
+                let path = directory.join(format!("{}-{track}-{position}.mp4", asset.id));
+                let mut bytes = clip.audited.init.clone();
+                for segment in &clip.audited.segments {
+                    bytes.extend_from_slice(segment);
+                }
+                fs::write(&path, bytes).unwrap();
+                let output = Command::new("ffmpeg")
+                    .args(["-v", "error", "-i"])
+                    .arg(&path)
+                    .args(["-f", "null", "-"])
+                    .output()
+                    .expect("ffmpeg should run next to ffprobe");
+                assert!(
+                    output.stderr.is_empty(),
+                    "{}/{track} clip {position} decode errors: {}",
+                    asset.id,
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let selector = if track.starts_with("video") {
+                    "v:0"
+                } else {
+                    "a:0"
+                };
+                assert!(
+                    probe_frames(&path, selector) > 0,
+                    "{}/{track} clip {position} decodes to nothing",
+                    asset.id
+                );
+                decoded += 1;
+            }
+        }
+    }
+    // single 2 tracks x 1 clip, ladder 4 x 1, preroll 2 x 2, grid 3 x 2, trimmed 3 x 1.
+    assert_eq!(decoded, 2 + 4 + 4 + 6 + 3);
 }
 
 /// One clip of one track, audited.
@@ -1513,6 +1608,37 @@ fn clip_audit(audited: Audited, first_segment: u32) -> ClipAudit {
         length_ms: audited.total_ticks * 1000 / scale,
         audited,
     }
+}
+
+/// A clip as the rules between tracks see it, in milliseconds.
+struct ClipShape {
+    start_ms: u64,
+    length_ms: u64,
+    /// The first sample's duration, rounded up: the grain a clip can be cut at.
+    sample_ms: u64,
+    segment_starts_ms: Vec<u64>,
+}
+
+impl ClipAudit {
+    fn shape(&self) -> ClipShape {
+        let timescale = u64::from(self.audited.timescale);
+        let first = parse_fragment(&self.audited.segments[0]);
+        ClipShape {
+            start_ms: self.start_ms,
+            length_ms: self.length_ms,
+            sample_ms: (u64::from(first.durations[0]) * 1000).div_ceil(timescale),
+            segment_starts_ms: self
+                .audited
+                .segments
+                .iter()
+                .map(|segment| parse_fragment(segment).decode_time * 1000 / timescale)
+                .collect(),
+        }
+    }
+}
+
+fn shapes(clips: &[ClipAudit]) -> Vec<ClipShape> {
+    clips.iter().map(ClipAudit::shape).collect()
 }
 
 /// The number in a `segments/{n}/media.m4s` reference.
@@ -1540,6 +1666,65 @@ fn assert_init_reference(context: &str, init: &str, position: usize, clips: usiz
             "{context}: init reference {init} should name clip {position}"
         );
     }
+}
+
+/// One clip of a media playlist: its init reference, and each segment's reference and duration.
+struct PlaylistClip {
+    init: String,
+    segments: Vec<(String, f64)>,
+}
+
+/// Splits a VOD media playlist into clips at its `EXT-X-MAP`s, refusing one that is not well
+/// formed: a discontinuity precedes every clip but the first, and nothing else.
+fn parse_media_playlist(context: &str, body: &str) -> Vec<PlaylistClip> {
+    let lines = body.lines().collect::<Vec<_>>();
+    assert_eq!(lines[0], "#EXTM3U", "{context}");
+    assert_eq!(lines.last(), Some(&"#EXT-X-ENDLIST"), "{context}");
+    assert!(lines.contains(&"#EXT-X-PLAYLIST-TYPE:VOD"), "{context}");
+    assert!(lines.contains(&"#EXT-X-INDEPENDENT-SEGMENTS"), "{context}");
+    let target = lines
+        .iter()
+        .find_map(|line| line.strip_prefix("#EXT-X-TARGETDURATION:"))
+        .unwrap()
+        .parse::<f64>()
+        .unwrap();
+    let mut clips: Vec<PlaylistClip> = Vec::new();
+    let mut discontinuity = false;
+    for (index, line) in lines.iter().enumerate() {
+        if *line == "#EXT-X-DISCONTINUITY" {
+            discontinuity = true;
+        } else if let Some(map) = line.strip_prefix("#EXT-X-MAP:") {
+            assert_eq!(
+                discontinuity,
+                !clips.is_empty(),
+                "{context}: a discontinuity precedes every clip but the first, and nothing else"
+            );
+            discontinuity = false;
+            clips.push(PlaylistClip {
+                init: attributes(&format!("#X:{map}"))["URI"].clone(),
+                segments: Vec::new(),
+            });
+        } else if let Some(duration) = line.strip_prefix("#EXTINF:") {
+            assert!(
+                !discontinuity,
+                "{context}: a discontinuity inside a clip, before segment {}",
+                lines[index + 1]
+            );
+            let seconds = duration.trim_end_matches(',').parse::<f64>().unwrap();
+            assert!(
+                seconds.round() <= target,
+                "{context}: EXTINF within TARGETDURATION"
+            );
+            clips
+                .last_mut()
+                .expect("a map comes before any segment")
+                .segments
+                .push((lines[index + 1].to_owned(), seconds));
+        }
+    }
+    assert!(!discontinuity, "{context}: a discontinuity before nothing");
+    assert!(!clips.is_empty(), "{context}: no clips");
+    clips
 }
 
 /// Audits one asset's HLS presentation clip by clip: every media playlist of the master (the
@@ -1578,74 +1763,35 @@ fn audit_hls_clips(server: &Server, asset: &str) -> HashMap<String, Vec<ClipAudi
     let mut result = HashMap::new();
     for (name, reference) in targets {
         let playlist_url = resolve(&master_url, &reference);
-        let body = get_ok(server, &playlist_url).text();
-        let lines = body.lines().collect::<Vec<_>>();
         let context = format!("{asset}/{name}");
-        assert_eq!(lines[0], "#EXTM3U", "{context}");
-        assert_eq!(lines.last(), Some(&"#EXT-X-ENDLIST"), "{context}");
-        assert!(lines.contains(&"#EXT-X-PLAYLIST-TYPE:VOD"), "{context}");
-        assert!(lines.contains(&"#EXT-X-INDEPENDENT-SEGMENTS"), "{context}");
-
-        // Each `EXT-X-MAP` starts a clip; a discontinuity separates clips, and only clips.
-        let mut clips: Vec<(String, Vec<(String, f64)>)> = Vec::new();
-        let mut discontinuity = false;
-        for (index, line) in lines.iter().enumerate() {
-            if *line == "#EXT-X-DISCONTINUITY" {
-                discontinuity = true;
-            } else if let Some(map) = line.strip_prefix("#EXT-X-MAP:") {
-                assert_eq!(
-                    discontinuity,
-                    !clips.is_empty(),
-                    "{context}: a discontinuity precedes every clip but the first, and nothing else"
-                );
-                discontinuity = false;
-                clips.push((attributes(&format!("#X:{map}"))["URI"].clone(), Vec::new()));
-            } else if let Some(duration) = line.strip_prefix("#EXTINF:") {
-                let seconds = duration.trim_end_matches(',').parse::<f64>().unwrap();
-                clips
-                    .last_mut()
-                    .expect("a map comes before any segment")
-                    .1
-                    .push((lines[index + 1].to_owned(), seconds));
-            }
-        }
-        assert!(!discontinuity, "{context}: a discontinuity before nothing");
-        let target = lines
-            .iter()
-            .find_map(|line| line.strip_prefix("#EXT-X-TARGETDURATION:"))
-            .unwrap()
-            .parse::<f64>()
-            .unwrap();
+        let clips = parse_media_playlist(&context, &get_ok(server, &playlist_url).text());
 
         let mut audits = Vec::new();
         let mut next_segment = None;
-        for (position, (init_reference, segments)) in clips.iter().enumerate() {
+        for (position, clip) in clips.iter().enumerate() {
             assert!(
-                !segments.is_empty(),
+                !clip.segments.is_empty(),
                 "{context}: clip {position} has no segments"
             );
-            assert_init_reference(&context, init_reference, position, clips.len());
-            let first_segment = segment_number(&segments[0].0);
+            assert_init_reference(&context, &clip.init, position, clips.len());
+            let first_segment = segment_number(&clip.segments[0].0);
             if let Some(expected) = next_segment {
                 assert_eq!(
                     first_segment, expected,
                     "{context}: segment numbers continue across clips"
                 );
             }
-            for (offset, (uri, seconds)) in segments.iter().enumerate() {
+            for (offset, (uri, _)) in clip.segments.iter().enumerate() {
                 assert_eq!(
                     segment_number(uri),
                     first_segment + u32::try_from(offset).unwrap(),
                     "{context}: clip {position} numbers its segments in order"
                 );
-                assert!(
-                    seconds.round() <= target,
-                    "{context}: EXTINF within TARGETDURATION"
-                );
             }
-            next_segment = Some(first_segment + u32::try_from(segments.len()).unwrap());
-            let init = get_ok(server, &resolve(&playlist_url, init_reference)).body;
-            let bytes = segments
+            next_segment = Some(first_segment + u32::try_from(clip.segments.len()).unwrap());
+            let init = get_ok(server, &resolve(&playlist_url, &clip.init)).body;
+            let bytes = clip
+                .segments
                 .iter()
                 .map(|(uri, _)| get_ok(server, &resolve(&playlist_url, uri)).body)
                 .collect::<Vec<_>>();
@@ -1655,7 +1801,7 @@ fn audit_hls_clips(server: &Server, asset: &str) -> HashMap<String, Vec<ClipAudi
                 bytes,
                 None,
                 first_segment + 1,
-                |index, timescale| (segments[index].1 * f64::from(timescale)).round() as u64,
+                |index, timescale| (clip.segments[index].1 * f64::from(timescale)).round() as u64,
             );
             audits.push(clip_audit(audited, first_segment));
         }
@@ -1741,16 +1887,23 @@ fn audit_dash_clips(server: &Server, asset: &str) -> HashMap<String, Vec<ClipAud
                     start_number + 1,
                     |segment, _| durations[segment],
                 );
-                if let Some(offset) = tag.attributes.get("presentationTimeOffset") {
+                let offset = tag.attributes.get("presentationTimeOffset");
+                assert!(
+                    offset.is_some() || periods == 1,
+                    "{context}: a period of several needs a presentationTimeOffset"
+                );
+                if let Some(offset) = offset {
                     let offset = offset.parse::<u64>().unwrap();
                     // A video clip starts exactly at the offset; an audio clip starts at its first
-                    // frame at or after it, which can be a frame later.
+                    // frame at or after it, which is at most one frame later.
                     let late = audited.start_ticks.checked_sub(offset).unwrap_or_else(|| {
                         panic!("{context}: the first fragment starts before the offset")
                     });
+                    let frame = u64::from(parse_fragment(&audited.segments[0]).durations[0]);
                     assert!(
-                        late * 1000 / u64::from(audited.timescale) <= 50,
-                        "{context}: the first fragment starts {late} ticks after the offset"
+                        late <= frame,
+                        "{context}: the first fragment starts {late} ticks after the offset, \
+                         more than a sample ({frame} ticks)"
                     );
                     assert!(
                         (offset * 1000 / u64::from(audited.timescale)).abs_diff(period_start_ms)
@@ -1775,6 +1928,11 @@ fn audit_dash_clips(server: &Server, asset: &str) -> HashMap<String, Vec<ClipAud
             "{asset}: period {position} has the representations of period 0"
         );
     }
+    // KNOWN DEVIATION (docs/conformance.md): the duration of a sequence is where its video ends, and
+    // the last clip keeps the audio that runs past it (TDD 0008), so an audio track can end after
+    // `mediaPresentationDuration`: by 21 ms in `grid` and 66 ms in `preroll` today. A single file
+    // states the longest track instead and is held to 2 ms by the audit above. The bound below is a
+    // little over the worst case seen; it exists to catch a larger overrun, not to excuse this one.
     for (id, audits) in &result {
         let last = audits.last().unwrap();
         let end = (last.start_ms + last.length_ms) as f64 / 1000.0;
@@ -1788,136 +1946,301 @@ fn audit_dash_clips(server: &Server, asset: &str) -> HashMap<String, Vec<ClipAud
 
 /// What must hold between the tracks of one presentation, and between its two protocols.
 fn check_presentation(
-    asset: &str,
+    asset: &MapperAsset,
     hls: &HashMap<String, Vec<ClipAudit>>,
     dash: &HashMap<String, Vec<ClipAudit>>,
 ) {
+    let name = asset.id;
     assert_eq!(
         hls.keys().collect::<std::collections::BTreeSet<_>>(),
         dash.keys().collect::<std::collections::BTreeSet<_>>(),
-        "{asset}: HLS and DASH expose the same tracks"
+        "{name}: HLS and DASH expose the same tracks"
     );
     for (track, clips) in hls {
         let other = &dash[track];
         assert_eq!(
             clips.len(),
             other.len(),
-            "{asset}/{track}: clips in HLS and DASH"
+            "{name}/{track}: clips in HLS and DASH"
         );
         for (position, (a, b)) in clips.iter().zip(other).enumerate() {
             assert_eq!(
                 a.audited.init, b.audited.init,
-                "{asset}/{track} clip {position}: init"
+                "{name}/{track} clip {position}: init"
             );
             assert_eq!(
                 a.audited.segments, b.audited.segments,
-                "{asset}/{track} clip {position}: segments differ between protocols"
+                "{name}/{track} clip {position}: segments differ between protocols"
             );
             assert_eq!(
                 a.first_segment, b.first_segment,
-                "{asset}/{track} clip {position}"
+                "{name}/{track} clip {position}"
             );
         }
-        // A clip starts where the one before ended: the audio may overlap by under a frame.
-        for (position, pair) in clips.windows(2).enumerate() {
-            let end = pair[0].start_ms + pair[0].length_ms;
-            assert!(
-                end.abs_diff(pair[1].start_ms) <= 40,
-                "{asset}/{track}: clip {} ends at {end} ms and clip {} starts at {} ms",
-                position,
-                position + 1,
-                pair[1].start_ms
-            );
-        }
+        check_continuity(&format!("{name}/{track}"), &shapes(clips));
     }
 
     let mut videos = hls
         .iter()
         .filter(|(track, _)| track.starts_with("video"))
+        .map(|(track, clips)| (track.as_str(), shapes(clips)))
         .collect::<Vec<_>>();
-    videos.sort_by_key(|(track, _)| (*track).clone());
-    let (reference_track, reference) = videos[0];
+    videos.sort_by_key(|(track, _)| *track);
+    let (reference_track, reference) = &videos[0];
+    for (track, clips) in &videos {
+        check_covers_windows(&format!("{name}/{track}"), clips, asset.min_video_ms);
+    }
     for (track, clips) in &videos[1..] {
-        assert_eq!(clips.len(), reference.len(), "{asset}/{track}: clips");
-        for (position, (clip, first)) in clips.iter().zip(reference).enumerate() {
-            let context = format!("{asset} clip {position}: {track} against {reference_track}");
-            assert_eq!(
-                clip.audited.segments.len(),
-                first.audited.segments.len(),
-                "{context}: segments"
-            );
-            assert!(
-                clip.start_ms.abs_diff(first.start_ms) <= 40,
-                "{context}: start"
-            );
-        }
+        check_renditions_alike(
+            &format!("{name}: {track} against {reference_track}"),
+            reference,
+            clips,
+        );
     }
     for (track, clips) in hls.iter().filter(|(track, _)| track.starts_with("audio")) {
-        assert_eq!(clips.len(), reference.len(), "{asset}/{track}: clips");
-        for (position, (clip, video)) in clips.iter().zip(reference).enumerate() {
-            let context = format!("{asset} clip {position}: {track} against {reference_track}");
-            assert!(
-                clip.start_ms.abs_diff(video.start_ms) <= 50,
-                "{context}: start"
-            );
-            // An audio clip cut from a different instant of its source than the video's is the
-            // same length only by luck; a different length is what shows it.
-            assert!(
-                clip.length_ms.abs_diff(video.length_ms) <= 100,
-                "{context}: the audio is {} ms long, the video {} ms",
-                clip.length_ms,
-                video.length_ms
-            );
-        }
+        check_audio_follows_video(&format!("{name}/{track}"), reference, &shapes(clips));
     }
 }
 
-/// FFmpeg cannot judge a sequence as one stream (its HLS demuxer keeps the first init segment's
-/// settings across an `EXT-X-MAP` change), so every clip of every track is reassembled from its own
-/// init segment and segments and decoded on its own, as the in-process tests do.
-#[test]
-fn every_clip_of_every_mapper_asset_decodes() {
-    if Command::new("ffprobe").arg("-version").output().is_err() {
-        eprintln!("skipping: ffprobe is not installed");
-        return;
+fn tolerance(a: &ClipShape, b: &ClipShape) -> u64 {
+    a.sample_ms.max(b.sample_ms) + 1
+}
+
+/// A clip starts where the one before ended, to within the coarser clip's sample: the audio of a
+/// clip may overlap the next by under a frame.
+fn check_continuity(context: &str, clips: &[ClipShape]) {
+    for (position, pair) in clips.windows(2).enumerate() {
+        let end = pair[0].start_ms + pair[0].length_ms;
+        assert!(
+            end.abs_diff(pair[1].start_ms) <= tolerance(&pair[0], &pair[1]),
+            "{context}: clip {position} ends at {end} ms and clip {} starts at {} ms",
+            position + 1,
+            pair[1].start_ms
+        );
     }
-    let server = start_server_with_mapper();
-    let directory = root().join("target/conformance/mapper-reassembled");
-    fs::create_dir_all(&directory).unwrap();
-    let mut decoded = 0;
-    for (asset, _, _) in MAPPER_ASSETS {
-        for (track, clips) in audit_hls_clips(&server, asset) {
-            for (position, clip) in clips.iter().enumerate() {
-                let path = directory.join(format!("{asset}-{track}-{position}.mp4"));
-                let mut bytes = clip.audited.init.clone();
-                for segment in &clip.audited.segments {
-                    bytes.extend_from_slice(segment);
-                }
-                fs::write(&path, bytes).unwrap();
-                let output = Command::new("ffmpeg")
-                    .args(["-v", "error", "-i"])
-                    .arg(&path)
-                    .args(["-f", "null", "-"])
-                    .output()
-                    .expect("ffmpeg should run next to ffprobe");
-                assert!(
-                    output.stderr.is_empty(),
-                    "{asset}/{track} clip {position} decode errors: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                let selector = if track.starts_with("video") {
-                    "v:0"
-                } else {
-                    "a:0"
-                };
-                assert!(
-                    probe_frames(&path, selector) > 0,
-                    "{asset}/{track} clip {position} decodes to nothing"
-                );
-                decoded += 1;
-            }
+}
+
+/// Two video renditions are cut alike (TDD 0016): the same clips, the same segments starting at the
+/// same instants, and the same start and length, each to within a sample. Segment starts agreeing
+/// is not enough on its own, since a rendition whose clip ends early would drift every later one.
+fn check_renditions_alike(context: &str, reference: &[ClipShape], other: &[ClipShape]) {
+    assert_eq!(reference.len(), other.len(), "{context}: clips");
+    for (position, (first, clip)) in reference.iter().zip(other).enumerate() {
+        let context = format!("{context}, clip {position}");
+        let slack = tolerance(first, clip);
+        assert_eq!(
+            first.segment_starts_ms.len(),
+            clip.segment_starts_ms.len(),
+            "{context}: segments"
+        );
+        for (index, (a, b)) in first
+            .segment_starts_ms
+            .iter()
+            .zip(&clip.segment_starts_ms)
+            .enumerate()
+        {
+            assert!(
+                a.abs_diff(*b) <= slack,
+                "{context}: segment {index} starts at {a} ms and at {b} ms"
+            );
         }
+        assert!(
+            first.start_ms.abs_diff(clip.start_ms) <= slack,
+            "{context}: starts at {} ms and at {} ms",
+            first.start_ms,
+            clip.start_ms
+        );
+        assert!(
+            first.length_ms.abs_diff(clip.length_ms) <= slack,
+            "{context}: is {} ms long and {} ms long",
+            first.length_ms,
+            clip.length_ms
+        );
     }
-    // ladder 3 tracks x 1 clip, preroll 2 x 2, grid 3 x 2, trimmed 3 x 1.
-    assert_eq!(decoded, 3 + 4 + 6 + 3);
+}
+
+/// How much audio the last clip may carry past the end of the video: the last clip keeps the audio
+/// that runs past it (TDD 0008), which is 66 ms in `preroll` today.
+const TRAILING_AUDIO_MS: u64 = 100;
+
+/// An audio track has the video's clips. Each starts within one audio frame of the video's, and is
+/// the video's length to within a video sample and an audio frame, which is what shows an audio
+/// clip cut from a different instant of its source than the video's. Only the last clip may run
+/// longer than that, by the trailing audio.
+fn check_audio_follows_video(context: &str, video: &[ClipShape], audio: &[ClipShape]) {
+    assert_eq!(video.len(), audio.len(), "{context}: clips");
+    for (position, (v, a)) in video.iter().zip(audio).enumerate() {
+        let context = format!("{context}, clip {position}");
+        assert!(
+            a.start_ms.abs_diff(v.start_ms) <= a.sample_ms + 1,
+            "{context}: the audio starts at {} ms, the video at {} ms",
+            a.start_ms,
+            v.start_ms
+        );
+        let slack = v.sample_ms + a.sample_ms + 2;
+        let trailing = if position + 1 == video.len() {
+            TRAILING_AUDIO_MS
+        } else {
+            0
+        };
+        assert!(
+            v.length_ms.saturating_sub(a.length_ms) <= slack
+                && a.length_ms.saturating_sub(v.length_ms) <= slack + trailing,
+            "{context}: the audio is {} ms long, the video {} ms",
+            a.length_ms,
+            v.length_ms
+        );
+    }
+}
+
+/// A video clip holds at least the window it was asked for. It may begin earlier, because a video
+/// clip starts on the keyframe at or before its window, but never later or shorter.
+fn check_covers_windows(context: &str, video: &[ClipShape], minimums: &[u64]) {
+    assert_eq!(video.len(), minimums.len(), "{context}: clips");
+    for (position, (clip, minimum)) in video.iter().zip(minimums).enumerate() {
+        assert!(
+            clip.length_ms + clip.sample_ms + 1 >= *minimum,
+            "{context}: clip {position} is {} ms long, but its window holds at least {minimum} ms",
+            clip.length_ms
+        );
+    }
+}
+
+fn shape(start_ms: u64, length_ms: u64, segment_starts_ms: &[u64]) -> ClipShape {
+    ClipShape {
+        start_ms,
+        length_ms,
+        sample_ms: 34,
+        segment_starts_ms: segment_starts_ms.to_vec(),
+    }
+}
+
+fn refuses(check: impl FnOnce() + std::panic::UnwindSafe) -> bool {
+    std::panic::catch_unwind(check).is_err()
+}
+
+const TWO_CLIP_PLAYLIST: &str = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:1\n\
+#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-INDEPENDENT-SEGMENTS\n\
+#EXT-X-MAP:URI=\"clips/0/init.mp4?v=1\"\n#EXTINF:1.000,\nsegments/0/media.m4s?v=1\n\
+#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"clips/1/init.mp4?v=1\"\n#EXTINF:1.000,\n\
+segments/1/media.m4s?v=1\n#EXT-X-ENDLIST\n";
+
+#[test]
+fn a_playlist_splits_into_its_clips_and_refuses_a_misplaced_discontinuity() {
+    let clips = parse_media_playlist("good", TWO_CLIP_PLAYLIST);
+    assert_eq!(clips.len(), 2);
+    assert_eq!(clips[1].init, "clips/1/init.mp4?v=1");
+
+    let without = TWO_CLIP_PLAYLIST.replace("#EXT-X-DISCONTINUITY\n", "");
+    assert!(
+        refuses(|| {
+            parse_media_playlist("no discontinuity", &without);
+        }),
+        "a clip boundary needs a discontinuity"
+    );
+    let stray = TWO_CLIP_PLAYLIST.replace(
+        "segments/0/media.m4s?v=1\n",
+        "segments/0/media.m4s?v=1\n#EXT-X-DISCONTINUITY\n#EXTINF:1.000,\nsegments/1/media.m4s?v=1\n",
+    );
+    assert!(
+        refuses(|| {
+            parse_media_playlist("stray discontinuity", &stray);
+        }),
+        "a discontinuity inside a clip is refused"
+    );
+}
+
+#[test]
+fn clips_that_do_not_continue_are_refused() {
+    check_continuity("good", &[shape(0, 1000, &[0]), shape(1000, 900, &[1000])]);
+    let gap = [shape(0, 1000, &[0]), shape(1200, 900, &[1200])];
+    assert!(refuses(|| check_continuity("gap", &gap)));
+}
+
+#[test]
+fn renditions_cut_differently_are_refused() {
+    let reference = [shape(0, 1000, &[0, 500]), shape(1000, 900, &[1000])];
+    check_renditions_alike(
+        "good",
+        &reference,
+        &[shape(0, 1010, &[0, 505]), shape(1000, 900, &[1000])],
+    );
+    let different_count = [shape(0, 1000, &[0]), shape(1000, 900, &[1000])];
+    assert!(refuses(|| check_renditions_alike(
+        "count",
+        &reference,
+        &different_count
+    )));
+    let drifting_segment = [shape(0, 1000, &[0, 650]), shape(1000, 900, &[1000])];
+    assert!(refuses(|| check_renditions_alike(
+        "segment",
+        &reference,
+        &drifting_segment
+    )));
+    let short_last_clip = [shape(0, 1000, &[0, 500]), shape(1000, 100, &[1000])];
+    assert!(refuses(|| check_renditions_alike(
+        "length",
+        &reference,
+        &short_last_clip
+    )));
+    let late_start = [shape(0, 1000, &[0, 500]), shape(1300, 900, &[1000])];
+    assert!(refuses(|| check_renditions_alike(
+        "start",
+        &reference,
+        &late_start
+    )));
+}
+
+#[test]
+fn audio_cut_from_another_instant_than_the_video_is_refused() {
+    let video = [shape(0, 1000, &[0]), shape(1000, 2000, &[1000])];
+    check_audio_follows_video(
+        "good",
+        &video,
+        &[shape(0, 1010, &[0]), shape(1010, 2020, &[1010])],
+    );
+    let short_audio = [shape(0, 1000, &[0]), shape(1000, 1100, &[1000])];
+    assert!(refuses(|| check_audio_follows_video(
+        "length",
+        &video,
+        &short_audio
+    )));
+    let late_audio = [shape(0, 1000, &[0]), shape(1100, 2000, &[1100])];
+    assert!(refuses(|| check_audio_follows_video(
+        "start",
+        &video,
+        &late_audio
+    )));
+
+    // The last clip keeps the audio that runs past the video; an earlier clip may not.
+    check_audio_follows_video(
+        "trailing audio",
+        &video,
+        &[shape(0, 1010, &[0]), shape(1010, 2066, &[1010])],
+    );
+    let long_middle = [shape(0, 1066, &[0]), shape(1066, 2000, &[1066])];
+    assert!(refuses(|| check_audio_follows_video(
+        "middle",
+        &video,
+        &long_middle
+    )));
+    let long_last = [shape(0, 1010, &[0]), shape(1010, 2300, &[1010])];
+    assert!(refuses(|| check_audio_follows_video(
+        "last", &video, &long_last
+    )));
+}
+
+#[test]
+fn a_video_clip_shorter_than_its_window_is_refused() {
+    check_covers_windows(
+        "good",
+        &[shape(0, 950, &[0]), shape(950, 3000, &[950])],
+        &[900, 2000],
+    );
+    let short = [shape(0, 950, &[0]), shape(950, 1000, &[950])];
+    assert!(refuses(|| check_covers_windows(
+        "short",
+        &short,
+        &[900, 2000]
+    )));
 }
