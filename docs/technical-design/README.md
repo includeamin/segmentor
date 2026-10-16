@@ -21,7 +21,7 @@ Technical design documents explain a proposed subsystem before or during impleme
 | [0013](0013-key-rotation.md) | Key rotation within an asset | Accepted; implemented for single-file and adaptive assets |
 | [0014](0014-encrypted-source-files.md) | Encrypted source files | Accepted; stages 1 and 2 implemented (decrypt, one file, progressive or fragmented) |
 | [0015](0015-vod-module-mapping-adapter.md) | nginx-vod-module mapping adapter | Accepted; stage 1 implemented (`tracks`, rendition language, label and default) |
-| [0016](0016-adaptive-clips.md) | Adaptive clips | Accepted; not yet implemented |
+| [0016](0016-adaptive-clips.md) | Adaptive clips | Accepted; stage 1 implemented (clear content) |
 
 ## Workflow
 

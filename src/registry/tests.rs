@@ -2703,6 +2703,185 @@ async fn every_clip_of_a_sequence_decodes_from_the_served_hls_and_dash() {
     assert_eq!(frames, [90, 90, 60]);
 }
 
+/// The clips of an HLS media playlist: each `EXT-X-MAP` names a clip's init segment, and the
+/// segment URIs after it are that clip's.
+fn playlist_clips(playlist: &str) -> Vec<(String, Vec<String>)> {
+    let mut clips: Vec<(String, Vec<String>)> = Vec::new();
+    for line in playlist.lines() {
+        if let Some(uri) = line
+            .strip_prefix("#EXT-X-MAP:URI=\"")
+            .and_then(|rest| rest.strip_suffix('"'))
+        {
+            clips.push((uri.to_owned(), Vec::new()));
+        } else if !line.is_empty() && !line.starts_with('#') {
+            clips
+                .last_mut()
+                .expect("a map before any segment")
+                .1
+                .push(line.to_owned());
+        }
+    }
+    clips
+}
+
+/// One video adaptation set of one DASH period, as an adaptive sequence's manifest lists it.
+struct DashVideo {
+    id: String,
+    timescale: u64,
+    start_number: u32,
+    offset: u64,
+    /// The summed duration of the period's segments, in ticks.
+    ticks: u64,
+}
+
+/// Each period's start in milliseconds and its video adaptation sets.
+fn dash_periods(manifest: &str) -> Vec<(u64, Vec<DashVideo>)> {
+    manifest
+        .split("<Period ")
+        .skip(1)
+        .map(|period| {
+            let seconds = period
+                .split("start=\"PT")
+                .nth(1)
+                .and_then(|rest| rest.split("S\"").next())
+                .expect("a period start");
+            let (whole, millis) = seconds.split_once('.').expect("seconds with milliseconds");
+            let start = whole.parse::<u64>().unwrap() * 1000 + millis.parse::<u64>().unwrap();
+            let sets = period
+                .split("contentType=\"video\"")
+                .skip(1)
+                .map(|set| {
+                    let attribute = |name: &str| -> String {
+                        set.split(&format!("{name}=\""))
+                            .nth(1)
+                            .and_then(|rest| rest.split('"').next())
+                            .expect("the attribute is present")
+                            .to_owned()
+                    };
+                    let timeline = set.split("</SegmentTimeline>").next().unwrap();
+                    DashVideo {
+                        id: attribute("Representation id"),
+                        timescale: attribute("timescale").parse().unwrap(),
+                        start_number: attribute("startNumber").parse().unwrap(),
+                        offset: attribute("presentationTimeOffset").parse().unwrap(),
+                        ticks: timeline
+                            .split(" d=\"")
+                            .skip(1)
+                            .map(|rest| rest.split('"').next().unwrap().parse::<u64>().unwrap())
+                            .sum(),
+                    }
+                })
+                .collect();
+            (start, sets)
+        })
+        .collect()
+}
+
+/// `ffmpeg` cannot judge a sequence as one stream (see the test above), so each rendition is
+/// followed clip by clip, and what is decoded from each clip must match the same cuts of that
+/// rendition's file served as a plain sequence.
+#[tokio::test]
+async fn every_rendition_of_an_adaptive_sequence_decodes_clip_by_clip() {
+    if std::process::Command::new("ffprobe")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: ffprobe is not installed");
+        return;
+    }
+    let h = harness().await;
+    h.mapper.state.set("grid", two_clip_ladder("v1"));
+    for (name, file) in [
+        ("720p", "rendition-720p.mp4"),
+        ("480p", "rendition-480p.mp4"),
+    ] {
+        h.mapper.state.set(
+            &format!("plain-{name}"),
+            Answer::clips(
+                "v1",
+                &[clip(file, None, Some(1000)), clip(file, Some(1000), None)],
+            ),
+        );
+    }
+    let directory =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/adaptive-decode");
+    let decode = |asset: &str, track: &str| {
+        let (app, asset, track) = (h.app.clone(), asset.to_owned(), track.to_owned());
+        let directory = directory.join(format!("{asset}-{track}"));
+        async move {
+            let playlist = text(
+                &fetch(&app, &format!("/hls/{asset}/{track}/index.m3u8"))
+                    .await
+                    .2,
+            );
+            decode_each(
+                &app,
+                &format!("/hls/{asset}/{track}/"),
+                &playlist_clips(&playlist),
+                &directory,
+                None,
+            )
+            .await
+        }
+    };
+
+    for rendition in ["720p", "480p"] {
+        let reference = decode(&format!("plain-{rendition}"), "video").await;
+        assert_eq!(reference.len(), 2);
+        assert!(reference.iter().all(|&frames| frames > 0), "{reference:?}");
+        let frames = decode("grid", &format!("video-{rendition}")).await;
+        assert_eq!(
+            frames, reference,
+            "{rendition} decodes with the frame counts of the same cuts served as a plain sequence"
+        );
+    }
+}
+
+/// What makes switching quality safe at a clip boundary: every rendition's period starts at the
+/// same time, its first fragment starts where the period says it does, and the period starts
+/// where the one before ended. This also settles TDD 0016's question about the shared timeline.
+#[tokio::test]
+async fn every_rendition_starts_each_period_at_the_same_time_and_continues_the_last() {
+    let h = harness().await;
+    h.mapper.state.set("grid", two_clip_ladder("v1"));
+    let version = version_in(&fetch(&h.app, "/hls/grid/master.m3u8").await.2);
+
+    let periods = dash_periods(&text(&fetch(&h.app, "/dash/grid/manifest.mpd").await.2));
+
+    assert_eq!(periods.len(), 2);
+    for (position, (start_ms, sets)) in periods.iter().enumerate() {
+        assert_eq!(sets.len(), 2, "period {position}");
+        for set in sets {
+            let offset_ms = set.offset * 1000 / set.timescale;
+            assert!(
+                offset_ms.abs_diff(*start_ms) <= 1,
+                "{} period {position}: offset {offset_ms} ms, period starts {start_ms} ms",
+                set.id
+            );
+            let fragment = fetch(
+                &h.app,
+                &format!(
+                    "/dash/grid/{}/segments/{}/media.m4s?v={version}",
+                    set.id, set.start_number
+                ),
+            )
+            .await
+            .2;
+            assert_eq!(tfdt(&fragment), set.offset, "{} period {position}", set.id);
+        }
+    }
+    for set in &periods[0].1 {
+        let ends_ms = set.ticks * 1000 / set.timescale;
+        assert!(
+            ends_ms.abs_diff(periods[1].0) <= 40,
+            "{}: the first period ends at {ends_ms} ms, the second starts at {} ms",
+            set.id,
+            periods[1].0
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The optional asset listing (`GET /v1/assets`)
 // ---------------------------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # TDD 0016: Adaptive clips
 
-- Status: Accepted; not yet implemented
+- Status: Accepted; stage 1 implemented (clear content)
 - Created: 2026-10-16
 - Updated: 2026-10-16
 - Related ADRs: None
@@ -160,8 +160,19 @@ Rolling back a stage is removing its handling: an older build rejects a renditio
 - An audio rendition that spans clips of a different count than the video's.
 - `dynamic` clips and `clipIds` (a second upstream), and live fields, which are their own designs.
 
+## Implementation status
+
+Stage 1 (clear content) is implemented; stages 2 and 3 (encryption) are not. What differs from the design above, or settles it:
+
+- **Shared timeline.** The test `every_rendition_starts_each_period_at_the_same_time_and_continues_the_last` shows that every rendition's period starts at the same time, that each rendition's first fragment starts where its period says it does, and that each period starts where the one before ended, within 40 ms. So the timeline taken from the first video rendition holds on the output side; it has not been checked on real devices.
+- **Length tolerance.** The clip-length check uses the largest longest sample of any video rendition in the clip, not the larger of each pair, which is simpler and at most one coarse sample looser.
+- **Audio numbers its own segments.** Each member of the shared audio group numbers its own segments across clips, because an audio-only rendition has its own segment plan; `startNumber` and the segment URIs of an audio member follow it, not the video's.
+- **Frame counts differ by a frame between renditions.** Cut alike, two renditions encoded with different frame-reorder structures can hold one frame more or less in a clip (28 against 29 in the fixtures). The checks allow it, and the decode test compares each rendition with its own file cut the same way.
+- **Black-box coverage is in-process.** The conformance suite builds its server from a static catalog of single files, which has no renditions or clips, so this feature is covered by the registry tests through the real router. An out-of-process check belongs to the verification harness (roadmap, project 2).
+- The nginx-vod-module translator of TDD 0015 is not built; this design is what it will translate to.
+
 ## Open questions
 
-- **Shared timeline from the first video rendition.** Is the one-sample gap or overlap this can leave acceptable on real players, or should every rendition keep its own natural timeline and only be checked for agreement? The first is simpler and keeps switching exact; it needs a real-device check, which waits for the verification harness.
+- **Shared timeline on real devices.** The timeline checks out in the output (see Implementation status); whether real players switch cleanly across the boundary waits for the verification harness.
 - **`max_sequence_files` default of 256.** A guess from the largest grids in the examples. It should be set from a real catalog.
 - **Variant order.** Sorted by bandwidth as for ladders. nginx-vod-module's documentation does not say how it orders them, so no compatibility rule is known; confirm against a real deployment's players.
