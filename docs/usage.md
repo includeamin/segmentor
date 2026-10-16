@@ -22,12 +22,14 @@ Each asset exposes:
 /hls/{asset}/video/iframes/{n}/media.m4s   (one keyframe as its own fragment)
 /hls/{asset}/{track}/init.mp4
 /hls/{asset}/{track}/segments/{index}/media.m4s
+/hls/{asset}/{track}/clips/{n}/init.mp4   (a sequence has one init segment per clip, not a plain one; {track} may be video-{id} or audio-{n} for renditions that are sequences)
 /hls/{asset}/subtitles/{language}/index.m3u8   (when the mapper lists subtitles)
 /hls/{asset}/subtitles/{language}/sub.vtt
 /dash/{asset}/manifest.mpd
 /dash/{asset}/subtitles/{language}/sub.vtt
 /dash/{asset}/{track}/init.mp4
 /dash/{asset}/{track}/segments/{index}/media.m4s
+/dash/{asset}/{track}/clips/{n}/init.mp4   (as for HLS)
 /health         liveness
 /ready          readiness (503 once shutdown begins)
 /metrics        Prometheus text

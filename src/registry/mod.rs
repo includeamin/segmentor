@@ -25,6 +25,7 @@ use reqwest::Url;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, Semaphore};
 use tokio::time::{Duration, timeout};
 
+use crate::adaptive;
 use crate::asset::{Extras, PackagedAsset};
 use crate::composite::{self, ServedAsset};
 use crate::config::{Config, LimitsConfig, is_valid_asset_id};
@@ -32,8 +33,8 @@ use crate::error::{Error, Result};
 use crate::mp4;
 use crate::observability::metrics::{CacheEvent, Metrics, ResolverOutcome};
 use crate::resolver::{
-    AssetLocation, AssetResolver, LocationKey, RenditionSource, Resolution, ResolveError,
-    ResolvedAsset, SubtitleLocation,
+    AssetLocation, AssetResolver, LocationKey, RenditionLocation, RenditionSource, Resolution,
+    ResolveError, ResolvedAsset, SubtitleLocation,
 };
 use crate::sequence::{self, ClipFile};
 use crate::source::LocationRefresher;
@@ -716,6 +717,12 @@ impl AssetRegistry {
             self.load_clips(asset_id, resolved).await
         } else if resolved.renditions.is_empty() {
             self.load_single(asset_id, resolved).await
+        } else if resolved
+            .renditions
+            .iter()
+            .any(|rendition| matches!(rendition.source, RenditionSource::Clips(_)))
+        {
+            self.load_adaptive_clips(asset_id, resolved).await
         } else {
             self.load_composite(asset_id, resolved).await
         };
@@ -832,7 +839,7 @@ impl AssetRegistry {
                     });
                     let RenditionSource::Location(location) = &rendition.source else {
                         return Err(Error::InvalidMedia(
-                            "renditions with clips are not served yet".to_owned(),
+                            "a rendition with clips reached the single-file loader".to_owned(),
                         ));
                     };
                     let source = registry
@@ -902,14 +909,14 @@ impl AssetRegistry {
         // Each distinct object, with the first clip that names it: that clip's key is what the
         // file's refresher asks the mapper about, and a rotation reaches every clip of the file
         // because they share one source.
-        let mut files: Vec<(usize, AssetLocation)> = Vec::new();
+        let mut files: Vec<(LocationKey, AssetLocation)> = Vec::new();
         let mut clips = Vec::with_capacity(resolved.clips.len());
         for (position, clip) in resolved.clips.iter().enumerate() {
             let file = files
                 .iter()
                 .position(|(_, location)| location.same_object(&clip.location))
                 .unwrap_or_else(|| {
-                    files.push((position, clip.location.clone()));
+                    files.push((LocationKey::Clip(position), clip.location.clone()));
                     files.len() - 1
                 });
             // This clip's own encryption (TDD 0009, "Different keys per clip"), falling back to
@@ -920,48 +927,7 @@ impl AssetRegistry {
                 .or_else(|| resolved.encryption.clone());
             clips.push((file, clip.window, encryption, clip.tracks));
         }
-
-        let mut tasks = tokio::task::JoinSet::new();
-        for (file, (first_clip, location)) in files.iter().cloned().enumerate() {
-            let registry = Arc::clone(self);
-            let asset_id = asset_id.to_owned();
-            tasks.spawn(async move {
-                let outcome: Result<(ClipFile, Arc<AssetRefresher>)> = async {
-                    let refresher = Arc::new(AssetRefresher {
-                        registry: Arc::downgrade(&registry),
-                        asset_id,
-                        key: LocationKey::Clip(first_clip),
-                        armed: AtomicBool::new(false),
-                    });
-                    let source = registry
-                        .opener
-                        .open(
-                            &location,
-                            Arc::clone(&refresher) as Arc<dyn LocationRefresher>,
-                        )
-                        .await?;
-                    let parsed = mp4::parse(&source, &registry.limits).await?;
-                    Ok((ClipFile { source, parsed }, refresher))
-                }
-                .await;
-                (file, first_clip, outcome)
-            });
-        }
-        let mut opened = Vec::with_capacity(files.len());
-        while let Some(joined) = tasks.join_next().await {
-            let (file, first_clip, outcome) = joined.map_err(|error| {
-                Error::Io(std::io::Error::other(format!("clip task failed: {error}")))
-            })?;
-            let (clip_file, refresher) = outcome
-                .map_err(|error| Error::InvalidMedia(format!("clip {first_clip}: {error}")))?;
-            opened.push((file, clip_file, refresher));
-        }
-        // `JoinSet` finishes in any order; restore the order the clips refer to files by.
-        opened.sort_by_key(|(file, _, _)| *file);
-        let (clip_files, refreshers): (Vec<_>, Vec<_>) = opened
-            .into_iter()
-            .map(|(_, file, refresher)| (file, refresher))
-            .unzip();
+        let (clip_files, refreshers) = self.open_clip_files(asset_id, files).await?;
 
         let asset_id = asset_id.to_owned();
         let version = resolved.version.clone();
@@ -985,6 +951,120 @@ impl AssetRegistry {
             refresher.armed.store(true, Ordering::Relaxed);
         }
         Ok(asset)
+    }
+
+    /// Renditions that are sequences (TDD 0016): every distinct file across all of them is opened
+    /// once, then each (rendition, clip) is trimmed from its file and the grid is assembled on the
+    /// blocking pool. All or nothing: the first file to fail names its rendition and clip.
+    async fn load_adaptive_clips(
+        self: &Arc<Self>,
+        asset_id: &str,
+        resolved: &ResolvedAsset,
+    ) -> Result<ServedAsset> {
+        let (files, indices) = distinct_locations(&resolved.renditions);
+        let plans = resolved
+            .renditions
+            .iter()
+            .zip(&indices)
+            .map(|(rendition, file_indices)| {
+                let RenditionSource::Clips(clips) = &rendition.source else {
+                    return Err(Error::InvalidMedia(format!(
+                        "rendition `{}` has no clips",
+                        rendition.id
+                    )));
+                };
+                Ok(adaptive::RenditionPlan {
+                    id: rendition.id.clone(),
+                    audio: rendition.audio.clone(),
+                    clips: clips
+                        .iter()
+                        .zip(file_indices)
+                        .map(|(clip, &file)| (file, clip.window, None, clip.tracks))
+                        .collect(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (clip_files, refreshers) = self.open_clip_files(asset_id, files).await?;
+
+        let asset_id = asset_id.to_owned();
+        let version = resolved.version.clone();
+        let segment_duration_ms = self.settings.segment_duration_ms;
+        let limits = self.limits.clone();
+        let asset = tokio::task::spawn_blocking(move || {
+            adaptive::build(
+                &asset_id,
+                &clip_files,
+                &plans,
+                &version,
+                segment_duration_ms,
+                &limits,
+            )
+        })
+        .await
+        .map_err(|error| Error::Io(std::io::Error::other(error)))??;
+        for refresher in refreshers {
+            refresher.armed.store(true, Ordering::Relaxed);
+        }
+        Ok(asset)
+    }
+
+    /// Opens and parses each distinct file concurrently. `files` pairs each with the key that
+    /// names it in an error and that its refresher asks the mapper about. The refreshers come
+    /// back disarmed: the caller arms them once the asset is built.
+    async fn open_clip_files(
+        self: &Arc<Self>,
+        asset_id: &str,
+        files: Vec<(LocationKey, AssetLocation)>,
+    ) -> Result<(Vec<ClipFile>, Vec<Arc<AssetRefresher>>)> {
+        let mut tasks = tokio::task::JoinSet::new();
+        for (file, (key, location)) in files.into_iter().enumerate() {
+            let registry = Arc::clone(self);
+            let asset_id = asset_id.to_owned();
+            tasks.spawn(async move {
+                let outcome: Result<(ClipFile, Arc<AssetRefresher>)> = async {
+                    let refresher = Arc::new(AssetRefresher {
+                        registry: Arc::downgrade(&registry),
+                        asset_id,
+                        key: key.clone(),
+                        armed: AtomicBool::new(false),
+                    });
+                    let source = registry
+                        .opener
+                        .open(
+                            &location,
+                            Arc::clone(&refresher) as Arc<dyn LocationRefresher>,
+                        )
+                        .await?;
+                    let parsed = mp4::parse(&source, &registry.limits).await?;
+                    Ok((ClipFile { source, parsed }, refresher))
+                }
+                .await;
+                (file, key, outcome)
+            });
+        }
+        let mut opened = Vec::new();
+        while let Some(joined) = tasks.join_next().await {
+            let (file, key, outcome) = joined.map_err(|error| {
+                Error::Io(std::io::Error::other(format!("clip task failed: {error}")))
+            })?;
+            let (clip_file, refresher) = outcome.map_err(|error| {
+                let name = match &key {
+                    LocationKey::Clip(position) => format!("clip {position}"),
+                    LocationKey::RenditionClip(id, position) => {
+                        format!("rendition `{id}`: clip {position}")
+                    }
+                    other => other.to_string(),
+                };
+                Error::InvalidMedia(format!("{name}: {error}"))
+            })?;
+            opened.push((file, clip_file, refresher));
+        }
+        // `JoinSet` finishes in any order; restore the order the clips refer to files by.
+        opened.sort_by_key(|(file, _, _)| *file);
+        Ok(opened
+            .into_iter()
+            .map(|(_, file, refresher)| (file, refresher))
+            .unzip())
     }
 
     fn publish_loaded(&self) {
@@ -1044,4 +1124,35 @@ impl LocationRefresher for AssetRefresher {
                 })
         })
     }
+}
+
+/// The distinct objects the clips of renditions name, each keyed by the first (rendition, clip)
+/// pair that names it, and for each rendition the file index of each of its clips (TDD 0016).
+/// Two pairs that name one object share an entry, so a shared file is opened once and a rotated
+/// signed URL reaches every pair.
+fn distinct_locations(
+    renditions: &[RenditionLocation],
+) -> (Vec<(LocationKey, AssetLocation)>, Vec<Vec<usize>>) {
+    let mut files: Vec<(LocationKey, AssetLocation)> = Vec::new();
+    let mut indices = Vec::with_capacity(renditions.len());
+    for rendition in renditions {
+        let mut row = Vec::new();
+        if let RenditionSource::Clips(clips) = &rendition.source {
+            for (position, clip) in clips.iter().enumerate() {
+                let file = files
+                    .iter()
+                    .position(|(_, location)| location.same_object(&clip.location))
+                    .unwrap_or_else(|| {
+                        files.push((
+                            LocationKey::RenditionClip(rendition.id.clone(), position),
+                            clip.location.clone(),
+                        ));
+                        files.len() - 1
+                    });
+                row.push(file);
+            }
+        }
+        indices.push(row);
+    }
+    (files, indices)
 }
