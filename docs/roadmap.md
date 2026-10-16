@@ -130,7 +130,7 @@ Where it stands (2026-10-03, 60-minute asset):
 
 | Step | Status | Notes |
 | --- | --- | --- |
-| Mapping-JSON compatibility layer | Part 1 of 5 in progress: `tracks` and rendition language, label and default done | [TDD 0015](technical-design/0015-vod-module-mapping-adapter.md): a `vod-module` dialect of the HTTP resolver reads the existing mapping service and translates single files, adaptive sets of sequences, clips with durations, captions and track selection. Later parts: adaptive playlists ([TDD 0016](technical-design/0016-adaptive-clips.md), draft), `cenc` and the DRM bridge, URL compatibility, fallback and the migration guide. [TDD 0008](technical-design/0008-clipping-and-concatenation.md) deferred "vod-module mapping compatibility" |
+| Mapping-JSON compatibility layer | Part 1 of 5 in progress: `tracks` and rendition language, label and default done | [TDD 0015](technical-design/0015-vod-module-mapping-adapter.md): a `vod-module` dialect of the HTTP resolver reads the existing mapping service and translates single files, adaptive sets of sequences, clips with durations, captions and track selection. Later parts: adaptive playlists ([TDD 0016](technical-design/0016-adaptive-clips.md), accepted), `cenc` and the DRM bridge, URL compatibility, fallback and the migration guide. [TDD 0008](technical-design/0008-clipping-and-concatenation.md) deferred "vod-module mapping compatibility" |
 | URL compatibility, or a redirect layer | Decide first | nginx-vod-module URLs differ from vodnik's. Players that load URLs from the mapper need nothing; hard-coded URLs need a rewrite at the proxy |
 | Migration guide | To do | Feature mapping, configuration translation, and a shadow-traffic comparison procedure |
 | Shadow comparison in production | To do | Run both behind the same CDN on a sample of traffic, and compare manifests, segment decodes, and error rates before cutover |
@@ -144,6 +144,43 @@ vodnik never decodes media. The following nginx-vod-module features need decodin
 - playback-rate change, gain, and audio mixing filters.
 
 If one of them is needed, the usual approach is a separate service next to vodnik (for example a thumbnail service reading the same storage), keeping the packaging path decode-free.
+
+## Gap review (2026-10-16)
+
+A review of vodnik against nginx-vod-module's published [feature list](https://github.com/kaltura/nginx-vod-module#features), read from Kaltura's public documentation only and never from its source. Statuses above are this repo's own; the items in the second table below were also checked with a search of the code and docs on this date. A gap matters only if a deployment uses the feature, so the first step for any migration is to list the `vod_*` directives and the mapping responses it actually relies on. That list has not been collected yet.
+
+### Work order
+
+The order below refines [order](#order) with what the review found. Each project starts with a design, and nothing is built before the design is accepted.
+
+| # | Project | Status | Design |
+| --- | --- | --- | --- |
+| 1 | Adaptive playlists in the mapping adapter | Design accepted; implementation not started. Clear content first, then whole-asset encryption, then per-clip keys | [TDD 0016](technical-design/0016-adaptive-clips.md) |
+| 2 | Verification harness: Apple Media Stream Validator, DASH-IF conformance, browser suite | To do. Needs no new design, and gives the evidence every later feature is checked against | Phase 4 |
+| 3 | The small gaps in the table below | To do, decided item by item | Each needs a decision first |
+| 4 | DRM completion | To do | Phase 1 |
+| 5 | Captions and audio | To do | Phase 2 |
+| 6 | Migration finish: URL compatibility, fallback, migration guide, shadow traffic | To do | Phase 5 |
+| 7 | Delivery modes: simulated live, ad markers, MPEG-TS HLS, MSS, progressive MP4 | Decide per item, only for what a real deployment needs | Phase 3 |
+
+Project 1 comes first because it is the largest migration blocker and the only gap that changes the core model; the others add to it. Project 3 moves up if the deployment does not use adaptive playlists. The features under [Out of scope by design](#out-of-scope-by-design) are decided after projects 1 to 6.
+
+### Gaps not listed above
+
+nginx-vod-module documents each of these, and vodnik has no counterpart today.
+
+| Gap | nginx-vod-module | vodnik today | Next step |
+| --- | --- | --- | --- |
+| VP8 video | DASH | Not supported ([supported input](supported-input.md)) | Decide first: add it only if a catalog needs it |
+| CEA-608/708 caption signalling | Mapping `closedCaptions`: declares `INSTREAM-ID` values in HLS, or `CLOSED-CAPTIONS=NONE` | Not supported; the mapping adapter refuses the field | A small design: the mapper declares the captions, vodnik only signals them |
+| Shorter early segments | `vod_bootstrap_segment_durations` | One server-wide `segment_duration_ms` | Decide first: a faster start for the first segments |
+| Segment count policy | `vod_segment_count_policy`: last segment short, long, or rounded | None | Decide first: keyframe-aligned planning may already make it moot |
+| Segment duration per asset | Mapping `segmentDuration` | The adapter accepts it only when it equals the server's | A per-asset override in the mapper API |
+| Edit lists beyond one edit | Handled, with `vod_ignore_edit_list` to skip them | One edit, optionally after one empty edit; more is refused | Decide: an ignore option, or real multi-edit support |
+| Per-stream timing offset | Mapping `shift` | None | Decide first |
+| DASH `SegmentList` | Offered next to `SegmentTemplate` and `SegmentTimeline` | `SegmentTemplate` with `SegmentTimeline` only | Decide first: only for players that cannot use templates |
+| Several qualities from one URL | `.urlset` multi-URL sets | None; adaptive sets come only from the mapper | Part of the URL compatibility item in Phase 5 |
+| Notification callbacks | `notifications` and `vod_notification_uri` | None; the adapter refuses `notifications` | Fold into the ad markers design in Phase 3 |
 
 ## order
 
