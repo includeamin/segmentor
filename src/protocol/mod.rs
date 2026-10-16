@@ -8,7 +8,7 @@ pub(crate) mod hls;
 mod manifest;
 mod presentation;
 
-pub(crate) use hls::{AdaptiveAudio, AdaptiveVideo};
+pub(crate) use hls::{AdaptiveAudio, AdaptiveVideo, SequenceAudio, SequenceVideo};
 pub(crate) use manifest::{Encoding, Manifest};
 #[cfg(test)]
 pub(crate) use presentation::fixtures;
