@@ -172,6 +172,7 @@ Stage 1 (clear content) is implemented; stages 2 and 3 (encryption) are not. Wha
 - **Audio numbers its own segments.** Each member of the shared audio group numbers its own segments across clips, because an audio-only rendition has its own segment plan; `startNumber` and the segment URIs of an audio member follow it, not the video's.
 - **Frame counts differ by a frame between renditions.** Cut alike, two renditions encoded with different frame-reorder structures can hold one frame more or less in a clip (28 against 29 in the fixtures). The checks allow it, and the decode test compares each rendition with its own file cut the same way.
 - **Black-box coverage is in-process.** The conformance suite builds its server from a static catalog of single files, which has no renditions or clips, so this feature is covered by the registry tests through the real router. An out-of-process check belongs to the verification harness (roadmap, project 2).
+- **One video set per Period.** Every video rendition of a Period sits in one `AdaptationSet`, as in a ladder, so a player can switch between them. They were in sets of their own at first, which left dash.js with a single rendition (found by the browser suite).
 - The nginx-vod-module translator of TDD 0015 is not built; this design is what it will translate to.
 
 ## Open questions

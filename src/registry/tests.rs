@@ -2315,6 +2315,87 @@ async fn an_adaptive_clips_answer_serves_hls_and_dash() {
     assert_eq!(manifest.matches("<Period ").count(), 2, "{manifest}");
 }
 
+/// In DASH the switchable steps of one piece of content belong in one `AdaptationSet`; separate
+/// sets are alternative tracks, which a player never switches between. dash.js then sees a single
+/// rendition and cannot adapt (found by the browser suite, docs/conformance.md).
+#[tokio::test]
+async fn a_ladders_video_renditions_share_one_dash_adaptation_set() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "ladder",
+        Answer::renditions(
+            "v1",
+            &[("a", "rendition-480p.mp4"), ("b", "rendition-720p.mp4")],
+        ),
+    );
+    let manifest = text(&fetch(&h.app, "/dash/ladder/manifest.mpd").await.2);
+    assert_eq!(
+        manifest.matches("contentType=\"video\"").count(),
+        1,
+        "{manifest}"
+    );
+    for id in ["video-a", "video-b"] {
+        assert_eq!(
+            manifest
+                .matches(&format!("<Representation id=\"{id}\""))
+                .count(),
+            1,
+            "{id}: {manifest}"
+        );
+    }
+    let set = manifest.split("contentType=\"video\"").nth(1).unwrap();
+    let set = set.split("</AdaptationSet>").next().unwrap();
+    assert_eq!(set.matches("<Representation ").count(), 2, "{manifest}");
+}
+
+/// Each Period of an adaptive sequence holds one video set with every rendition in it, so a
+/// player can switch inside a Period as well as across the join.
+#[tokio::test]
+async fn each_period_of_an_adaptive_sequence_has_one_video_adaptation_set() {
+    let h = harness().await;
+    h.mapper.state.set("grid", two_clip_ladder("v1"));
+    let manifest = text(&fetch(&h.app, "/dash/grid/manifest.mpd").await.2);
+    let periods: Vec<&str> = manifest.split("<Period ").skip(1).collect();
+    assert_eq!(periods.len(), 2, "{manifest}");
+    for period in periods {
+        assert_eq!(
+            period.matches("contentType=\"video\"").count(),
+            1,
+            "{period}"
+        );
+        assert_eq!(
+            period.matches("<Representation id=\"video-").count(),
+            2,
+            "{period}"
+        );
+    }
+}
+
+/// Encryption is signalled once for the set, not once per rendition, and a ladder signals what a
+/// single rendition does.
+#[tokio::test]
+async fn an_encrypted_ladders_video_set_signals_its_protection_once() {
+    let h = harness().await;
+    h.mapper.state.set(
+        "one",
+        Answer::renditions("v1", &[("a", "rendition-480p.mp4")])
+            .with_encryption(rotating_encryption()),
+    );
+    h.mapper.state.set(
+        "two",
+        Answer::renditions(
+            "v1",
+            &[("a", "rendition-480p.mp4"), ("b", "rendition-720p.mp4")],
+        )
+        .with_encryption(rotating_encryption()),
+    );
+    let count = |manifest: String| manifest.matches("<ContentProtection").count();
+    let one = count(text(&fetch(&h.app, "/dash/one/manifest.mpd").await.2));
+    let two = count(text(&fetch(&h.app, "/dash/two/manifest.mpd").await.2));
+    assert!(one > 0, "the asset is encrypted");
+    assert_eq!(one, two);
+}
+
 #[tokio::test]
 async fn each_rendition_and_clip_has_its_own_init_segment() {
     let h = harness().await;
@@ -2813,7 +2894,7 @@ fn playlist_clips(playlist: &str) -> Vec<(String, Vec<String>)> {
     clips
 }
 
-/// One video adaptation set of one DASH period, as an adaptive sequence's manifest lists it.
+/// One video representation of one DASH period, as an adaptive sequence's manifest lists it.
 struct DashVideo {
     id: String,
     timescale: u64,
@@ -2823,7 +2904,7 @@ struct DashVideo {
     ticks: u64,
 }
 
-/// Each period's start in milliseconds and its video adaptation sets.
+/// Each period's start in milliseconds and its video representations.
 fn dash_periods(manifest: &str) -> Vec<(u64, Vec<DashVideo>)> {
     manifest
         .split("<Period ")
@@ -2837,8 +2918,9 @@ fn dash_periods(manifest: &str) -> Vec<(u64, Vec<DashVideo>)> {
             let (whole, millis) = seconds.split_once('.').expect("seconds with milliseconds");
             let start = whole.parse::<u64>().unwrap() * 1000 + millis.parse::<u64>().unwrap();
             let sets = period
-                .split("contentType=\"video\"")
+                .split("<Representation ")
                 .skip(1)
+                .filter(|set| set.starts_with("id=\"video-"))
                 .map(|set| {
                     let attribute = |name: &str| -> String {
                         set.split(&format!("{name}=\""))
@@ -2849,7 +2931,7 @@ fn dash_periods(manifest: &str) -> Vec<(u64, Vec<DashVideo>)> {
                     };
                     let timeline = set.split("</SegmentTimeline>").next().unwrap();
                     DashVideo {
-                        id: attribute("Representation id"),
+                        id: attribute("id"),
                         timescale: attribute("timescale").parse().unwrap(),
                         start_number: attribute("startNumber").parse().unwrap(),
                         offset: attribute("presentationTimeOffset").parse().unwrap(),
