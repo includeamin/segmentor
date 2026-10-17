@@ -6,9 +6,9 @@ This page is about getting vodnik running: which way to install it, and ready-ma
 
 | | Use it when | Files |
 | --- | --- | --- |
-| **Container** | You run services under Docker, Compose, or Kubernetes. This is the way most people should run it. | [`deploy/docker-compose.yml`](https://github.com/vodnik-rs/vodnik/blob/main/deploy/docker-compose.yml), [`deploy/kubernetes/`](https://github.com/vodnik-rs/vodnik/tree/main/deploy/kubernetes) |
-| **Release binary** | You run on a plain Linux host under systemd, or want no container runtime. | [`install.sh`](https://github.com/vodnik-rs/vodnik/blob/main/install.sh), [`deploy/systemd/`](https://github.com/vodnik-rs/vodnik/tree/main/deploy/systemd) |
-| **From source** | You are developing it, or need a platform that has no release build. | `cargo install --git https://github.com/vodnik-rs/vodnik` |
+| **Container** | You run services under Docker, Compose, or Kubernetes. This is the way most people should run it. | [`deploy/docker-compose.yml`](https://github.com/includeamin/vodnik/blob/main/deploy/docker-compose.yml), [`deploy/kubernetes/`](https://github.com/includeamin/vodnik/tree/main/deploy/kubernetes) |
+| **Release binary** | You run on a plain Linux host under systemd, or want no container runtime. | [`install.sh`](https://github.com/includeamin/vodnik/blob/main/install.sh), [`deploy/systemd/`](https://github.com/includeamin/vodnik/tree/main/deploy/systemd) |
+| **From source** | You are developing it, or need a platform that has no release build. | `cargo install --git https://github.com/includeamin/vodnik` |
 
 The container is the recommended route because the image already carries what the binary needs: it is built on Debian to match its minimal, non-root runtime, so it does not depend on which glibc your host has. Release binaries are dynamically linked against glibc, so they will not run on Alpine or very old distributions.
 
@@ -31,7 +31,7 @@ vodnik has **no authentication**, and by default no TLS. Put a reverse proxy or 
 
 ## Container
 
-The image is `ghcr.io/vodnik-rs/vodnik`, for `linux/amd64` and `linux/arm64`. It is tagged `X.Y.Z` and `X.Y` for each release, and `latest` or `preview` according to the release channel. In production, pin it by digest, since a tag can move, and [verify it](releasing.md#verifying-a-release).
+The image is `ghcr.io/includeamin/vodnik`, for `linux/amd64` and `linux/arm64`. It is tagged `X.Y.Z` and `X.Y` for each release, and `latest` or `preview` according to the release channel. In production, pin it by digest, since a tag can move, and [verify it](releasing.md#verifying-a-release).
 
 The image expects two mounts:
 
@@ -44,7 +44,7 @@ It runs as a non-root user, needs no writable path, and works with `--read-only`
 
 ### Docker Compose
 
-[`deploy/docker-compose.yml`](https://github.com/vodnik-rs/vodnik/blob/main/deploy/docker-compose.yml) runs it with the [example configuration](https://github.com/vodnik-rs/vodnik/blob/main/deploy/config/vod.toml) and a `media/` directory next to `deploy/`:
+[`deploy/docker-compose.yml`](https://github.com/includeamin/vodnik/blob/main/deploy/docker-compose.yml) runs it with the [example configuration](https://github.com/includeamin/vodnik/blob/main/deploy/config/vod.toml) and a `media/` directory next to `deploy/`:
 
 ```sh
 mkdir -p media && cp /path/to/some-video.mp4 media/sample.mp4
@@ -56,7 +56,7 @@ Its `stop_grace_period` is longer than the configuration's `shutdown_delay_ms` p
 
 ### Kubernetes
 
-[`deploy/kubernetes/vodnik.yaml`](https://github.com/vodnik-rs/vodnik/blob/main/deploy/kubernetes/vodnik.yaml) is a ConfigMap, a Deployment, a Service, and a PodDisruptionBudget, validated against the Kubernetes 1.30 API schemas. Before you apply it:
+[`deploy/kubernetes/vodnik.yaml`](https://github.com/includeamin/vodnik/blob/main/deploy/kubernetes/vodnik.yaml) is a ConfigMap, a Deployment, a Service, and a PodDisruptionBudget, validated against the Kubernetes 1.30 API schemas. Before you apply it:
 
 - **Media.** It mounts a PersistentVolumeClaim named `vodnik-media`, which you create. Or remove the volume and the `[assets.*]` table and resolve assets through a [mapper](mapper-api.md), which is the usual choice at scale.
 - **Probes.** `/health` is liveness. `/ready` is readiness and also the startup probe, and it turns `503` when shutdown begins, which is what takes a terminating pod out of the Service before its connections close. `terminationGracePeriodSeconds` is longer than the configured drain time.
@@ -68,7 +68,7 @@ Its `stop_grace_period` is longer than the configuration's `shutdown_delay_ms` p
 ### Install the binary
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/vodnik-rs/vodnik/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/includeamin/vodnik/main/install.sh | sh
 ```
 
 Read the script first; it is short. It downloads one release archive and its checksum from GitHub, verifies the checksum, and copies one file into `~/.local/bin` (or `/usr/local/bin` when run as root). It never uses `sudo`. When the `gh` tool is installed it also checks the archive's build provenance, as a warning by default, or as a requirement with `--require-attestation`. Useful options:
@@ -78,11 +78,11 @@ sh install.sh --version v0.4.0 --prefix /usr/local/bin    # pin a release, choos
 sh install.sh --dry-run                                   # show what it would do
 ```
 
-It supports Linux on x86-64 and arm64 and says so plainly anywhere else. To do the same by hand, download the archive from the [releases page](https://github.com/vodnik-rs/vodnik/releases), then follow [Verifying a release](releasing.md#verifying-a-release).
+It supports Linux on x86-64 and arm64 and says so plainly anywhere else. To do the same by hand, download the archive from the [releases page](https://github.com/includeamin/vodnik/releases), then follow [Verifying a release](releasing.md#verifying-a-release).
 
 ### Run it as a service
 
-[`deploy/systemd/vodnik.service`](https://github.com/vodnik-rs/vodnik/blob/main/deploy/systemd/vodnik.service) runs the binary as an unprivileged `vodnik` user with the service sandboxed: no capabilities, a read-only filesystem apart from the media path, private `/tmp` and devices, only network sockets, and no way to gain privileges. `systemd-analyze security` rates the exposure `OK`.
+[`deploy/systemd/vodnik.service`](https://github.com/includeamin/vodnik/blob/main/deploy/systemd/vodnik.service) runs the binary as an unprivileged `vodnik` user with the service sandboxed: no capabilities, a read-only filesystem apart from the media path, private `/tmp` and devices, only network sockets, and no way to gain privileges. `systemd-analyze security` rates the exposure `OK`.
 
 ```sh
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin vodnik

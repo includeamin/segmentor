@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability
-    url: https://github.com/vodnik-rs/vodnik/security/advisories/new
+    url: https://github.com/includeamin/vodnik/security/advisories/new
     about: Please report security problems privately, not as a public issue. See SECURITY.md.
   - name: Ask a question or share how you use it
-    url: https://github.com/vodnik-rs/vodnik/discussions
+    url: https://github.com/includeamin/vodnik/discussions
     about: For usage questions and ideas that are not yet a concrete request.

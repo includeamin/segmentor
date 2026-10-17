@@ -9,7 +9,7 @@
 services:
   vodnik:
     # Use a version tag, and in production pin the image by digest (image@sha256:...).
-    image: ghcr.io/vodnik-rs/vodnik:latest
+    image: ghcr.io/includeamin/vodnik:latest
     ports:
       - "3000:3000"
     volumes:

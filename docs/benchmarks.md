@@ -76,7 +76,7 @@ SERVERS="vodnik nginx-cached" make bench-compare
 
 It also runs on GitHub Actions: the `Benchmarks` workflow, run by hand from the Actions tab with `job: compare`, puts the report in the job summary and the raw results in an artifact. A hosted runner has 4 shared vCPUs, so servers get 2 and k6 the other 2; absolute figures vary from run to run there, but every server in one run is measured on the same machine, so the comparison between them holds.
 
-It needs Docker. Everything lives in [`bench/compare/`](https://github.com/vodnik-rs/vodnik/tree/main/bench/compare):
+It needs Docker. Everything lives in [`bench/compare/`](https://github.com/includeamin/vodnik/tree/main/bench/compare):
 
 - `nginx-vod-module/` builds nginx 1.26.3 with nginx-vod-module 1.33 from their upstream release tarballs. Nothing from nginx-vod-module (AGPL-3.0) is copied into vodnik; it is built and run as a separate program.
 - `vodnik.toml` and `nginx-vod-module/nginx.conf` configure the same work for both (below).

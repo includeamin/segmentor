@@ -90,18 +90,18 @@ Each archive and the image carry evidence of where they were built, so a downloa
 ```sh
 # A release archive: the checksum, then the build provenance from GitHub.
 sha256sum --check vodnik-v0.4.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-gh attestation verify vodnik-v0.4.0-x86_64-unknown-linux-gnu.tar.gz --repo vodnik-rs/vodnik
+gh attestation verify vodnik-v0.4.0-x86_64-unknown-linux-gnu.tar.gz --repo includeamin/vodnik
 
 # The container image: the keyless signature, which names this repository's workflow.
-cosign verify ghcr.io/vodnik-rs/vodnik:0.4.0 \
-  --certificate-identity-regexp '^https://github.com/vodnik-rs/vodnik/\.github/workflows/' \
+cosign verify ghcr.io/includeamin/vodnik:0.4.0 \
+  --certificate-identity-regexp '^https://github.com/includeamin/vodnik/\.github/workflows/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
 # Or the GitHub attestation of the image.
-gh attestation verify oci://ghcr.io/vodnik-rs/vodnik:0.4.0 --repo vodnik-rs/vodnik
+gh attestation verify oci://ghcr.io/includeamin/vodnik:0.4.0 --repo includeamin/vodnik
 ```
 
-Pin the image by digest (`ghcr.io/vodnik-rs/vodnik@sha256:...`) in anything that matters, since a tag can move.
+Pin the image by digest (`ghcr.io/includeamin/vodnik@sha256:...`) in anything that matters, since a tag can move.
 
 ## Before the first release from a new repository
 

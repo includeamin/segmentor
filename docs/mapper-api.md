@@ -477,9 +477,9 @@ The server keeps one loaded copy per asset, keyed by `(asset_id, version)`. A di
 
 ## Try it
 
-[`examples/mapper/`](https://github.com/vodnik-rs/vodnik/tree/main/examples/mapper) is a
+[`examples/mapper/`](https://github.com/includeamin/vodnik/tree/main/examples/mapper) is a
 runnable version of the mapper below, and
-[`docker-compose.dev.yml`](https://github.com/vodnik-rs/vodnik/blob/main/docker-compose.dev.yml)
+[`docker-compose.dev.yml`](https://github.com/includeamin/vodnik/blob/main/docker-compose.dev.yml)
 at the repository root wires it up to vodnik and to the [demo player](../demo/) and
 [control panel](../admin/) with one command:
 
