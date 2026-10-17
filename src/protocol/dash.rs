@@ -72,7 +72,48 @@ pub(crate) fn manifest(presentation: Presentation<'_>) -> Result<String> {
 /// `id` is the `Representation`'s id and, via `$RepresentationID$` in its `SegmentTemplate`, the
 /// path segment its init and media URLs are served under. For a plain asset that is the track's
 /// own key (`video`); for one video rendition of an adaptive asset it is `video-{rendition id}`.
+///
+/// This writes a set of one rendition. Renditions a player should switch between share a set: open
+/// it with [`open_video_adaptation`], write each with [`write_video_representation`], and close it
+/// with [`close_adaptation`]. Separate sets are alternative tracks, which a player does not
+/// switch between.
 pub(crate) fn write_video_adaptation(
+    manifest: &mut String,
+    presentation: Presentation<'_>,
+    track: &Track,
+    version: &str,
+    id: &str,
+    addressing: Addressing,
+) -> Result<()> {
+    open_video_adaptation(manifest, presentation, track);
+    write_video_representation(manifest, presentation, track, version, id, addressing)?;
+    close_adaptation(manifest);
+    Ok(())
+}
+
+/// Opens the one video `AdaptationSet` of a period. Its `ContentProtection` is read from
+/// `presentation` and `track`, which stand for every rendition in the set: renditions of an asset
+/// are encrypted alike.
+pub(crate) fn open_video_adaptation(
+    manifest: &mut String,
+    presentation: Presentation<'_>,
+    track: &Track,
+) {
+    writeln!(
+        manifest,
+        "    <AdaptationSet contentType=\"video\" segmentAlignment=\"true\" startWithSAP=\"1\">"
+    )
+    .expect("writing to a String cannot fail");
+    if let Some(encryption) = presentation.encryption() {
+        manifest.push_str(&crate::cenc::dash_content_protection(
+            encryption,
+            encryption.key_for(track.kind),
+        ));
+    }
+}
+
+/// One rendition inside a video set opened by [`open_video_adaptation`].
+pub(crate) fn write_video_representation(
     manifest: &mut String,
     presentation: Presentation<'_>,
     track: &Track,
@@ -85,22 +126,16 @@ pub(crate) fn write_video_adaptation(
         .dimensions()
         .ok_or_else(|| Error::InvalidMedia("video track has no dimensions".to_owned()))?;
     let codec = track.codec.codecs();
-    writeln!(
-        manifest,
-        "    <AdaptationSet contentType=\"video\" segmentAlignment=\"true\" startWithSAP=\"1\">"
-    )
-    .expect("writing to a String cannot fail");
-    if let Some(encryption) = presentation.encryption() {
-        manifest.push_str(&crate::cenc::dash_content_protection(
-            encryption,
-            encryption.key_for(track.kind),
-        ));
-    }
     writeln!(manifest, "      <Representation id=\"{id}\" bandwidth=\"{}\" codecs=\"{codec}\" mimeType=\"video/mp4\" width=\"{width}\" height=\"{height}\">", presentation.bandwidth(track)?.peak)
         .expect("writing to a String cannot fail");
     write_segment_template(manifest, presentation, track, version, addressing);
-    manifest.push_str("      </Representation>\n    </AdaptationSet>\n");
+    manifest.push_str("      </Representation>\n");
     Ok(())
+}
+
+/// Closes an `AdaptationSet` opened by [`open_video_adaptation`].
+pub(crate) fn close_adaptation(manifest: &mut String) {
+    manifest.push_str("    </AdaptationSet>\n");
 }
 
 /// Text as the content of an XML element or the value of an attribute.
@@ -315,12 +350,15 @@ pub(crate) fn adaptive_sequence_manifest(
             nanos_as_seconds(ordered[0].clips[position].start_nanos)
         )
         .expect("writing to a String cannot fail");
-        for entry in &ordered {
+        for (index, entry) in ordered.iter().enumerate() {
             let clip = &entry.clips[position];
             let track = clip.presentation.video().ok_or_else(|| {
                 Error::InvalidMedia(format!("rendition `{}` has no video track", entry.id))
             })?;
-            write_video_adaptation(
+            if index == 0 {
+                open_video_adaptation(&mut manifest, clip.presentation, track);
+            }
+            write_video_representation(
                 &mut manifest,
                 clip.presentation,
                 track,
@@ -329,6 +367,7 @@ pub(crate) fn adaptive_sequence_manifest(
                 clip_addressing(clip, position, track)?,
             )?;
         }
+        close_adaptation(&mut manifest);
         for member in audio {
             let clip = &member.clips[position];
             let track = clip.presentation.track(member.internal_key)?;

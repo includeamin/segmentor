@@ -935,8 +935,8 @@ fn build_views<'a>(
     Ok((video_views, audio_views))
 }
 
-/// The DASH `Period` body: one adaptation set per video rendition, one per shared-audio member,
-/// and one per subtitle.
+/// The DASH `Period` body: one adaptation set holding every video rendition, one per
+/// shared-audio member, and one per subtitle.
 fn render_dash_body(
     video_views: &[VideoView<'_>],
     audio: &[AudioEntry],
@@ -947,8 +947,11 @@ fn render_dash_body(
     version: &str,
 ) -> Result<String> {
     let mut body = String::new();
-    for (entry, presentation, track, _) in video_views {
-        dash::write_video_adaptation(
+    for (index, (entry, presentation, track, _)) in video_views.iter().enumerate() {
+        if index == 0 {
+            dash::open_video_adaptation(&mut body, *presentation, track);
+        }
+        dash::write_video_representation(
             &mut body,
             *presentation,
             track,
@@ -956,6 +959,9 @@ fn render_dash_body(
             &format!("video-{}", entry.id),
             dash::Addressing::PLAIN,
         )?;
+    }
+    if !video_views.is_empty() {
+        dash::close_adaptation(&mut body);
     }
     for (entry, &(key, track)) in audio.iter().zip(audio_views) {
         dash::write_audio_adaptation(

@@ -48,8 +48,12 @@ window.harness = {
       hls.attachMedia(video);
     } else {
       dash = dashjs.MediaPlayer().create();
-      // A spec that forces a rendition must not have the player's ABR move it back.
-      dash.updateSettings({ streaming: { abr: { autoSwitchBitrate: { video: false } } } });
+      // A spec that forces a rendition must not have the player's ABR move it back, and the first
+      // segments come from the rendition asked for: with ABR off dash.js starts on the one nearest
+      // its initial bitrate. The buffer is
+      // kept short because the assets last a few seconds: dash.js replaces only what is within its
+      // buffer target on a switch, and its default target would hold the whole asset at once.
+      dash.updateSettings({ streaming: { abr: { autoSwitchBitrate: { video: false }, initialBitrate: { video: start === 'highest' ? 100000 : 1 } }, buffer: { bufferTimeDefault: 1.5, bufferTimeAtTopQuality: 1.5, bufferTimeAtTopQualityLongForm: 1.5, fastSwitchEnabled: true } } });
       dash.on('error', (event) => errors.push(`dash.js ${JSON.stringify(event.error)}`));
       dash.on('playbackEnded', () => {
         everEnded = true;
