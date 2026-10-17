@@ -2,7 +2,7 @@
 
 **On-demand HLS and DASH packaging for MP4 files, in Rust.**
 
-[![CI](https://github.com/vodnik-rs/vodnik/actions/workflows/ci.yml/badge.svg)](https://github.com/vodnik-rs/vodnik/actions/workflows/ci.yml)
+[![CI](https://github.com/includeamin/vodnik/actions/workflows/ci.yml/badge.svg)](https://github.com/includeamin/vodnik/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 vodnik is an HTTP origin. Point it at MP4 files, on disk or on an HTTP origin that a small
@@ -63,7 +63,7 @@ project's own documentation for what it supports today; this table is a rough gu
 ## Quick start
 
 ```sh
-git clone https://github.com/vodnik-rs/vodnik
+git clone https://github.com/includeamin/vodnik
 cd vodnik
 make serve        # serves tests/fixtures/h264-aac.mp4 as the asset "sample" on :3000
 ```
@@ -86,19 +86,19 @@ ffplay http://127.0.0.1:3000/hls/sample/master.m3u8
 
 ## Install
 
-- **Release binaries.** Each [GitHub release](https://github.com/vodnik-rs/vodnik/releases)
+- **Release binaries.** Each [GitHub release](https://github.com/includeamin/vodnik/releases)
   attaches Linux binaries for x86-64 and arm64 with checksums and build attestations.
   [`install.sh`](install.sh) downloads one, verifies its checksum, and copies it into place
  ).
-- **Container image.** `ghcr.io/vodnik-rs/vodnik`, for the same architectures:
+- **Container image.** `ghcr.io/includeamin/vodnik`, for the same architectures:
 
   ```sh
   docker run --rm -p 3000:3000 --read-only --cap-drop=ALL \
     -v "$PWD/vod.toml:/etc/vod/vod.toml:ro" -v "$PWD/media:/srv/vod:ro" \
-    ghcr.io/vodnik-rs/vodnik:latest
+    ghcr.io/includeamin/vodnik:latest
   ```
 
-- **From source.** `cargo install --git https://github.com/vodnik-rs/vodnik`, which needs a
+- **From source.** `cargo install --git https://github.com/includeamin/vodnik`, which needs a
   recent stable Rust toolchain and a C compiler.
 
 See [Deploying](docs/deployment.md) for Compose, Kubernetes and systemd files, and

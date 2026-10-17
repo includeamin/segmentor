@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs a vodnik release binary for Linux (x86-64 or arm64).
 #
-#   curl -fsSL https://raw.githubusercontent.com/vodnik-rs/vodnik/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/includeamin/vodnik/main/install.sh | sh
 #   sh install.sh --version v0.4.0 --prefix /usr/local/bin
 #
 # Read it before you run it: it is short. It downloads one release archive and its checksum from
@@ -13,7 +13,7 @@
 # service manager: see docs/deployment.md, or use the container image instead.
 set -eu
 
-REPO="vodnik-rs/vodnik"
+REPO="includeamin/vodnik"
 # These can be overridden, which is how the script is tested against a local directory.
 DOWNLOAD_BASE="${VODNIK_DOWNLOAD_BASE:-https://github.com/$REPO/releases/download}"
 LATEST_URL="${VODNIK_LATEST_URL:-https://github.com/$REPO/releases/latest}"

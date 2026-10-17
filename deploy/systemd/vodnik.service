@@ -9,7 +9,7 @@
 # Logs go to the journal: `journalctl -u vodnik -f`.
 [Unit]
 Description=vodnik on-demand HLS and DASH origin
-Documentation=https://github.com/vodnik-rs/vodnik
+Documentation=https://github.com/includeamin/vodnik
 After=network-online.target
 Wants=network-online.target
 
